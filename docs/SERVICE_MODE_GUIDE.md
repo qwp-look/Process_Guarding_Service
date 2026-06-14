@@ -1,0 +1,341 @@
+# PGS 服务模式使用说明
+
+## 1. 作用范围
+
+本仓库仅保留 `PGS + pgs_service` 主线：
+
+- 服务核心：`src/service/PGS.cpp`
+- 服务入口：`src/service/pgs_service.cpp`
+- 运维工具：`tools/pgs_bless.cpp`
+- Qt 管理端：`qt/pgs_admin_qt`
+- 浏览器控制端：`qt/pgs_admin_web`
+
+## 2. MSYS2 MinGW64 编译命令（C++）
+
+在 `MSYS2 MinGW64` 终端执行：
+
+```bash
+cd /c/Users/wtg/Desktop/other/MY-code/process_protect
+mkdir -p build
+
+export PATH=/mingw64/bin:/usr/bin
+hash -r
+
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/common/PGLogger.cpp -o build/PGLogger.o
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/PGS.cpp -o build/PGS.o
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/pgs_service.cpp -o build/pgs_service.o
+g++ -std=c++17 -Wall -Wextra -O2 \
+  build/PGLogger.o build/PGS.o build/pgs_service.o \
+  -o build/pgs_service.exe \
+  -lws2_32 -ladvapi32 -lwtsapi32 -luserenv
+
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude tools/pgs_bless.cpp -o build/pgs_bless.exe -lws2_32
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/guard_example.cpp -o build/guard_example.exe -lws2_32
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/quick_start.cpp -o build/quick_start.exe -lws2_32
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/smoke_worker.cpp -o build/smoke_worker.exe -lws2_32
+
+# 复制 MinGW 运行库到 C++ 可执行目录（build/）
+cp -f /mingw64/bin/libstdc++-6.dll build/
+cp -f /mingw64/bin/libgcc_s_seh-1.dll build/
+cp -f /mingw64/bin/libwinpthread-1.dll build/
+```
+
+也可以直接执行仓库脚本：
+
+```bash
+./tools/build_pgs.sh
+```
+
+## 3. MSYS2 MinGW64 编译命令（Qt）
+
+在 `MSYS2 MinGW64` 终端执行：
+
+```bash
+cd /c/Users/wtg/Desktop/other/MY-code/process_protect
+rm -rf build/pgs_admin_qt
+
+cmake -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH=/mingw64 \
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+
+cmake --build build/pgs_admin_qt -j4
+
+# Qt 依赖部署 + 复制 MinGW 运行库到 Qt 可执行目录
+/mingw64/bin/windeployqt-qt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
+cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
+cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
+cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
+```
+
+## 3.1 编译验证与烟测
+
+推荐优先使用：
+
+```bash
+./tools/verify_pgs.sh
+```
+
+这个脚本会顺序执行：
+
+- 主线文件存在性检查
+- C++ 主线编译
+- 控制台 `run` 模式烟测
+- Qt 桌面端配置与编译
+- 浏览器控制端配置与编译
+
+如果当前机器已有其它 PGS 占用默认端口，只想跳过烟测，可使用：
+
+```bash
+PGS_SKIP_SMOKE=1 ./tools/verify_pgs.sh
+```
+
+## 4. 服务管理命令（管理员权限）
+
+```bash
+./build/pgs_service.exe install
+./build/pgs_service.exe start
+./build/pgs_service.exe status
+./build/pgs_service.exe stop
+./build/pgs_service.exe uninstall
+```
+
+说明：
+
+- `install` 现在不只是创建服务项，也会同时配置 Windows SCM 的失败恢复动作。
+- 如果服务因为崩溃或异常退出而失败，SCM 会按预设延迟自动尝试重启它。
+- 这属于系统级“守护服务自身”的方案，比在同一进程里自监控更可靠。
+- PGS 还会把守护集合和 token hash 一起归档，服务被恢复后会先读档再重建守护状态。
+
+### 示例程序连接说明
+
+`guard_example` 和 `quick_start` 现在支持 `--token`。当 PGS 不是空 token 时，示例程序也必须带同一 token：
+
+```bash
+./build/guard_example.exe --token your-secret-token --max-restarts 3
+./build/quick_start.exe --logic --token your-secret-token --max-restarts 3
+```
+
+## 4.1 Token 鉴权配置（包含 Windows 服务模式）
+
+PGS 当前 token 规则：
+
+- 默认始终开启鉴权（服务模式/非服务模式一致）
+- token 仅以哈希形式持久化，不保存 token 明文
+- token hash 会跟随守护归档一起恢复
+- 若本次启动未显式提供 token，则优先从归档恢复；只有首次启动且没有旧归档时，才回落为空 token（仍然鉴权）
+
+### 控制台运行模式
+
+可在启动时设置/更新 token：
+
+```bash
+./build/pgs_service.exe run --token your-secret-token
+```
+
+若当前启动显式指定了 token，它会覆盖归档里的旧 token hash；若本次启动没有显式指定，则会优先尝试从归档恢复。
+
+当前控制台 `run` 模式也补上了 `Ctrl+C / CTRL_CLOSE_EVENT` 的优雅停服处理，方便本地调试和烟测收尾。
+
+### Windows 服务模式
+
+安装并启动服务：
+
+```bash
+./build/pgs_service.exe install
+./build/pgs_service.exe start
+```
+
+服务由 SCM 恢复后，会先读取守护归档和 token hash 再恢复现场。只有首次启动且此前没有旧归档时，默认 token 才是空 token。要切换 token，使用 `token-set` 命令。
+
+### 客户端携带 token
+
+方式 1：显式参数
+
+```bash
+./build/pgs_bless.exe ping --token your-secret-token
+./build/pgs_bless.exe list --token your-secret-token
+```
+
+Qt 管理端：
+
+- 在 token 输入框填写 token，界面会自动附加到每条命令。
+- 在“新 token”输入框填写新值，点击“更新 Token”会执行 `token-set`。
+
+### 更新 token（先验证旧 token）
+
+```bash
+./build/pgs_bless.exe token-set --old-token old-token --new-token new-token --token old-token
+```
+
+说明：
+
+- 只有旧 token 验证通过，才会更新为新 token
+- 只保存 token hash，不保存 token 明文
+- 服务重启后会从归档恢复当前 token hash
+- 当前默认归档位置通常是 `C:\ProgramData\ProcessGuard\state\pgs_guard_state.db`
+
+### 生效验证
+
+```bash
+./build/pgs_bless.exe ping
+# 空 token 已启用时可成功；否则会返回 ERR auth failed or token missing
+
+./build/pgs_bless.exe ping --token your-secret-token
+# 应成功：OK pong
+```
+
+## 5. 常用运维命令
+
+```bash
+./build/pgs_bless.exe ping
+./build/pgs_bless.exe list
+./build/pgs_bless.exe bless --pid 1234 --max-restarts 3 --hash auto
+./build/pgs_bless.exe bless-start --path "C:/程序/示例.exe" --start-args "--mode worker" --max-restarts 3 --hash auto
+./build/pgs_bless.exe bless-start --command "\"C:/程序/示例.exe\" --mode worker --safe" --max-restarts 3 --hash auto
+./build/pgs_bless.exe unbless-path --path "C:/程序/示例.exe"
+./build/pgs_bless.exe token-set --old-token old-token --new-token new-token --token old-token
+./build/pgs_bless.exe policy --pid 1234 --max-restarts no
+./build/pgs_bless.exe unbless --pid 1234
+./build/pgs_bless.exe get --pid 1234 --json
+```
+
+这些命令的用途如下：
+
+- `./build/pgs_bless.exe ping`  
+  用于检查 PGS 服务是否在线、端口与协议是否可达。
+
+- `./build/pgs_bless.exe list`  
+  列出所有已注册守护目标，包含 PID、路径、重启策略、重启计数、hash 信息等。
+
+- `./build/pgs_bless.exe bless --pid 1234 --max-restarts 3 --hash auto`  
+  将目标进程注册为守护对象；当进程异常退出时，最多自动重启 3 次；`--hash auto` 会自动计算并上报文件 hash 用于一致性校验。
+
+- `./build/pgs_bless.exe bless-start --path "C:/程序/示例.exe" --start-args "--mode worker" --max-restarts 3 --hash auto`  
+  按路径直接启动程序并自动注册守护；适合第三方进程未先运行时的一键接管场景。  
+  该命令使用宽字符启动路径处理，支持中文路径。
+  当前实现会先“挂起启动”，待 PGS 注册成功后再恢复主线程，从而尽量避免“进程已启动但未纳管”的窗口。  
+  如果未显式指定 `--restart-args`，默认会把 `--start-args` 写入 PGS，后续重启沿用。
+
+- `./build/pgs_bless.exe bless-start --command "\"C:/程序/示例.exe\" --mode worker --safe" --max-restarts 3 --hash auto`  
+  按“自定义完整命令”启动并自动注册守护。  
+  如果未显式指定 `--restart-args`，默认会把该命令中的参数部分写入 PGS，后续重启沿用。
+
+- `./build/pgs_bless.exe policy --pid 1234 --max-restarts no`  
+  在线更新指定进程的重启策略，这里表示“无限重启”。
+
+- `./build/pgs_bless.exe unbless --pid 1234`  
+  取消该 PID 的守护，PGS 后续不再监控和拉起该进程。
+
+- `./build/pgs_bless.exe get --pid 1234 --json`  
+  查询单个守护目标详情，并以 JSON 输出，适合自动化脚本或外部系统解析。
+
+- `./build/pgs_bless.exe unbless-path --path "C:/程序/示例.exe"`  
+  按路径取消守护。若同一路径有多个被守护 PID，会批量取消。
+
+- `./build/pgs_bless.exe token-set --old-token old-token --new-token new-token --token old-token`  
+  先校验旧 token，再更新为新 token，并立即把 token hash 写回归档。
+
+## 5.1 Qt 管理端对应功能
+
+`pgs_admin_qt` 已提供下列 GUI 操作：
+
+- 三标签页结构：
+  - `守护管理 / Bless Console`：调用 `pgs_bless.exe`
+  - `服务管理 / Service Console`：调用 `pgs_service.exe`
+  - `守护表格 / Guard Table`：调用 `pgs_bless list --json` 并展示为表格
+- 守护管理页：
+  - `路径启动并守护`（`Start + Bless`）：对应 `bless-start`。
+    可填“启动路径 + 启动参数”，也可直接填“自定义启动命令”。
+  - `按 PID 守护`（`Bless PID`）：对应 `bless --pid ...`。
+  - `取消守护`（`Unbless`）：当“启动路径”不为空时按路径取消（`unbless-path`）；否则按 PID 取消（`unbless --pid`）。
+  - `更新 Token`（`Set Token`）：对应 `token-set`。
+- 服务管理页：
+  - `Install/Status/Start/Stop/Uninstall/Run Console`：分别对应 `pgs_service` 同名命令。
+  - `Reset Service`：顺序执行 `stop -> uninstall -> install -> start`。
+- 守护表格页：
+  - `Refresh`：拉取最新守护列表并表格展示。
+  - 字段包含：`PID/Path/Hash/Restarts/Max/Alive/Session/HashVerified`。
+  - 自动刷新默认改为 `1000 ms`，并且自动刷新时不再每轮重排列表宽。
+- 两页日志窗口独立，均支持 `Clear Log`。
+- `语言切换`：可在 `中文 / English` 之间切换界面文案。
+
+补充说明：
+
+- Qt 桌面端现在只保留本地运维壳层职责。
+- 真正的浏览器控制端由 `pgs_admin_web` 单独承担，见 `docs/WEB_CONTROL_CONSOLE_PLAN.md`。
+
+## 5.2 浏览器控制端
+
+`pgs_admin_web` 是独立 Web 管理进程，不直接嵌在 Qt 桌面端里。
+
+手动编译：
+
+```bash
+cmake -S qt/pgs_admin_web -B build/pgs_admin_web -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH=/mingw64 \
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+
+cmake --build build/pgs_admin_web -j4
+```
+
+运行示例：
+
+```bash
+./build/pgs_admin_web/pgs_admin_web.exe --bind 127.0.0.1 --http-port 18080 --pgs-token your-secret-token
+```
+
+特点：
+
+- 浏览器访问 `http://127.0.0.1:18080`
+- Web 后端复用现有 `pgs_bless.exe` / `pgs_service.exe`
+- 当前提供守护列表、守护操作、token 更新、服务管理等能力
+- 当前第一阶段优先复用 CLI 工具链，后续可以继续抽公共 `PGSClient` 层
+
+## 5.2 `pgs_bless` 参数详解
+
+通用参数：
+
+- `--host <ip>`：PGS 地址，默认 `127.0.0.1`
+- `--port <port>`：PGS 端口，默认 `12345`
+- `--token <value>`：鉴权 token（服务端始终开启鉴权，客户端建议显式传）
+- `--old-token <value>`：仅 `token-set`，旧 token（不传时默认等于 `--token`）
+- `--new-token <value>`：仅 `token-set`，新 token
+- `--json`：`list/get` 输出 JSON
+
+守护注册参数：
+
+- `--pid <pid>`：`bless` 目标 PID
+- `--path <exe>`：`bless-start` 必需；`bless` 中可覆盖自动探测路径
+- `--start-args "..."`：仅 `bless-start`，用于首次启动参数
+- `--command "..."`：仅 `bless-start`，完整启动命令（与 `--path` 互斥）
+- `--max-restarts N|no`：最大异常重启次数；`no` 表示无限重启
+- `--restart-args "..."`：PGS 重启时使用的参数
+- `--hash auto|none|HEX`：文件 hash 策略（自动、关闭、自定义）
+
+命令与必需参数对照：
+
+- `bless`：`--pid`
+- `bless-start`：`--path`
+- `bless-start`：`--path` 或 `--command`（二选一）
+- `policy`：`--pid --max-restarts`
+- `unbless`：`--pid`
+- `unbless-path`：`--path`
+- `intentional`：`--pid`
+- `get`：`--pid`
+
+## 6. 运行时 DLL 要求
+
+请优先使用 `/mingw64/bin` 同版本运行库，核心 DLL：
+
+- `libstdc++-6.dll`
+- `libgcc_s_seh-1.dll`
+- `libwinpthread-1.dll`
+
+Qt 程序建议部署：
+
+```bash
+/mingw64/bin/windeployqt-qt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
+cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
+cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
+cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
+```

@@ -1,0 +1,1531 @@
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <winternl.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#ifdef _MSC_VER
+#pragma comment(lib, "ws2_32.lib")
+#endif
+
+namespace
+{
+const std::string kBase64Chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789+/";
+
+constexpr std::uint64_t kFnvOffset = 1469598103934665603ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+constexpr DWORD kSocketTimeoutMs = 3000;
+
+struct ParsedSummary
+{
+    std::unordered_map<std::string, std::string> kv;
+};
+
+struct LaunchResult
+{
+    // bless-start launches suspended first, so we must carry both handles until
+    // registration succeeds and the primary thread is resumed.
+    DWORD pid = 0;
+    std::string pathUtf8;
+    std::string startArgsUtf8;
+    HANDLE processHandle = nullptr;
+    HANDLE threadHandle = nullptr;
+};
+
+constexpr ULONG kProcessCommandLineInformationClass = 60;
+
+std::string trim(std::string value)
+{
+    auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [&](unsigned char c) { return !isSpace(c); }));
+    value.erase(std::find_if(value.rbegin(), value.rend(), [&](unsigned char c) { return !isSpace(c); }).base(), value.end());
+    return value;
+}
+
+std::wstring narrowToWideBestEffort(const std::string &input)
+{
+    if (input.empty())
+    {
+        return std::wstring();
+    }
+
+    auto convert = [&](UINT codePage) -> std::wstring {
+        const int needed = MultiByteToWideChar(codePage, 0, input.c_str(), -1, nullptr, 0);
+        if (needed <= 0)
+        {
+            return std::wstring();
+        }
+        std::wstring out(static_cast<std::size_t>(needed), L'\0');
+        if (MultiByteToWideChar(codePage, 0, input.c_str(), -1, &out[0], needed) <= 0)
+        {
+            return std::wstring();
+        }
+        if (!out.empty() && out.back() == L'\0')
+        {
+            out.pop_back();
+        }
+        return out;
+    };
+
+    std::wstring utf8 = convert(CP_UTF8);
+    if (!utf8.empty())
+    {
+        return utf8;
+    }
+
+    std::wstring acp = convert(CP_ACP);
+    if (!acp.empty())
+    {
+        return acp;
+    }
+
+    return std::wstring(input.begin(), input.end());
+}
+
+std::string wideToUtf8(const std::wstring &input)
+{
+    if (input.empty())
+    {
+        return std::string();
+    }
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (needed <= 0)
+    {
+        return std::string();
+    }
+    std::string out(static_cast<std::size_t>(needed), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, &out[0], needed, nullptr, nullptr) <= 0)
+    {
+        return std::string();
+    }
+    if (!out.empty() && out.back() == '\0')
+    {
+        out.pop_back();
+    }
+    return out;
+}
+
+std::string win32ErrorText(DWORD code)
+{
+    LPWSTR msgBuf = nullptr;
+    const DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+    const DWORD len = FormatMessageW(flags, nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                                     reinterpret_cast<LPWSTR>(&msgBuf), 0, nullptr);
+    std::wstring msgW;
+    if (len > 0 && msgBuf)
+    {
+        msgW.assign(msgBuf, msgBuf + len);
+        LocalFree(msgBuf);
+    }
+    std::string msg = trim(wideToUtf8(msgW));
+    if (msg.empty())
+    {
+        msg = "Unknown error";
+    }
+    return "error=" + std::to_string(code) + " (" + msg + ")";
+}
+
+std::wstring normalizePathForCompare(const std::wstring &pathInput)
+{
+    if (pathInput.empty())
+    {
+        return std::wstring();
+    }
+    std::vector<wchar_t> fullPathBuf(32768, L'\0');
+    DWORD fullLen = GetFullPathNameW(pathInput.c_str(), static_cast<DWORD>(fullPathBuf.size()), fullPathBuf.data(), nullptr);
+    if (fullLen == 0 || fullLen >= fullPathBuf.size())
+    {
+        return std::wstring();
+    }
+    std::wstring path(fullPathBuf.data(), fullLen);
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    std::transform(path.begin(), path.end(), path.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(towlower(ch));
+    });
+    return path;
+}
+
+std::string base64Encode(const std::string &input)
+{
+    std::string output;
+    int val = 0;
+    int valb = -6;
+    for (unsigned char c : input)
+    {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0)
+        {
+            output.push_back(kBase64Chars[(val >> valb) & 0x3F]);
+            valb -= 6;
+        }
+    }
+    if (valb > -6)
+    {
+        output.push_back(kBase64Chars[((val << 8) >> (valb + 8)) & 0x3F]);
+    }
+    while (output.size() % 4 != 0)
+    {
+        output.push_back('=');
+    }
+    return output;
+}
+
+std::string base64Decode(const std::string &input)
+{
+    std::string output;
+    int val = 0;
+    int valb = -8;
+    for (unsigned char c : input)
+    {
+        if (c == '=')
+        {
+            break;
+        }
+        const auto index = kBase64Chars.find(c);
+        if (index == std::string::npos)
+        {
+            break;
+        }
+        val = (val << 6) + static_cast<int>(index);
+        valb += 6;
+        if (valb >= 0)
+        {
+            output.push_back(static_cast<char>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return output;
+}
+
+bool parsePid(const std::string &text, DWORD &pid)
+{
+    const std::string value = trim(text);
+    if (value.empty())
+    {
+        return false;
+    }
+    for (char c : value)
+    {
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+    }
+    try
+    {
+        pid = static_cast<DWORD>(std::stoul(value));
+        return pid != 0;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool parseMaxRestarts(const std::string &value, int &outMaxRestarts)
+{
+    if (value == "no")
+    {
+        outMaxRestarts = -1;
+        return true;
+    }
+    if (value.empty())
+    {
+        return false;
+    }
+    for (char c : value)
+    {
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+    }
+    try
+    {
+        outMaxRestarts = std::stoi(value);
+        return outMaxRestarts >= 0;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+std::string maxRestartsLabel(int maxRestarts)
+{
+    return maxRestarts < 0 ? "no" : std::to_string(maxRestarts);
+}
+
+bool queryProcessPath(DWORD pid, std::string &pathOut)
+{
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process)
+    {
+        return false;
+    }
+
+    std::vector<wchar_t> buffer(MAX_PATH * 8, L'\0');
+    DWORD size = static_cast<DWORD>(buffer.size());
+    const BOOL ok = QueryFullProcessImageNameW(process, 0, buffer.data(), &size);
+    CloseHandle(process);
+    if (!ok || size == 0)
+    {
+        return false;
+    }
+
+    pathOut = wideToUtf8(std::wstring(buffer.data(), buffer.data() + size));
+    return !pathOut.empty();
+}
+
+bool computeFileHash(const std::string &pathUtf8, std::string &outHash)
+{
+    const std::wstring pathW = narrowToWideBestEffort(pathUtf8);
+    HANDLE file = CreateFileW(pathW.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    std::uint64_t hash = kFnvOffset;
+    char buffer[8192];
+    DWORD readBytes = 0;
+    while (ReadFile(file, buffer, static_cast<DWORD>(sizeof(buffer)), &readBytes, nullptr) && readBytes > 0)
+    {
+        for (DWORD i = 0; i < readBytes; ++i)
+        {
+            const unsigned char byte = static_cast<unsigned char>(buffer[i]);
+            hash ^= byte;
+            hash *= kFnvPrime;
+        }
+    }
+    CloseHandle(file);
+
+    std::ostringstream oss;
+    oss << std::hex << std::nouppercase << std::setw(16) << std::setfill('0') << hash;
+    outHash = oss.str();
+    return true;
+}
+
+std::wstring parentDirectory(const std::wstring &path)
+{
+    const std::size_t pos = path.find_last_of(L"\\/");
+    if (pos == std::wstring::npos)
+    {
+        return std::wstring();
+    }
+    return path.substr(0, pos);
+}
+
+std::wstring quoteArgW(const std::wstring &arg)
+{
+    if (arg.empty())
+    {
+        return L"\"\"";
+    }
+
+    bool needQuotes = false;
+    for (wchar_t ch : arg)
+    {
+        if (ch == L' ' || ch == L'\t' || ch == L'"')
+        {
+            needQuotes = true;
+            break;
+        }
+    }
+    if (!needQuotes)
+    {
+        return arg;
+    }
+
+    std::wstring out = L"\"";
+    int backslashes = 0;
+    for (wchar_t ch : arg)
+    {
+        if (ch == L'\\')
+        {
+            ++backslashes;
+            continue;
+        }
+        if (ch == L'"')
+        {
+            out.append(backslashes * 2 + 1, L'\\');
+            out.push_back(L'"');
+            backslashes = 0;
+            continue;
+        }
+        if (backslashes > 0)
+        {
+            out.append(backslashes, L'\\');
+            backslashes = 0;
+        }
+        out.push_back(ch);
+    }
+    if (backslashes > 0)
+    {
+        out.append(backslashes * 2, L'\\');
+    }
+    out.push_back(L'"');
+    return out;
+}
+
+bool splitLaunchCommand(
+    const std::string &commandInput,
+    std::wstring &outExeW,
+    std::wstring &outArgsW,
+    std::string &outError)
+{
+    const std::wstring commandW = narrowToWideBestEffort(commandInput);
+    if (commandW.empty())
+    {
+        outError = "command is empty";
+        return false;
+    }
+
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(commandW.c_str(), &argc);
+    if (!argv || argc <= 0)
+    {
+        outError = "CommandLineToArgvW failed";
+        if (argv)
+        {
+            LocalFree(argv);
+        }
+        return false;
+    }
+
+    outExeW = argv[0];
+    std::wstring args;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (!args.empty())
+        {
+            args.push_back(L' ');
+        }
+        args += quoteArgW(argv[i]);
+    }
+    outArgsW = args;
+    LocalFree(argv);
+    return true;
+}
+
+bool queryProcessCommandLineArgs(DWORD pid, std::string &outArgsUtf8)
+{
+    outArgsUtf8.clear();
+
+    // Best effort only:
+    // - some system processes will refuse inspection
+    // - older Windows versions may not expose this information uniformly
+    //
+    // When this fails we simply fall back to empty restart args instead of
+    // aborting a normal bless operation.
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process)
+    {
+        return false;
+    }
+
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll)
+    {
+        CloseHandle(process);
+        return false;
+    }
+
+    using NtQueryInformationProcessFn = LONG(WINAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    const FARPROC queryProc = GetProcAddress(ntdll, "NtQueryInformationProcess");
+    NtQueryInformationProcessFn ntQueryInformationProcess = nullptr;
+    static_assert(sizeof(ntQueryInformationProcess) == sizeof(queryProc));
+    std::memcpy(&ntQueryInformationProcess, &queryProc, sizeof(queryProc));
+    if (!ntQueryInformationProcess)
+    {
+        CloseHandle(process);
+        return false;
+    }
+
+    ULONG needed = 0;
+    LONG status = ntQueryInformationProcess(process, kProcessCommandLineInformationClass, nullptr, 0, &needed);
+    if (needed == 0 && status >= 0)
+    {
+        CloseHandle(process);
+        return false;
+    }
+
+    std::vector<unsigned char> buffer(needed);
+    status = ntQueryInformationProcess(process, kProcessCommandLineInformationClass, buffer.data(), needed, &needed);
+    CloseHandle(process);
+    if (status < 0 || buffer.size() < sizeof(UNICODE_STRING))
+    {
+        return false;
+    }
+
+    const auto *commandLine = reinterpret_cast<const UNICODE_STRING *>(buffer.data());
+    if (!commandLine->Buffer || commandLine->Length == 0)
+    {
+        return true;
+    }
+
+    const std::wstring fullCommandLine(commandLine->Buffer, commandLine->Length / sizeof(wchar_t));
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(fullCommandLine.c_str(), &argc);
+    if (!argv || argc <= 0)
+    {
+        if (argv)
+        {
+            LocalFree(argv);
+        }
+        return false;
+    }
+
+    std::wstring argsW;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (!argsW.empty())
+        {
+            argsW.push_back(L' ');
+        }
+        argsW += quoteArgW(argv[i]);
+    }
+    LocalFree(argv);
+
+    outArgsUtf8 = wideToUtf8(argsW);
+    return true;
+}
+
+void closeLaunchHandles(LaunchResult &launch)
+{
+    if (launch.threadHandle)
+    {
+        CloseHandle(launch.threadHandle);
+        launch.threadHandle = nullptr;
+    }
+    if (launch.processHandle)
+    {
+        CloseHandle(launch.processHandle);
+        launch.processHandle = nullptr;
+    }
+}
+
+void rollbackLaunch(LaunchResult &launch)
+{
+    // Used by bless-start when "start succeeded but register failed".
+    // In that window the child has not become a valid guarded object yet, so
+    // the safest behavior is to terminate it immediately and close the handles.
+    if (launch.processHandle)
+    {
+        TerminateProcess(launch.processHandle, 1);
+        WaitForSingleObject(launch.processHandle, 3000);
+    }
+    closeLaunchHandles(launch);
+}
+
+bool resumeLaunch(LaunchResult &launch, std::string &outError)
+{
+    if (!launch.threadHandle)
+    {
+        return true;
+    }
+
+    if (ResumeThread(launch.threadHandle) == static_cast<DWORD>(-1))
+    {
+        outError = "ResumeThread failed: " + win32ErrorText(GetLastError());
+        return false;
+    }
+
+    closeLaunchHandles(launch);
+    return true;
+}
+
+bool startProcessFromPath(
+    const std::string &pathInput,
+    const std::string &startArgsInput,
+    LaunchResult &outLaunch,
+    std::string &outError)
+{
+    outLaunch = LaunchResult{};
+
+    const std::wstring pathWRaw = narrowToWideBestEffort(pathInput);
+    if (pathWRaw.empty())
+    {
+        outError = "path is empty after conversion";
+        return false;
+    }
+
+    std::vector<wchar_t> fullPathBuf(32768, L'\0');
+    DWORD fullLen = GetFullPathNameW(pathWRaw.c_str(), static_cast<DWORD>(fullPathBuf.size()), fullPathBuf.data(), nullptr);
+    if (fullLen == 0 || fullLen >= fullPathBuf.size())
+    {
+        outError = "GetFullPathNameW failed: " + win32ErrorText(GetLastError());
+        return false;
+    }
+    const std::wstring fullPath(fullPathBuf.data(), fullLen);
+
+    const DWORD attr = GetFileAttributesW(fullPath.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES)
+    {
+        outError = "target file not found: " + wideToUtf8(fullPath) + ", " + win32ErrorText(GetLastError());
+        return false;
+    }
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        outError = "target path is a directory: " + wideToUtf8(fullPath);
+        return false;
+    }
+
+    std::wstring command = L"\"" + fullPath + L"\"";
+    const std::wstring argsW = narrowToWideBestEffort(startArgsInput);
+    if (!argsW.empty())
+    {
+        command += L" ";
+        command += argsW;
+    }
+    std::vector<wchar_t> writableCmd(command.begin(), command.end());
+    writableCmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    const std::wstring workDir = parentDirectory(fullPath);
+
+    BOOL ok = CreateProcessW(
+        nullptr,
+        writableCmd.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        // Start suspended so bless-start can become effectively atomic:
+        // register first, then resume the primary thread only after PGS has
+        // accepted the new guard.
+        CREATE_NEW_CONSOLE | CREATE_SUSPENDED,
+        nullptr,
+        workDir.empty() ? nullptr : workDir.c_str(),
+        &si,
+        &pi);
+
+    if (!ok)
+    {
+        outError = "CreateProcessW failed for path=" + wideToUtf8(fullPath) + ", " + win32ErrorText(GetLastError());
+        return false;
+    }
+
+    outLaunch.pid = pi.dwProcessId;
+    outLaunch.pathUtf8 = wideToUtf8(fullPath);
+    outLaunch.startArgsUtf8 = wideToUtf8(argsW);
+    outLaunch.processHandle = pi.hProcess;
+    outLaunch.threadHandle = pi.hThread;
+    return true;
+}
+
+bool startProcessFromCommand(
+    const std::string &commandInput,
+    LaunchResult &outLaunch,
+    std::string &outError)
+{
+    outLaunch = LaunchResult{};
+
+    std::wstring exeW;
+    std::wstring argsW;
+    if (!splitLaunchCommand(commandInput, exeW, argsW, outError))
+    {
+        return false;
+    }
+
+    std::vector<wchar_t> fullPathBuf(32768, L'\0');
+    DWORD fullLen = GetFullPathNameW(exeW.c_str(), static_cast<DWORD>(fullPathBuf.size()), fullPathBuf.data(), nullptr);
+    if (fullLen == 0 || fullLen >= fullPathBuf.size())
+    {
+        outError = "GetFullPathNameW failed: " + win32ErrorText(GetLastError());
+        return false;
+    }
+    const std::wstring fullPath(fullPathBuf.data(), fullLen);
+
+    const DWORD attr = GetFileAttributesW(fullPath.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES)
+    {
+        outError = "target file not found: " + wideToUtf8(fullPath) + ", " + win32ErrorText(GetLastError());
+        return false;
+    }
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        outError = "target path is a directory: " + wideToUtf8(fullPath);
+        return false;
+    }
+
+    std::wstring command = quoteArgW(fullPath);
+    if (!argsW.empty())
+    {
+        command.push_back(L' ');
+        command += argsW;
+    }
+    std::vector<wchar_t> writableCmd(command.begin(), command.end());
+    writableCmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    const std::wstring workDir = parentDirectory(fullPath);
+
+    BOOL ok = CreateProcessW(
+        nullptr,
+        writableCmd.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        // Same reasoning as startProcessFromPath(): keep the child suspended
+        // until the service has acknowledged the guard registration.
+        CREATE_NEW_CONSOLE | CREATE_SUSPENDED,
+        nullptr,
+        workDir.empty() ? nullptr : workDir.c_str(),
+        &si,
+        &pi);
+
+    if (!ok)
+    {
+        outError = "CreateProcessW failed for command=" + commandInput + ", " + win32ErrorText(GetLastError());
+        return false;
+    }
+
+    outLaunch.pid = pi.dwProcessId;
+    outLaunch.pathUtf8 = wideToUtf8(fullPath);
+    outLaunch.startArgsUtf8 = wideToUtf8(argsW);
+    outLaunch.processHandle = pi.hProcess;
+    outLaunch.threadHandle = pi.hThread;
+    return true;
+}
+
+bool sendAll(SOCKET socket, const std::string &payload)
+{
+    std::size_t totalSent = 0;
+    while (totalSent < payload.size())
+    {
+        const int sent = send(socket,
+                              payload.data() + totalSent,
+                              static_cast<int>(payload.size() - totalSent),
+                              0);
+        if (sent <= 0)
+        {
+            return false;
+        }
+        totalSent += static_cast<std::size_t>(sent);
+    }
+    return true;
+}
+
+bool sendToPGS(
+    const std::string &host,
+    unsigned short port,
+    const std::string &commandPayload,
+    std::string &responseOut)
+{
+    // The CLI speaks the same small line-oriented protocol as the Qt admin.
+    // Even though requests are short, we still honor socket timeouts and full
+    // writes so automation does not depend on single-send behavior.
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET)
+    {
+        return false;
+    }
+
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr) != 1)
+    {
+        closesocket(sock);
+        return false;
+    }
+
+    if (connect(sock, reinterpret_cast<sockaddr *>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
+    {
+        closesocket(sock);
+        return false;
+    }
+
+    const DWORD timeoutMs = kSocketTimeoutMs;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeoutMs), sizeof(timeoutMs));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeoutMs), sizeof(timeoutMs));
+
+    std::string payload = commandPayload;
+    if (payload.empty() || payload.back() != '\n')
+    {
+        payload.push_back('\n');
+    }
+    if (!sendAll(sock, payload))
+    {
+        closesocket(sock);
+        return false;
+    }
+
+    responseOut.clear();
+    char buffer[1024];
+    for (;;)
+    {
+        const int received = recv(sock, buffer, static_cast<int>(sizeof(buffer)), 0);
+        if (received <= 0)
+        {
+            break;
+        }
+        responseOut.append(buffer, static_cast<std::size_t>(received));
+    }
+
+    closesocket(sock);
+    responseOut = trim(responseOut);
+    return true;
+}
+
+std::vector<std::string> splitBy(const std::string &value, char delimiter)
+{
+    std::vector<std::string> parts;
+    std::string current;
+    for (char c : value)
+    {
+        if (c == delimiter)
+        {
+            parts.push_back(current);
+            current.clear();
+        }
+        else
+        {
+            current.push_back(c);
+        }
+    }
+    parts.push_back(current);
+    return parts;
+}
+
+ParsedSummary parseSummaryLine(const std::string &line)
+{
+    ParsedSummary result;
+    for (const std::string &field : splitBy(line, ';'))
+    {
+        const std::size_t eq = field.find('=');
+        if (eq == std::string::npos)
+        {
+            continue;
+        }
+        const std::string key = trim(field.substr(0, eq));
+        const std::string value = trim(field.substr(eq + 1));
+        result.kv[key] = value;
+    }
+    return result;
+}
+
+std::string jsonEscape(const std::string &value)
+{
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (char c : value)
+    {
+        switch (c)
+        {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            out.push_back(c);
+            break;
+        }
+    }
+    return out;
+}
+
+void printSummaries(const std::vector<std::string> &lines, bool jsonOutput)
+{
+    std::vector<ParsedSummary> parsed;
+    parsed.reserve(lines.size());
+    for (const std::string &line : lines)
+    {
+        parsed.push_back(parseSummaryLine(line));
+    }
+
+    if (jsonOutput)
+    {
+        std::cout << "[";
+        for (std::size_t i = 0; i < parsed.size(); ++i)
+        {
+            if (i != 0)
+            {
+                std::cout << ",";
+            }
+            const auto &kv = parsed[i].kv;
+            auto get = [&](const std::string &key) -> std::string {
+                auto it = kv.find(key);
+                return it == kv.end() ? "" : it->second;
+            };
+
+            const std::string path = base64Decode(get("PATH_B64"));
+            const std::string args = base64Decode(get("RESTART_ARGS_B64"));
+            std::cout << "{"
+                      << "\"pid\":\"" << jsonEscape(get("PID")) << "\","
+                      << "\"session\":\"" << jsonEscape(get("SESSION")) << "\","
+                      << "\"alive\":\"" << jsonEscape(get("ALIVE")) << "\","
+                      << "\"intentional\":\"" << jsonEscape(get("INTENTIONAL")) << "\","
+                      << "\"max_restarts\":\"" << jsonEscape(get("MAX_RESTARTS")) << "\","
+                      << "\"restart_count\":\"" << jsonEscape(get("RESTART_COUNT")) << "\","
+                      << "\"hash_verified\":\"" << jsonEscape(get("HASH_VERIFIED")) << "\","
+                      << "\"hash\":\"" << jsonEscape(get("HASH")) << "\","
+                      << "\"path\":\"" << jsonEscape(path) << "\","
+                      << "\"restart_args\":\"" << jsonEscape(args) << "\""
+                      << "}";
+        }
+        std::cout << "]\n";
+        return;
+    }
+
+    for (const auto &item : parsed)
+    {
+        auto get = [&](const std::string &key) -> std::string {
+            auto it = item.kv.find(key);
+            return it == item.kv.end() ? "-" : it->second;
+        };
+        std::cout
+            << "pid=" << get("PID")
+            << " session=" << get("SESSION")
+            << " alive=" << get("ALIVE")
+            << " intentional=" << get("INTENTIONAL")
+            << " max=" << get("MAX_RESTARTS")
+            << " restarts=" << get("RESTART_COUNT")
+            << " hash_verified=" << get("HASH_VERIFIED")
+            << " hash=" << get("HASH")
+            << "\n"
+            << "  path: " << base64Decode(get("PATH_B64")) << "\n"
+            << "  args: " << base64Decode(get("RESTART_ARGS_B64")) << "\n";
+    }
+}
+
+void showUsage(const char *exe)
+{
+    std::cout
+        << "Usage:\n"
+        << "  " << exe << " bless --pid <pid> [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX]\n"
+        << "  " << exe << " bless-start --path <exe> [--start-args \"...\"] [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX]\n"
+        << "  " << exe << " bless-start --command \"<exe and args>\" [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX]\n"
+        << "  " << exe << " unbless --pid <pid>\n"
+        << "  " << exe << " unbless-path --path <exe>\n"
+        << "  " << exe << " policy --pid <pid> --max-restarts N|no [--restart-args \"...\"]\n"
+        << "  " << exe << " intentional --pid <pid>\n"
+        << "  " << exe << " list [--json]\n"
+        << "  " << exe << " get --pid <pid> [--json]\n"
+        << "  " << exe << " token-set --new-token <token> [--old-token <token>]\n"
+        << "  " << exe << " ping\n"
+        << "\nCommon options:\n"
+        << "  --host <ip>          default 127.0.0.1\n"
+        << "  --port <port>        default 12345\n"
+        << "  --token <value>      prepend auth envelope: token <value> <command>\n"
+        << "  --old-token <value>  old token for token-set (defaults to --token)\n"
+        << "  --new-token <value>  new token for token-set\n"
+        << "  --path <exe>         for bless-start, or override path in bless mode\n"
+        << "  --start-args \"...\"   process launch arguments for bless-start\n"
+        << "  --command \"...\"      custom full launch command for bless-start\n"
+        << "  --json               print list/get output as JSON\n"
+        << "\nCompatibility:\n"
+        << "  " << exe << " <pid>          equivalent to: " << exe << " bless --pid <pid>\n";
+}
+
+bool parseUnsignedShort(const std::string &text, unsigned short &outValue)
+{
+    if (text.empty())
+    {
+        return false;
+    }
+    for (char c : text)
+    {
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+    }
+    try
+    {
+        const unsigned long value = std::stoul(text);
+        if (value > 65535ul)
+        {
+            return false;
+        }
+        outValue = static_cast<unsigned short>(value);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+} // namespace
+
+int main()
+{
+    int argcW = 0;
+    LPWSTR *argvW = CommandLineToArgvW(GetCommandLineW(), &argcW);
+    if (!argvW || argcW <= 0)
+    {
+        std::cerr << "Failed to parse command line (wide args unavailable)\n";
+        if (argvW)
+        {
+            LocalFree(argvW);
+        }
+        return 1;
+    }
+
+    std::vector<std::string> argsUtf8;
+    argsUtf8.reserve(static_cast<std::size_t>(argcW));
+    for (int i = 0; i < argcW; ++i)
+    {
+        argsUtf8.push_back(wideToUtf8(argvW[i]));
+    }
+    LocalFree(argvW);
+
+    if (argsUtf8.size() < 2)
+    {
+        showUsage(argsUtf8.empty() ? "pgs_bless.exe" : argsUtf8[0].c_str());
+        return 1;
+    }
+
+    std::string command;
+    int argIndex = 1;
+
+    DWORD pid = 0;
+    bool hasPid = false;
+    int maxRestarts = 3;
+    bool hasMaxRestarts = false;
+    std::string restartArgs;
+    bool hasRestartArgs = false;
+    std::string pathOverride;
+    bool hasPath = false;
+    std::string startArgs;
+    std::string startCommand;
+    bool hasStartCommand = false;
+    std::string hashOpt = "auto";
+    bool jsonOutput = false;
+    std::string host = "127.0.0.1";
+    unsigned short port = 12345;
+    std::string token;
+    std::string oldToken;
+    bool hasOldToken = false;
+    std::string newToken;
+    bool hasNewToken = false;
+    LaunchResult launchedProcess;
+    bool hasLaunchedProcess = false;
+
+    if (parsePid(argsUtf8[1], pid))
+    {
+        command = "bless";
+        hasPid = true;
+        argIndex = 2;
+    }
+    else
+    {
+        command = argsUtf8[1];
+        argIndex = 2;
+    }
+
+    for (int i = argIndex; i < static_cast<int>(argsUtf8.size()); ++i)
+    {
+        const std::string arg = argsUtf8[i];
+        auto needValue = [&](const char *name) -> std::string {
+            if (i + 1 >= static_cast<int>(argsUtf8.size()))
+            {
+                std::cerr << "Missing value for " << name << "\n";
+                return std::string();
+            }
+            return argsUtf8[++i];
+        };
+
+        if (arg == "--pid")
+        {
+            const std::string value = needValue("--pid");
+            if (value.empty() || !parsePid(value, pid))
+            {
+                std::cerr << "Invalid --pid value\n";
+                return 1;
+            }
+            hasPid = true;
+            continue;
+        }
+        if (arg == "--max-restarts")
+        {
+            const std::string value = needValue("--max-restarts");
+            if (value.empty() || !parseMaxRestarts(value, maxRestarts))
+            {
+                std::cerr << "Invalid --max-restarts value\n";
+                return 1;
+            }
+            hasMaxRestarts = true;
+            continue;
+        }
+        if (arg == "--restart-args")
+        {
+            restartArgs = needValue("--restart-args");
+            hasRestartArgs = true;
+            continue;
+        }
+        if (arg == "--start-args")
+        {
+            startArgs = needValue("--start-args");
+            continue;
+        }
+        if (arg == "--command")
+        {
+            startCommand = needValue("--command");
+            hasStartCommand = true;
+            continue;
+        }
+        if (arg == "--path")
+        {
+            pathOverride = needValue("--path");
+            hasPath = true;
+            continue;
+        }
+        if (arg == "--hash")
+        {
+            hashOpt = needValue("--hash");
+            if (hashOpt.empty())
+            {
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--host")
+        {
+            host = needValue("--host");
+            if (host.empty())
+            {
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--port")
+        {
+            const std::string value = needValue("--port");
+            if (!parseUnsignedShort(value, port))
+            {
+                std::cerr << "Invalid --port value\n";
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--token")
+        {
+            token = needValue("--token");
+            if (token.empty())
+            {
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--json")
+        {
+            jsonOutput = true;
+            continue;
+        }
+        if (arg == "--old-token")
+        {
+            oldToken = needValue("--old-token");
+            hasOldToken = true;
+            continue;
+        }
+        if (arg == "--new-token")
+        {
+            newToken = needValue("--new-token");
+            hasNewToken = true;
+            continue;
+        }
+
+        std::cerr << "Unknown argument: " << arg << "\n";
+        return 1;
+    }
+
+    WSADATA wsaData{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    {
+        std::cerr << "WSAStartup failed\n";
+        return 1;
+    }
+
+    auto withToken = [&](const std::string &cmd) -> std::string {
+        return "token " + token + " " + cmd;
+    };
+
+    std::string wireCommand;
+    if (command == "bless" || command == "register" || command == "bless-start" || command == "start-bless")
+    {
+        // Two registration modes share one wire command:
+        // - bless: attach to an already-running pid
+        // - bless-start: create the process suspended, then register it
+        //
+        // Both eventually send "register", but bless-start additionally owns
+        // launch rollback/resume so the user does not end up with an unguarded
+        // child process running after a failed registration.
+        std::string path;
+        std::string derivedRestartArgs;
+        if (command == "bless-start" || command == "start-bless")
+        {
+            if (hasPath && hasStartCommand)
+            {
+                std::cerr << "bless-start cannot use --path and --command together\n";
+                WSACleanup();
+                return 1;
+            }
+            if (!hasPath && !hasStartCommand)
+            {
+                std::cerr << "bless-start requires --path or --command\n";
+                WSACleanup();
+                return 1;
+            }
+
+            std::string startError;
+            if (hasStartCommand)
+            {
+                if (!startProcessFromCommand(startCommand, launchedProcess, startError))
+                {
+                    std::cerr << "Failed to start process from command: " << startCommand;
+                    if (!startError.empty())
+                    {
+                        std::cerr << " | " << startError;
+                    }
+                    std::cerr << "\n";
+                    WSACleanup();
+                    return 1;
+                }
+            }
+            else if (!startProcessFromPath(pathOverride, startArgs, launchedProcess, startError))
+            {
+                std::cerr << "Failed to start process from path: " << pathOverride;
+                if (!startError.empty())
+                {
+                    std::cerr << " | " << startError;
+                }
+                std::cerr << "\n";
+                WSACleanup();
+                return 1;
+            }
+
+            hasLaunchedProcess = true;
+            pid = launchedProcess.pid;
+            path = launchedProcess.pathUtf8;
+            derivedRestartArgs = launchedProcess.startArgsUtf8;
+            hasPid = true;
+            if (derivedRestartArgs.empty())
+            {
+                derivedRestartArgs = startArgs;
+            }
+        }
+
+        if (!hasPid)
+        {
+            std::cerr << "bless requires --pid, or use bless-start --path\n";
+            WSACleanup();
+            return 1;
+        }
+
+        if (path.empty())
+        {
+            path = pathOverride;
+        }
+        if (path.empty() && !queryProcessPath(pid, path))
+        {
+            std::cerr << "Failed to query process path for pid=" << pid << "\n";
+            WSACleanup();
+            return 1;
+        }
+
+        std::string hashValue;
+        const std::string normalizedHashOpt = trim(hashOpt);
+        if (normalizedHashOpt == "auto")
+        {
+            if (!computeFileHash(path, hashValue))
+            {
+                std::cerr << "Failed to compute file hash for path: " << path
+                          << ", " << win32ErrorText(GetLastError()) << "\n";
+                WSACleanup();
+                return 1;
+            }
+        }
+        else if (normalizedHashOpt == "none")
+        {
+            hashValue.clear();
+        }
+        else
+        {
+            hashValue = normalizedHashOpt;
+        }
+
+        const int effectiveMax = hasMaxRestarts ? maxRestarts : 3;
+        std::string effectiveArgs;
+        if (hasRestartArgs)
+        {
+            effectiveArgs = restartArgs;
+        }
+        else if (command == "bless-start" || command == "start-bless")
+        {
+            effectiveArgs = derivedRestartArgs;
+        }
+        else
+        {
+            // For a plain bless of an already-running process, capture the
+            // existing command line when possible. This is not a perfect clone
+            // of the original runtime environment, but it is much closer than
+            // restarting the executable with no arguments at all.
+            queryProcessCommandLineArgs(pid, effectiveArgs);
+        }
+
+        std::ostringstream oss;
+        oss << "register " << pid << "|" << base64Encode(path) << "|" << maxRestartsLabel(effectiveMax) << "|" << effectiveArgs;
+        if (!hashValue.empty())
+        {
+            oss << "|" << hashValue;
+        }
+        wireCommand = oss.str();
+    }
+    else if (command == "unbless" || command == "unregister")
+    {
+        if (!hasPid)
+        {
+            std::cerr << "unbless requires --pid\n";
+            WSACleanup();
+            return 1;
+        }
+        wireCommand = "unregister " + std::to_string(pid);
+    }
+    else if (command == "unbless-path")
+    {
+        if (!hasPath)
+        {
+            std::cerr << "unbless-path requires --path\n";
+            WSACleanup();
+            return 1;
+        }
+
+        const std::wstring targetNorm = normalizePathForCompare(narrowToWideBestEffort(pathOverride));
+        if (targetNorm.empty())
+        {
+            std::cerr << "failed to normalize target path: " << pathOverride << "\n";
+            WSACleanup();
+            return 1;
+        }
+
+        std::string listResponse;
+        if (!sendToPGS(host, port, withToken("list"), listResponse))
+        {
+            std::cerr << "Failed to connect to PGS at " << host << ":" << port << "\n";
+            WSACleanup();
+            return 1;
+        }
+        if (listResponse.rfind("ERR", 0) == 0)
+        {
+            std::cerr << listResponse << "\n";
+            WSACleanup();
+            return 1;
+        }
+
+        std::vector<DWORD> matchedPids;
+        for (const std::string &line : splitBy(listResponse, '\n'))
+        {
+            const std::string value = trim(line);
+            if (value.empty() || value.rfind("OK", 0) == 0)
+            {
+                continue;
+            }
+            ParsedSummary s = parseSummaryLine(value);
+            const auto itPid = s.kv.find("PID");
+            const auto itPath = s.kv.find("PATH_B64");
+            if (itPid == s.kv.end() || itPath == s.kv.end())
+            {
+                continue;
+            }
+
+            DWORD foundPid = 0;
+            if (!parsePid(itPid->second, foundPid))
+            {
+                continue;
+            }
+
+            const std::wstring pathNorm = normalizePathForCompare(narrowToWideBestEffort(base64Decode(itPath->second)));
+            if (!pathNorm.empty() && pathNorm == targetNorm)
+            {
+                matchedPids.push_back(foundPid);
+            }
+        }
+
+        if (matchedPids.empty())
+        {
+            std::cerr << "ERR no guard matched path: " << pathOverride << "\n";
+            WSACleanup();
+            return 1;
+        }
+
+        int removed = 0;
+        for (DWORD matchedPid : matchedPids)
+        {
+            std::string resp;
+            if (sendToPGS(host, port, withToken("unregister " + std::to_string(matchedPid)), resp) && resp.rfind("OK", 0) == 0)
+            {
+                ++removed;
+            }
+        }
+        std::cout << "OK unbless-path matched=" << matchedPids.size() << ", removed=" << removed << "\n";
+        WSACleanup();
+        return (removed == 0) ? 1 : 0;
+    }
+    else if (command == "policy")
+    {
+        if (!hasPid || !hasMaxRestarts)
+        {
+            std::cerr << "policy requires --pid and --max-restarts\n";
+            WSACleanup();
+            return 1;
+        }
+        std::ostringstream oss;
+        oss << "set-policy " << pid << "|" << maxRestartsLabel(maxRestarts);
+        if (hasRestartArgs)
+        {
+            oss << "|" << restartArgs;
+        }
+        wireCommand = oss.str();
+    }
+    else if (command == "intentional")
+    {
+        if (!hasPid)
+        {
+            std::cerr << "intentional requires --pid\n";
+            WSACleanup();
+            return 1;
+        }
+        wireCommand = "intentional " + std::to_string(pid);
+    }
+    else if (command == "list")
+    {
+        wireCommand = "list";
+    }
+    else if (command == "get")
+    {
+        if (!hasPid)
+        {
+            std::cerr << "get requires --pid\n";
+            WSACleanup();
+            return 1;
+        }
+        wireCommand = "get " + std::to_string(pid);
+    }
+    else if (command == "ping")
+    {
+        wireCommand = "ping";
+    }
+    else if (command == "token-set" || command == "set-token")
+    {
+        if (!hasNewToken)
+        {
+            std::cerr << "token-set requires --new-token\n";
+            WSACleanup();
+            return 1;
+        }
+        if (!hasOldToken)
+        {
+            oldToken = token;
+        }
+        token = oldToken;
+        wireCommand = "set-token " + base64Encode(oldToken) + "|" + base64Encode(newToken);
+    }
+    else
+    {
+        showUsage(argsUtf8[0].c_str());
+        WSACleanup();
+        return 1;
+    }
+
+    wireCommand = withToken(wireCommand);
+
+    std::string response;
+    const bool sent = sendToPGS(host, port, wireCommand, response);
+    if (!sent)
+    {
+        if (hasLaunchedProcess)
+        {
+            rollbackLaunch(launchedProcess);
+        }
+        WSACleanup();
+        std::cerr << "Failed to connect to PGS at " << host << ":" << port << "\n";
+        return 1;
+    }
+
+    if (response.rfind("ERR", 0) == 0)
+    {
+        if (hasLaunchedProcess)
+        {
+            rollbackLaunch(launchedProcess);
+        }
+        WSACleanup();
+        std::cerr << response << "\n";
+        return 1;
+    }
+
+    if (hasLaunchedProcess)
+    {
+        std::string resumeError;
+        if (!resumeLaunch(launchedProcess, resumeError))
+        {
+            // Registration already succeeded at this point, so roll back the
+            // guard entry before killing the still-suspended child process.
+            std::string cleanupResponse;
+            sendToPGS(host, port, withToken("unregister " + std::to_string(pid)), cleanupResponse);
+            rollbackLaunch(launchedProcess);
+            WSACleanup();
+            std::cerr << resumeError << "\n";
+            return 1;
+        }
+    }
+
+    if (command == "list" || command == "get")
+    {
+        std::vector<std::string> lines = splitBy(response, '\n');
+        std::vector<std::string> summaries;
+        for (const std::string &line : lines)
+        {
+            const std::string value = trim(line);
+            if (value.empty() || value.rfind("OK", 0) == 0)
+            {
+                continue;
+            }
+            summaries.push_back(value);
+        }
+
+        if (!jsonOutput && !lines.empty())
+        {
+            std::cout << trim(lines.front()) << "\n";
+        }
+        printSummaries(summaries, jsonOutput);
+    }
+    else
+    {
+        std::cout << response << "\n";
+    }
+
+    WSACleanup();
+    return 0;
+}

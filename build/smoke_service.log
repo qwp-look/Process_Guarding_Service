@@ -1,0 +1,11 @@
+[2026-04-05 14:35:29.031] [WARN] PGS service host boot, logPath=C:\ProgramData\ProcessGuard\logs\pgs_service.log
+[2026-04-05 14:35:29.032] [WARN] PGS: loaded persisted archive entries=1, state-file=C:\ProgramData\ProcessGuard\state\pgs_guard_state.db
+[2026-04-05 14:35:29.032] [WARN] PGS: auth enabled (token hash restored from persisted state)
+[2026-04-05 14:35:29.032] [WARN] PGS: initialized
+[2026-04-05 14:35:29.037] [WARN] PGS: restart launched in fallback session, pid=5332, session=1
+[2026-04-05 14:35:29.037] [WARN] PGS: restored persisted missing guard by restart pid=5332, guard-id=4
+[2026-04-05 14:35:29.050] [WARN] PGS: started
+PGS running in console mode. Press Ctrl+C to stop.
+[2026-04-05 14:35:29.844] [WARN] PGS: marked intentional exit for pid=5332
+[2026-04-05 14:35:30.218] [WARN] PGS: marked intentional exit for pid=5332
+[2026-04-05 14:35:30.288] [WARN] PGS: guard exited intentionally, pid=5332
