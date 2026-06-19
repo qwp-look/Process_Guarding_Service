@@ -1,7 +1,8 @@
 # Process_Guarding_Service
-一个利用AI-Codeing的windows进程守护小工具
-本项目由qwp-look和AI一同开发
-AI包括但不限于Chatgpt GLM
+一个利用AI-Codeing的windows进程守护小工具  
+本项目由qwp-look和AI一同开发  
+AI包括但不限于Chatgpt GLM  
+
 # ProcessGuard（PGS 服务主线）
 
 本仓库已统一为一条实现主线：
