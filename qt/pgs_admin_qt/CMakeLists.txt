@@ -16,12 +16,16 @@ if (QT_VERSION_MAJOR EQUAL 6)
         src/main.cpp
         src/MainWindow.h
         src/MainWindow.cpp
+        src/ModulePage.h
+        src/ModulePage.cpp
     )
 else()
     add_executable(pgs_admin_qt
         src/main.cpp
         src/MainWindow.h
         src/MainWindow.cpp
+        src/ModulePage.h
+        src/ModulePage.cpp
     )
 endif()
 

@@ -12,6 +12,10 @@
 - `pgs_admin_qt`：Qt 图形管理端（调用 `pgs_bless`）
 - `pgs_admin_web`：浏览器控制端（独立 Web 管理进程）
 
+> **新增：模块系统 + PPL 模块**
+> PGS 现支持可加载模块（插件）：把功能写成 DLL 放入 `<exe>/modules/`，启动自动加载，通过 `pgs_bless` 的 `module` / `ppl` 子命令调用。首个模块 **pgs_ppl_module** 复用 StarlightGUI 的 `Sirius.sys` 内核驱动，对进程设置/查询/清除 PPL 保护。
+> 详见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
+
 ## 1. 环境要求
 
 建议只使用 `MSYS2 MinGW64` 工具链：
@@ -97,6 +101,12 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 Qt 产物：
 
 - `build/pgs_admin_qt/pgs_admin_qt.exe`
+
+> **release 打包注意（干净机器可运行）**：`windeployqt6` 只部署 Qt 自带 DLL，但 `Qt6Core/Qt6Gui` 还传递依赖一批 MSYS2 MinGW 第三方运行库（ICU `libicu*78.dll`、`libharfbuzz-0.dll`、`libfreetype-6.dll`、`libpcre2-16-0.dll`、`libzstd.dll`、`zlib1.dll`、`libglib-2.0-0.dll` 等共约 23 个）。开发机上因 `mingw64/bin` 在 `PATH` 里能跑，但**干净机器上缺这些 DLL 会让 `pgs_admin_qt.exe` 报 `0xC0000135`（STATUS_DLL_NOT_FOUND）**。一键完整打包（构建 + windeployqt6 + 补齐这些 DLL + per-folder 模块）用：
+>
+> ```bat
+> tools\package_release.bat
+> ```
 
 ## 3.1 MSYS2 MinGW64 手动编译（网页控制端）
 
@@ -288,10 +298,11 @@ Qt 管理端：
 
 ### 7.1 Qt 桌面端
 
-- 三界面（Tab）：
+- 四界面（Tab）：
   - `守护管理 / Bless Console`：专门调用 `pgs_bless.exe`
   - `服务管理 / Service Console`：专门调用 `pgs_service.exe`
   - `守护表格 / Guard Table`：调用 `pgs_bless list --json` 并表格化显示
+  - 模块管理 / Module Management：扫描 <pgs_service 目录>/modules 子目录，每个模块一个动态子页面（QTextBrowser 渲染该模块的 module.html），可执行 module call 与 ppl set/get/clear。
 - 守护管理页支持：`Ping/List/Get/Bless/Bless-Start/Unbless/Policy/Intentional/Token-Set`。
 - 服务管理页支持：`Install/Status/Start/Stop/Uninstall/Run Console`。
 - 服务管理页支持：`Stop Console`（终止当前 `run` 控制台进程）。
@@ -347,3 +358,24 @@ Qt 管理端：
 开发者： Stars  
 许可证：Apache 2.0 许可证 |OSI 认证  
 版权归 © 2026 年 Starlight 所有。  
+
+
+---
+
+## 模块系统与 PPL 模块（快速上手）
+
+```bash
+# 构建（产物含 build/modules/ppl/pgs_ppl_module.dll + Sirius.sys + module.html，per-folder 布局）
+tools\build_pgs.bat
+
+# 以管理员运行服务（需测试签名模式以加载 Sirius.sys）
+pgs_service.exe run --token <your-token>
+
+# 模块与 PPL 操作
+pgs_bless.exe module list
+pgs_bless.exe ppl get --pid <pid>
+pgs_bless.exe ppl set --pid <pid> --signer Antimalware
+pgs_bless.exe ppl clear --pid <pid>
+```
+
+完整说明（ABI、如何写新模块、排错、版权）见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。

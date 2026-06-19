@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "ModulePage.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -396,6 +397,11 @@ void MainWindow::setupUi()
     tableLayout->addWidget(m_guardTable, 1);
 
     m_tabs->addTab(tablePage, "");
+
+    // Module management tab (4th tab).
+    auto *modulePage = new QWidget(m_tabs);
+    setupModuleTab(modulePage);
+    m_tabs->addTab(modulePage, "");
     rootLayout->addWidget(m_tabs);
 
     setCentralWidget(central);
@@ -620,6 +626,7 @@ void MainWindow::setupUi()
 
     applyLanguage();
     statusBar()->showMessage(trUi("ready", "就绪"), 2000);
+    refreshModuleTabs();
 }
 
 QString MainWindow::blessToolPath() const
@@ -675,6 +682,17 @@ void MainWindow::applyLanguage()
     m_tabs->setTabText(0, trUi("Bless Console", "守护管理"));
     m_tabs->setTabText(1, trUi("Service Console", "服务管理"));
     m_tabs->setTabText(2, trUi("Guard Table", "守护表格"));
+    m_tabs->setTabText(3, trUi("Module Management", "模块管理"));
+    m_titleModule->setText(trUi("Module Management", "模块管理"));
+    m_labelModuleToolPath->setText(trUi("pgs_bless path", "pgs_bless 路径"));
+    m_labelModuleToken->setText(trUi("token", "token"));
+    m_labelModuleDir->setText(trUi("modules directory", "modules 目录"));
+    m_btnModuleRefresh->setText(trUi("Refresh Module List", "刷新模块列表"));
+    for (int i = 0; i < m_moduleSubTabs->count(); ++i)
+    {
+        if (auto *p = qobject_cast<ModulePage *>(m_moduleSubTabs->widget(i)))
+            p->setChinese(isChineseUi());
+    }
 
     m_titleConnection->setText(trUi("PGS_Bless Tool", "PGS_Bless 工具"));
     m_titleTarget->setText(trUi("Target", "目标参数"));
@@ -729,6 +747,90 @@ void MainWindow::applyLanguage()
     m_guardTable->setHorizontalHeaderLabels(isChineseUi()
                                                 ? QStringList{"PID", "路径", "哈希", "已重启", "最大重启", "存活", "会话", "哈希校验"}
                                                 : QStringList{"PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified"});
+}
+
+void MainWindow::setupModuleTab(QWidget *page)
+{
+    auto *layout = new QVBoxLayout(page);
+
+    auto *cfgBox = new QGroupBox(page);
+    auto *cfgGrid = new QGridLayout(cfgBox);
+    m_titleModule = new QLabel(cfgBox);
+    cfgGrid->addWidget(m_titleModule, 0, 0, 1, 2);
+
+    m_labelModuleToolPath = new QLabel(cfgBox);
+    cfgGrid->addWidget(m_labelModuleToolPath, 1, 0);
+    m_moduleToolPathEdit = new QLineEdit(blessToolPath(), cfgBox);
+    cfgGrid->addWidget(m_moduleToolPathEdit, 1, 1);
+
+    m_labelModuleToken = new QLabel(cfgBox);
+    cfgGrid->addWidget(m_labelModuleToken, 2, 0);
+    m_moduleTokenEdit = new QLineEdit(cfgBox);
+    cfgGrid->addWidget(m_moduleTokenEdit, 2, 1);
+
+    m_labelModuleDir = new QLabel(cfgBox);
+    cfgGrid->addWidget(m_labelModuleDir, 3, 0);
+    m_moduleDirEdit = new QLineEdit(defaultModuleDir(), cfgBox);
+    cfgGrid->addWidget(m_moduleDirEdit, 3, 1);
+
+    m_btnModuleRefresh = new QPushButton(cfgBox);
+    cfgGrid->addWidget(m_btnModuleRefresh, 4, 1);
+
+    layout->addWidget(cfgBox);
+
+    m_moduleSubTabs = new QTabWidget(page);
+    layout->addWidget(m_moduleSubTabs, 1);
+
+    connect(m_btnModuleRefresh, &QPushButton::clicked, this, [this]() {
+        refreshModuleTabs();
+    });
+}
+
+QString MainWindow::defaultModuleDir() const
+{
+    // modules\ lives beside pgs_service.exe at runtime; fall back to beside
+    // pgs_bless.exe so the tab is useful in console-only test layouts too.
+    QString dir = QFileInfo(serviceToolPath()).absolutePath() + QStringLiteral("/modules");
+    if (QDir(dir).exists())
+        return QDir::cleanPath(dir);
+    dir = QFileInfo(blessToolPath()).absolutePath() + QStringLiteral("/modules");
+    return QDir::cleanPath(dir);
+}
+
+void MainWindow::refreshModuleTabs()
+{
+    // Drop existing sub-tabs (this deletes their ModulePage widgets).
+    while (m_moduleSubTabs->count() > 0)
+    {
+        QWidget *w = m_moduleSubTabs->widget(0);
+        m_moduleSubTabs->removeTab(0);
+        w->deleteLater();
+    }
+
+    const QString dir = m_moduleDirEdit->text().trimmed().isEmpty()
+                            ? defaultModuleDir()
+                            : m_moduleDirEdit->text().trimmed();
+    const QString toolPath = m_moduleToolPathEdit->text().trimmed().isEmpty()
+                                 ? blessToolPath()
+                                 : m_moduleToolPathEdit->text().trimmed();
+    const QString token = m_moduleTokenEdit->text();
+    const bool zh = isChineseUi();
+
+    const QStringList folders = QDir(dir).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    if (folders.isEmpty())
+    {
+        auto *ph = new QTextEdit(m_moduleSubTabs);
+        ph->setReadOnly(true);
+        ph->setPlainText(trUi("No module folders found under:", "未在以下目录发现模块文件夹：") + "\n" + dir);
+        m_moduleSubTabs->addTab(ph, trUi("(empty)", "(空)"));
+        return;
+    }
+
+    for (const QString &folder : folders)
+    {
+        auto *mp = new ModulePage(folder, dir, toolPath, token, zh, m_moduleSubTabs);
+        m_moduleSubTabs->addTab(mp, folder);
+    }
 }
 
 void MainWindow::runBlessCommand(const QStringList &args)

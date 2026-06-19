@@ -12,6 +12,7 @@
 
 #include "PGDefines.h"
 #include "PGLogger.h"
+#include "ModuleManager.h"
 #include <condition_variable>
 #include <cstdint>
 #include <string>
@@ -141,6 +142,11 @@ namespace ProcessGuard
         std::queue<SOCKET> m_clientQueue;
         std::vector<std::thread> m_clientWorkers;
         std::atomic<std::uint64_t> m_nextGuardId{1};
+        // Plugin registry: loads DLLs from m_modulesDir and dispatches PG_Invoke
+        // calls for the "module" / "ppl" management commands.
+        ModuleManager m_modules;
+        // <pgs_service.exe dir>\modules; scanned once during initialize().
+        std::string m_modulesDir;
 
         void listenerLoop();
         void monitorLoop();
@@ -148,6 +154,12 @@ namespace ProcessGuard
         void handleClient(SOCKET clientSocket);
 
         std::string processMessage(const std::string &message);
+        // "module list|load|unload|call" sub-protocol handler.
+        std::string handleModuleCommand(const std::string &args);
+        // "ppl set|get|clear" convenience wrapper that routes to the ppl module.
+        std::string handlePplCommand(const std::string &args);
+        // Resolve <pgs_service.exe dir>\modules for the plugin scan.
+        static std::string moduleDirectoryOfSelf();
         std::string handleRegister(DWORD pid, const std::string &encodedPath, int maxRestarts, const std::string &restartArgs, const std::string &declaredHash);
         std::string handleIntentionalExit(DWORD pid);
         std::string handleUnregister(DWORD pid);

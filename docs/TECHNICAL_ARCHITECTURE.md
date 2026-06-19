@@ -17,6 +17,9 @@
 - `src/service/pgs_service.cpp`：服务安装/启动/停止/状态
 - `tools/pgs_bless.cpp`：CLI 命令解析与协议调用
 - `src/common/PGLogger.cpp` + `include/Process_Guard/PGLogger.h`：日志
+- `include/Process_Guard/PGModule.h`：模块 C ABI（PG_GetName/Init/Invoke 等）
+- `include/Process_Guard/ModuleManager.h` + `src/modules/ModuleManager.cpp`：模块注册表（加载/卸载/调用）
+- `modules/ppl/`：PPL 模块（pgs_ppl_module.cpp + Sirius 驱动客户端 + Sirius.sys）
 - `qt/pgs_admin_qt/`：Qt GUI
 
 模块边界的设计原则是：
@@ -87,16 +90,21 @@
 
 ## 4. 协议设计
 
-命令：
+命令（完整清单）：
 
-- `register`
-- `intentional`
-- `unregister`
-- `set-policy`
-- `list`
-- `get`
-- `ping`
-- `stats`
+| 命令 | 参数 | 说明 |
+|------|------|------|
+| `ping` | — | 探活，返回 `OK pong` |
+| `list` | — | 所有守护目标汇总 |
+| `get` | `<pid>` | 单个守护对象详情 |
+| `register` | `<pid>\|<b64path>\|<maxRestarts>[\|<restartArgs>][\|<hash>]` | 注册守护 |
+| `unregister` | `<pid>` | 取消守护 |
+| `intentional` | `<pid>` | 标记本次退出为有意，不再重启 |
+| `set-policy` | `<pid>\|<maxRestarts>[\|<restartArgs>]` | 改策略 |
+| `set-token` | `<b64old>\|<b64new>` | 在线切换 token |
+| `stats` | — | `OK guards=N` |
+| `module` | `list` / `load <b64path>` / `unload <name>` / `call <name> <kv>` | 模块系统 |
+| `ppl` | `set <pid> <signer>` / `get <pid>` / `clear <pid>` | PPL 便利封装（路由到 ppl 模块） |
 
 返回：
 
@@ -278,7 +286,7 @@
 ### 8.1 C++ 构建命令
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect
+cd /c/Users/wtg/Desktop/other/MY-code/process_protect_need/Process_Guarding_Service
 mkdir -p build
 
 export PATH=/mingw64/bin:/usr/bin
@@ -287,10 +295,16 @@ hash -r
 g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/common/PGLogger.cpp -o build/PGLogger.o
 g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/PGS.cpp -o build/PGS.o
 g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/pgs_service.cpp -o build/pgs_service.o
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/modules/ModuleManager.cpp -o build/ModuleManager.o
 g++ -std=c++17 -Wall -Wextra -O2 \
-  build/PGLogger.o build/PGS.o build/pgs_service.o \
+  build/PGLogger.o build/PGS.o build/ModuleManager.o build/pgs_service.o \
   -o build/pgs_service.exe \
   -lws2_32 -ladvapi32 -lwtsapi32 -luserenv
+
+# PPL 模块（独立 DLL，放入 build/modules/ 供 PGS 启动自动加载）
+mkdir -p build/modules
+g++ -std=c++17 -Wall -Wextra -O2 -shared -o build/modules/pgs_ppl_module.dll modules/ppl/pgs_ppl_module.cpp -Iinclude -ladvapi32
+cp -f modules/ppl/Sirius.sys build/modules/Sirius.sys
 
 g++ -std=c++17 -Wall -Wextra -O2 -Iinclude tools/pgs_bless.cpp -o build/pgs_bless.exe -lws2_32
 g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/guard_example.cpp -o build/guard_example.exe -lws2_32
@@ -306,7 +320,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/
 ### 8.2 Qt 构建命令
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect
+cd /c/Users/wtg/Desktop/other/MY-code/process_protect_need/Process_Guarding_Service
 rm -rf build/pgs_admin_qt
 
 cmake -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
@@ -338,3 +352,102 @@ cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 ```
+
+
+---
+
+## 模块系统（插件）
+
+PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染守护核心。PPL 模块是首个实例，复用 StarlightGUI 的 `Sirius.sys` 内核驱动设置进程 PPL。
+
+- **ABI**：`PGModule.h` 定义 `extern "C"` 导出（Name/Version/Init/Shutdown/Invoke），请求/响应用 KV 文本，零依赖。
+- **注册表**：`ModuleManager` 线程安全地扫描 `<exe>/modules/*.dll` 自动加载，并提供 `load/unload/list/invoke`。
+- **协议接入**：`PGS::processMessage` 新增 `module list|load|unload|call` 与 `ppl set|get|clear` 命令，复用既有 token 认证信封。
+- **CLI**：`pgs_bless` 的 `module` / `ppl` 子命令通过同一 TCP 协议调用。
+
+详细架构、ABI 规格、如何编写新模块、排错与版权见 [`MODULE_SYSTEM.md`](MODULE_SYSTEM.md)。
+
+---
+
+## 11. 协议线格式与并发模型（补充）
+
+**线格式**：纯文本、单行、UTF-8、`\n` 结束。
+
+- 认证信封：`token <token> <command> <args>`（`stripAuthEnvelope` 剥离并校验 token 哈希）。
+- 命令体：`<verb> <args>`，`verb` 与 `args` 以首个空格分隔；`args` 内部按命令约定用 `|` 或空格再切分。
+- 路径/token 等二进制不安全字段用 base64 编码（`register` 的 path、`set-token` 的新旧 token、`module load` 的 DLL 路径）。
+- 单条消息上限 `kMaxMessageSize = 64 KB`，超长直接拒绝，防止无界增长。
+
+**并发模型**：
+
+- 监听线程（`listenerLoop`）只 `accept`，把 socket 入队后立刻返回，绝不阻塞在单个客户端上。
+- 固定 4 个 worker 线程（`kClientWorkerCount`）从队列取 socket，执行 `recv → processMessage → send`。
+- socket 收发均设超时（`kSocketTimeoutMs = 3000`），一个卡死的客户端不会永久占用 worker。
+- 响应发送走 `sendAll`，处理 partial send。
+- `m_guards` / `m_persistedGuards` / `m_policyByGuardId` 由 `m_guardsMutex` 保护；`ModuleManager` 自带内部 mutex，模块调用可并发。
+
+**为什么不用更重的网络框架**：PGS 是本机管理协议，流量是低频运维命令（ping/list/register/policy/module），目标是异常条件下稳定可诊断，而非高吞吐。
+
+## 12. 模块系统内部（补充）
+
+> 完整说明见 [`MODULE_SYSTEM.md`](MODULE_SYSTEM.md)，此处补架构视角。
+
+- **加载时机**：`PGS::initialize()` 在置 `m_initialized=true` 前，扫描 `<pgs_service.exe 目录>\modules\*.dll` 自动加载。单个模块失败不中断整轮扫描。
+- **调用链**：`processMessage` → `handleModuleCommand` / `handlePplCommand` → `ModuleManager::invoke` → 模块 `PG_Invoke`。`ppl` 命令是 `module call ppl` 的语法糖，PGS 内部构造 `op=...;pid=...` KV 再调 ppl 模块。
+- **线程安全**：模块 `PG_Invoke` 必须可重入（worker 池并发调用）。模块自身共享状态自行加锁。
+- **延迟初始化**：PPL 模块 `PG_Init` 不打开驱动（驱动可能尚未可加载），首次 `PG_Invoke` 才 `ensureDevice`，失败返回清晰错误而非拖垮模块加载。
+- **卸载**：`module unload` 或服务退出时调 `PG_Shutdown` + `FreeLibrary`。
+
+## 13. Web 控制端（pgs_admin_web）
+
+独立进程方案，与 PGS 核心解耦：
+
+- 自己提供 HTTP 路由 + 静态页面 + 会话鉴权；浏览器只访问这个 Web 进程。
+- Web 后端调用现有 `pgs_bless.exe` / `pgs_service.exe`（第一阶段复用成熟 CLI），后续可抽公共 `PGSClient` 降低协议重复。
+- PGS 核心不承担 HTTP/静态托管/自身恢复，职责不堆叠。
+- 部署建议绑定 `127.0.0.1`，面向本机运维；PGS token 不暴露到前端，由 Web 后端服务端持有/转发。
+- API 对外暴露 JSON（如 `GET /api/guards`、`POST /api/guards/bless`），浏览器不直接接触底层 `OK/ERR` 文本协议。
+
+## 14. 运行时依赖与部署
+
+**C++ 主线运行库**（MinGW 构建，需随 exe 分发）：
+
+- `libstdc++-6.dll`
+- `libgcc_s_seh-1.dll`
+- `libwinpthread-1.dll`
+
+**PPL 模块额外依赖**：
+
+- `modules\pgs_ppl_module.dll`（与 `pgs_service.exe` 同进程加载）
+- `modules\Sirius.sys`（内核驱动，复用自 StarlightGUI）
+- 加载 `Sirius.sys` 需：管理员/SYSTEM 权限 + 测试签名模式（`bcdedit /set testsigning on`）或驱动已具备有效签名。
+
+**状态/日志位置**（服务模式默认）：
+
+- 日志：`C:\ProgramData\ProcessGuard\logs\pgs_service.log`
+- 归档：`C:\ProgramData\ProcessGuard\state\pgs_guard_state.db`
+
+## 15. Release 打包布局
+
+`release\` 目录面向开箱即用，结构如下：
+
+```
+release\
+├─ pgs_service.exe          守护服务宿主（控制台 run / SCM install）
+├─ pgs_bless.exe            命令行运维工具
+├─ libgcc_s_seh-1.dll       MinGW 运行库
+├─ libstdc++-6.dll
+├─ libwinpthread-1.dll
+├─ modules\
+│  ├─ pgs_ppl_module.dll    PPL 模块（启动自动加载）
+│  └─ Sirius.sys            内核驱动（PPL 模块加载）
+├─ examples\                示例（可选）
+│  ├─ guard_example.exe
+│  ├─ quick_start.exe
+│  └─ smoke_worker.exe
+├─ README.md                使用说明
+├─ NOTICE                   第三方署名
+└─ LICENSE                  Apache 2.0
+```
+
+运行：以管理员开终端，`pgs_service.exe run --token <你的token>`，另开终端 `pgs_bless.exe ping --token <你的token>`。

@@ -935,6 +935,13 @@ void showUsage(const char *exe)
         << "  " << exe << " get --pid <pid> [--json]\n"
         << "  " << exe << " token-set --new-token <token> [--old-token <token>]\n"
         << "  " << exe << " ping\n"
+        << "  " << exe << " module list\n"
+        << "  " << exe << " module load --path <dll>\n"
+        << "  " << exe << " module unload --name <name>\n"
+        << "  " << exe << " module call --name <name> --request \"op=set;pid=N;signer=X\"\n"
+        << "  " << exe << " ppl set --pid <pid> --signer <None|Authenticode|CodeGen|Antimalware|Lsa|Windows|WinTcb|WinSystem>\n"
+        << "  " << exe << " ppl get --pid <pid>\n"
+        << "  " << exe << " ppl clear --pid <pid>\n"
         << "\nCommon options:\n"
         << "  --host <ip>          default 127.0.0.1\n"
         << "  --port <port>        default 12345\n"
@@ -944,7 +951,9 @@ void showUsage(const char *exe)
         << "  --path <exe>         for bless-start, or override path in bless mode\n"
         << "  --start-args \"...\"   process launch arguments for bless-start\n"
         << "  --command \"...\"      custom full launch command for bless-start\n"
-        << "  --json               print list/get output as JSON\n"
+        << "  --json               print list/get output as JSON\n"        << "  --name <value>       module name (module unload/call, ppl module)\n"
+        << "  --request \"kv\"      module call request, e.g. op=set;pid=N;signer=X\n"
+        << "  --signer <value>     PPL signer for ppl set\n"
         << "\nCompatibility:\n"
         << "  " << exe << " <pid>          equivalent to: " << exe << " bless --pid <pid>\n";
 }
@@ -1008,6 +1017,10 @@ int main()
     }
 
     std::string command;
+    // For "module"/"ppl" commands the first positional token after the command
+    // word is the subcommand (e.g. "module list", "ppl set"). It is consumed
+    // here so the --flag parsing loop below does not reject it as unknown.
+    std::string subCommand;
     int argIndex = 1;
 
     DWORD pid = 0;
@@ -1032,6 +1045,12 @@ int main()
     bool hasNewToken = false;
     LaunchResult launchedProcess;
     bool hasLaunchedProcess = false;
+    std::string moduleName;
+    bool hasName = false;
+    std::string moduleRequest;
+    bool hasRequest = false;
+    std::string signerText;
+    bool hasSigner = false;
 
     if (parsePid(argsUtf8[1], pid))
     {
@@ -1043,6 +1062,12 @@ int main()
     {
         command = argsUtf8[1];
         argIndex = 2;
+        // Peel off the subcommand token for module/ppl so argIndex skips it.
+        if (command == "module" || command == "ppl")
+        {
+            subCommand = (argsUtf8.size() > 2) ? argsUtf8[2] : std::string();
+            argIndex = 3;
+        }
     }
 
     for (int i = argIndex; i < static_cast<int>(argsUtf8.size()); ++i)
@@ -1154,6 +1179,25 @@ int main()
         {
             newToken = needValue("--new-token");
             hasNewToken = true;
+            continue;
+        }
+
+        if (arg == "--name")
+        {
+            moduleName = needValue("--name");
+            hasName = true;
+            continue;
+        }
+        if (arg == "--request")
+        {
+            moduleRequest = needValue("--request");
+            hasRequest = true;
+            continue;
+        }
+        if (arg == "--signer")
+        {
+            signerText = needValue("--signer");
+            hasSigner = true;
             continue;
         }
 
@@ -1451,6 +1495,87 @@ int main()
         }
         token = oldToken;
         wireCommand = "set-token " + base64Encode(oldToken) + "|" + base64Encode(newToken);
+    }
+    // module <list|load|unload|call>. Builds the wire command; the common
+    // send-to-PGS block at the end transmits it. load takes a base64 path so
+    // spaces in the DLL path survive the line protocol.
+    else if (command == "module")
+    {
+        const std::string sub = subCommand;
+        if (sub == "list")
+        {
+            wireCommand = "module list";
+        }
+        else if (sub == "load")
+        {
+            if (!hasPath)
+            {
+                std::cerr << "module load requires --path\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "module load " + base64Encode(pathOverride);
+        }
+        else if (sub == "unload")
+        {
+            if (!hasName)
+            {
+                std::cerr << "module unload requires --name\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "module unload " + moduleName;
+        }
+        else if (sub == "call")
+        {
+            if (!hasName || !hasRequest)
+            {
+                std::cerr << "module call requires --name and --request\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "module call " + moduleName + " " + moduleRequest;
+        }
+        else
+        {
+            std::cerr << "Unknown module subcommand: " << sub << "\n";
+            WSACleanup();
+            return 1;
+        }
+        // module subcommands are dispatched above; skip the common send below
+        // by falling through with wireCommand set.
+    }
+    // ppl <set|get|clear>. Convenience wrapper around the ppl module; PGS turns
+    // these into "op=..." module calls internally.
+    else if (command == "ppl")
+    {
+        const std::string sub = subCommand;
+        if (sub == "set")
+        {
+            if (!hasPid || !hasSigner)
+            {
+                std::cerr << "ppl set requires --pid and --signer\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "ppl set " + std::to_string(pid) + " " + signerText;
+        }
+        else if (sub == "get" || sub == "clear")
+        {
+            if (!hasPid)
+            {
+                std::cerr << "ppl " << sub << " requires --pid\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "ppl " + sub + " " + std::to_string(pid);
+        }
+        else
+        {
+            std::cerr << "Unknown ppl subcommand: " << sub << "\n";
+            WSACleanup();
+            return 1;
+        }
     }
     else
     {

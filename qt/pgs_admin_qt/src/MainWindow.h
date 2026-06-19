@@ -15,6 +15,8 @@ class QTextEdit;
 class QTableWidget;
 class QTimer;
 
+class ModulePage;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -40,6 +42,9 @@ private:
     QString trUi(const QString &en, const QString &zh) const;
     void applyLanguage();
     void attachProcessHandlers();
+    void setupModuleTab(QWidget *page);
+    void refreshModuleTabs();
+    QString defaultModuleDir() const;
 
     QTabWidget *m_tabs = nullptr;
 
@@ -122,6 +127,16 @@ private:
     bool m_lastTableRefreshWasAuto = false;
     QString m_tableStdoutBuffer;
     QTimer *m_tableRefreshTimer = nullptr;
+    // module management tab
+    QTabWidget *m_moduleSubTabs = nullptr;
+    QLineEdit *m_moduleToolPathEdit = nullptr;
+    QLineEdit *m_moduleTokenEdit = nullptr;
+    QLineEdit *m_moduleDirEdit = nullptr;
+    QPushButton *m_btnModuleRefresh = nullptr;
+    QLabel *m_titleModule = nullptr;
+    QLabel *m_labelModuleToolPath = nullptr;
+    QLabel *m_labelModuleToken = nullptr;
+    QLabel *m_labelModuleDir = nullptr;
 };
 
 #endif // MAINWINDOW_H

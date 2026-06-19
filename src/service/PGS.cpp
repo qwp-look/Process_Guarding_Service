@@ -343,6 +343,21 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         }
     }
 
+    // Load plugin modules from <exe>\modules before marking the service
+    // initialised. A missing/empty directory is fine (loaded=0); failures of
+    // individual DLLs are logged inside ModuleManager and do not abort init.
+    m_modulesDir = moduleDirectoryOfSelf();
+    {
+        const int loaded = m_modules.loadFromDirectory(m_modulesDir);
+        if (loaded > 0)
+        {
+            Logger::warning("PGS: loaded " + std::to_string(loaded) + " module(s) from " + m_modulesDir);
+        }
+        else
+        {
+            Logger::warning("PGS: no modules loaded from " + m_modulesDir);
+        }
+    }
     m_initialized = true;
     Logger::warning("PGS: initialized");
     return true;
@@ -1163,6 +1178,16 @@ std::string PGS::processMessage(const std::string &message)
             return "ERR invalid pid for get";
         }
         return handleGet(pid);
+    }
+
+    if (command == "module")
+    {
+        return handleModuleCommand(args);
+    }
+
+    if (command == "ppl")
+    {
+        return handlePplCommand(args);
     }
 
     if (command == "ping")
@@ -1988,6 +2013,176 @@ void PGS::cleanupGuards()
     }
     m_guards.clear();
     m_policyByGuardId.clear();
+}
+
+// Resolve the "modules" directory beside the running pgs_service.exe. Used
+// as the plugin scan root. Falls back to a relative "modules" if the exe
+// path cannot be determined (should not happen in practice).
+std::string PGS::moduleDirectoryOfSelf()
+{
+    // Resolve the directory of the running executable (pgs_service.exe) and
+    // append a "modules" subdirectory. Modules live beside the service binary
+    // so the plugin set travels with the installation.
+    wchar_t exePath[MAX_PATH] = {0};
+    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH)
+    {
+        return "modules";
+    }
+    std::wstring wpath(exePath);
+    std::size_t slash = wpath.find_last_of(L"\\/");
+    std::wstring wdir = (slash == std::wstring::npos) ? std::wstring(L".") : wpath.substr(0, slash);
+    wdir += L"\\modules";
+
+    int n = WideCharToMultiByte(CP_UTF8, 0, wdir.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string out(n > 0 ? n - 1 : 0, '\0');
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, wdir.c_str(), -1, out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+// "module" sub-protocol dispatcher. Wire format (after auth envelope):
+//   module list
+//   module load <base64-path>
+//   module unload <name>
+//   module call <name> <kv-request>   (response forwarded verbatim)
+std::string PGS::handleModuleCommand(const std::string &args)
+{
+    // Sub-protocol: "module <sub> <rest>"
+    //   list
+    //   load <base64-path>
+    //   unload <name>
+    //   call <name> <kv-request>
+    const auto spacePos = args.find(' ');
+    const std::string sub = (spacePos == std::string::npos) ? args : args.substr(0, spacePos);
+    const std::string rest = (spacePos == std::string::npos) ? std::string() : trim(args.substr(spacePos + 1));
+
+    if (sub == "list")
+    {
+        const auto mods = m_modules.list();
+        std::string out = "OK count=" + std::to_string(mods.size());
+        for (const auto &m : mods)
+        {
+            out += "\n" + m.name + "\t" + m.version;
+        }
+        return out;
+    }
+
+    if (sub == "load")
+    {
+        if (rest.empty())
+        {
+            return "ERR module load requires a base64 path";
+        }
+        const std::string path = base64Decode(rest);
+        if (path.empty())
+        {
+            return "ERR invalid base64 path";
+        }
+        std::string err;
+        if (m_modules.load(path, err))
+        {
+            return "OK loaded";
+        }
+        return "ERR " + err;
+    }
+
+    if (sub == "unload")
+    {
+        if (rest.empty())
+        {
+            return "ERR module unload requires a name";
+        }
+        std::string err;
+        if (m_modules.unload(rest, err))
+        {
+            return "OK unloaded " + rest;
+        }
+        return "ERR " + err;
+    }
+
+    if (sub == "call")
+    {
+        // "call <name> <kv>"
+        const auto sp = rest.find(' ');
+        if (sp == std::string::npos)
+        {
+            return "ERR module call requires <name> <request>";
+        }
+        const std::string name = rest.substr(0, sp);
+        const std::string request = trim(rest.substr(sp + 1));
+        std::string response;
+        std::string err;
+        if (m_modules.invoke(name, request, response, err))
+        {
+            return response;
+        }
+        return "ERR " + err;
+    }
+
+    return "ERR unknown module subcommand";
+}
+
+// "ppl" convenience dispatcher. Routes to the ppl module so callers do not
+// need the module-call syntax. If the ppl module is not loaded, returns
+// "ERR ppl module not loaded" instead of a transport error.
+std::string PGS::handlePplCommand(const std::string &args)
+{
+    // Convenience wrapper that routes to the "ppl" module so callers do not
+    // need to remember the module-call syntax:
+    //   ppl set <pid> <signer>
+    //   ppl get <pid>
+    //   ppl clear <pid>
+    const auto spacePos = args.find(' ');
+    const std::string sub = (spacePos == std::string::npos) ? args : args.substr(0, spacePos);
+    const std::string rest = (spacePos == std::string::npos) ? std::string() : trim(args.substr(spacePos + 1));
+
+    if (sub == "set")
+    {
+        // "set <pid> <signer>"
+        const auto sp = rest.find(' ');
+        if (sp == std::string::npos)
+        {
+            return "ERR ppl set requires <pid> <signer>";
+        }
+        DWORD pid = 0;
+        if (!parsePid(trim(rest.substr(0, sp)), pid))
+        {
+            return "ERR invalid pid for ppl set";
+        }
+        const std::string signer = trim(rest.substr(sp + 1));
+        if (signer.empty())
+        {
+            return "ERR ppl set requires a signer";
+        }
+        std::string request = "op=set;pid=" + std::to_string(pid) + ";signer=" + signer;
+        std::string response;
+        std::string err;
+        if (m_modules.invoke("ppl", request, response, err))
+        {
+            return response;
+        }
+        return "ERR ppl module not loaded";
+    }
+
+    if (sub == "get" || sub == "clear")
+    {
+        DWORD pid = 0;
+        if (!parsePid(rest, pid))
+        {
+            return "ERR invalid pid for ppl " + sub;
+        }
+        std::string request = "op=" + sub + ";pid=" + std::to_string(pid);
+        std::string response;
+        std::string err;
+        if (m_modules.invoke("ppl", request, response, err))
+        {
+            return response;
+        }
+        return "ERR ppl module not loaded";
+    }
+
+    return "ERR unknown ppl subcommand";
 }
 
 } // namespace ProcessGuard
