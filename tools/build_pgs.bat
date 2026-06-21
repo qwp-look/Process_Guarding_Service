@@ -48,21 +48,21 @@ if errorlevel 1 (
 )
 
 echo [4/7] Linking pgs_service.exe...
-%COMPILER% -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -ladvapi32 -lwtsapi32 -luserenv
+%COMPILER% -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -ladvapi32 -lwtsapi32 -luserenv -lbcrypt
 if errorlevel 1 (
     echo Failed: link pgs_service.exe
     exit /b 1
 )
 
 echo [5/7] Building guard_example.exe...
-%COMPILER% %CXXFLAGS% -o %BUILD_DIR%\guard_example.exe examples\guard_example.cpp -I %INCLUDE_DIR% -lws2_32
+%COMPILER% %CXXFLAGS% -o %BUILD_DIR%\guard_example.exe examples\guard_example.cpp -I %INCLUDE_DIR% -lws2_32 -ladvapi32 -lbcrypt
 if errorlevel 1 (
     echo Failed: examples\guard_example.cpp
     exit /b 1
 )
 
 echo [6/7] Building quick_start.exe...
-%COMPILER% %CXXFLAGS% -o %BUILD_DIR%\quick_start.exe examples\quick_start.cpp -I %INCLUDE_DIR% -lws2_32
+%COMPILER% %CXXFLAGS% -o %BUILD_DIR%\quick_start.exe examples\quick_start.cpp -I %INCLUDE_DIR% -lws2_32 -ladvapi32 -lbcrypt
 if errorlevel 1 (
     echo Failed: examples\quick_start.cpp
     exit /b 1
@@ -76,7 +76,7 @@ if errorlevel 1 (
 )
 
 echo [8/8] Building pgs_bless.exe...
-%COMPILER% %CXXFLAGS% -o %BUILD_DIR%\pgs_bless.exe tools\pgs_bless.cpp -I %INCLUDE_DIR% -lws2_32
+%COMPILER% %CXXFLAGS% -o %BUILD_DIR%\pgs_bless.exe tools\pgs_bless.cpp -I %INCLUDE_DIR% -lws2_32 -ladvapi32 -lbcrypt
 if errorlevel 1 (
     echo Failed: tools\pgs_bless.cpp
     exit /b 1

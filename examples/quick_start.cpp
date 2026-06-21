@@ -9,120 +9,24 @@
 #include <string>
 #include <vector>
 
+#include "Process_Guard/PGUtil.h"
+
 #ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
 namespace
 {
-const std::string kBase64Chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789+/";
+using namespace ProcessGuard::util;
 
 int g_maxRestarts = -1; // -1 means "no"
 int g_restartIndex = 0;
 std::string g_token;
 
-std::string base64Encode(const std::string &input)
-{
-    std::string output;
-    int val = 0;
-    int valb = -6;
-    for (unsigned char c : input)
-    {
-        val = (val << 8) + c;
-        valb += 8;
-        while (valb >= 0)
-        {
-            output.push_back(kBase64Chars[(val >> valb) & 0x3F]);
-            valb -= 6;
-        }
-    }
-    if (valb > -6)
-    {
-        output.push_back(kBase64Chars[((val << 8) >> (valb + 8)) & 0x3F]);
-    }
-    while (output.size() % 4 != 0)
-    {
-        output.push_back('=');
-    }
-    return output;
-}
-
-std::string wideToUtf8(const std::wstring &input)
-{
-    if (input.empty())
-    {
-        return std::string();
-    }
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (needed <= 0)
-    {
-        return std::string();
-    }
-    std::string out(static_cast<std::size_t>(needed), '\0');
-    if (WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, &out[0], needed, nullptr, nullptr) <= 0)
-    {
-        return std::string();
-    }
-    if (!out.empty() && out.back() == '\0')
-    {
-        out.pop_back();
-    }
-    return out;
-}
-
+// Thin UTF-8 wrapper over the shared wide arg-quoting helper in PGUtil.
 std::string quoteArgUtf8(const std::string &arg)
 {
-    if (arg.empty())
-    {
-        return "\"\"";
-    }
-
-    bool needQuotes = false;
-    for (char ch : arg)
-    {
-        if (ch == ' ' || ch == '\t' || ch == '"')
-        {
-            needQuotes = true;
-            break;
-        }
-    }
-    if (!needQuotes)
-    {
-        return arg;
-    }
-
-    std::string out = "\"";
-    int backslashes = 0;
-    for (char ch : arg)
-    {
-        if (ch == '\\')
-        {
-            ++backslashes;
-            continue;
-        }
-        if (ch == '"')
-        {
-            out.append(backslashes * 2 + 1, '\\');
-            out.push_back('"');
-            backslashes = 0;
-            continue;
-        }
-        if (backslashes > 0)
-        {
-            out.append(backslashes, '\\');
-            backslashes = 0;
-        }
-        out.push_back(ch);
-    }
-    if (backslashes > 0)
-    {
-        out.append(backslashes * 2, '\\');
-    }
-    out.push_back('"');
-    return out;
+    return wideToUtf8(quoteArgW(utf8ToWide(arg)));
 }
 
 DWORD currentPid()
@@ -166,7 +70,7 @@ bool sendToPGS(const std::string &payload)
     {
         commandLine = commandLine.substr(0, lineBreak);
     }
-    const std::string wirePayload = std::string("token ") + g_token + " " + commandLine + "\n";
+    const std::string wirePayload = std::string("token ") + base64Encode(g_token) + " " + commandLine + "\n";
 
     if (send(sock, wirePayload.c_str(), static_cast<int>(wirePayload.size()), 0) == SOCKET_ERROR)
     {
@@ -175,7 +79,7 @@ bool sendToPGS(const std::string &payload)
     }
 
     std::string response;
-    char buffer[512] = {0};
+    char buffer[4096] = {0};
     for (;;)
     {
         const int received = recv(sock, buffer, static_cast<int>(sizeof(buffer) - 1), 0);
@@ -217,7 +121,7 @@ bool registerGuard()
 
     std::ostringstream oss;
     oss << "register " << currentPid() << "|" << base64Encode(path) << "|" << maxRestartsArgValue()
-        << "|" << restartArgsValue() << "\n";
+        << "|" << base64Encode(restartArgsValue()) << "\n";
     return sendToPGS(oss.str());
 }
 

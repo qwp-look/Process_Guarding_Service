@@ -51,10 +51,16 @@ public:
             return printHelp(argv[0]);
         }
         // If no token is explicitly provided, let PGS decide whether it should
-        // restore the previous persisted token hash or fall back to empty-token
-        // auth. Passing an always-hashed empty string here would hide that
-        // distinction from the core service.
-        m_bootTokenHash = args.hasToken ? hashToken(args.token) : std::string();
+        // restore the previous persisted token hash or generate a fresh random
+        // token. Passing an always-hashed empty string here would hide that
+        // distinction from the core service. Token hash is SHA-256 (via CNG).
+        m_bootTokenHash = args.hasToken ? ProcessGuard::util::sha256Hex(args.token) : std::string();
+
+        // PPL/module loading is opt-in: --enable-ppl or PGS_ENABLE_PPL=1.
+        if (args.enablePpl || std::getenv("PGS_ENABLE_PPL") != nullptr)
+        {
+            m_pgs.setPplEnabled(true);
+        }
 
         if (!args.command.empty())
         {
@@ -85,6 +91,7 @@ private:
         std::string command;
         bool hasToken{false};
         std::string token;
+        bool enablePpl{false};
     };
 
     std::string m_serviceName;
@@ -520,6 +527,12 @@ private:
                 continue;
             }
 
+            if (arg == "--enable-ppl")
+            {
+                out.enablePpl = true;
+                continue;
+            }
+
             if (arg == "install" || arg == "uninstall" || arg == "start" || arg == "stop" ||
                 arg == "status" || arg == "run" || arg == "--service")
             {
@@ -536,20 +549,6 @@ private:
         return true;
     }
 
-    static std::string hashToken(const std::string &token)
-    {
-        constexpr std::uint64_t kFnvOffset = 1469598103934665603ull;
-        constexpr std::uint64_t kFnvPrime = 1099511628211ull;
-        std::uint64_t hash = kFnvOffset;
-        for (unsigned char c : token)
-        {
-            hash ^= c;
-            hash *= kFnvPrime;
-        }
-        std::ostringstream oss;
-        oss << std::hex << std::nouppercase << std::setw(16) << std::setfill('0') << hash;
-        return oss.str();
-    }
 
     bool configureServiceRecovery(SC_HANDLE service)
     {
@@ -599,6 +598,22 @@ static std::string defaultServiceLogPath()
 int main(int argc, char *argv[])
 {
     const std::string logPath = defaultServiceLogPath();
+    // Restrict the data root (ProgramData\ProcessGuard and its logs/state) to
+    // SYSTEM + Administrators before any file is written, so persisted secrets
+    // are not world-readable.
+    {
+        std::filesystem::path logP(logPath);
+        std::filesystem::path logsDir = logP.parent_path();
+        std::filesystem::path root = logsDir.parent_path();
+        if (!root.empty())
+        {
+            ProcessGuard::util::secureCreateDirectory(root.string());
+        }
+        if (!logsDir.empty())
+        {
+            ProcessGuard::util::secureCreateDirectory(logsDir.string());
+        }
+    }
     Logger::initialize(logPath);
     Logger::warning("PGS service host boot, logPath=" + logPath);
     PGSServiceHost host("PGS", logPath);

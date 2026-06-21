@@ -859,14 +859,18 @@ void MainWindow::runBlessCommand(const QStringList &args)
 
     QStringList finalArgs = args;
     const QString token = m_tokenEdit->text();
+
+    // Pass the auth token via the environment (PGS_AUTH_TOKEN) instead of the
+    // command line so it is not visible to other local users.
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     if (!token.isNull() && !token.isEmpty())
     {
-        finalArgs << "--token" << token;
+        env.insert(QStringLiteral("PGS_AUTH_TOKEN"), token);
     }
 
     appendBlessOutput(">>> " + program + " " + finalArgs.join(' '));
     m_blessProcess->setWorkingDirectory(QFileInfo(program).absolutePath());
-    m_blessProcess->setProcessEnvironment(QProcessEnvironment::systemEnvironment());
+    m_blessProcess->setProcessEnvironment(env);
     m_blessProcess->start(program, finalArgs);
 }
 
@@ -972,15 +976,18 @@ void MainWindow::runTableRefresh(bool silentIfBusy)
 
     QStringList args{"list", "--json"};
     const QString token = m_tableTokenEdit->text();
+
+    // Pass the auth token via the environment instead of the command line.
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     if (!token.isNull() && !token.isEmpty())
     {
-        args << "--token" << token;
+        env.insert(QStringLiteral("PGS_AUTH_TOKEN"), token);
     }
 
     m_lastTableRefreshWasAuto = silentIfBusy;
     m_tableStdoutBuffer.clear();
     m_tableProcess->setWorkingDirectory(QFileInfo(program).absolutePath());
-    m_tableProcess->setProcessEnvironment(QProcessEnvironment::systemEnvironment());
+    m_tableProcess->setProcessEnvironment(env);
     m_tableProcess->start(program, args);
 }
 

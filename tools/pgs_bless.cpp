@@ -20,15 +20,10 @@
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
+#include "Process_Guard/PGUtil.h"
 namespace
 {
-const std::string kBase64Chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789+/";
 
-constexpr std::uint64_t kFnvOffset = 1469598103934665603ull;
-constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 constexpr DWORD kSocketTimeoutMs = 3000;
 
 struct ParsedSummary
@@ -51,93 +46,22 @@ constexpr ULONG kProcessCommandLineInformationClass = 60;
 
 std::string trim(std::string value)
 {
-    auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [&](unsigned char c) { return !isSpace(c); }));
-    value.erase(std::find_if(value.rbegin(), value.rend(), [&](unsigned char c) { return !isSpace(c); }).base(), value.end());
-    return value;
+    return ProcessGuard::util::trim(value);
 }
 
 std::wstring narrowToWideBestEffort(const std::string &input)
 {
-    if (input.empty())
-    {
-        return std::wstring();
-    }
-
-    auto convert = [&](UINT codePage) -> std::wstring {
-        const int needed = MultiByteToWideChar(codePage, 0, input.c_str(), -1, nullptr, 0);
-        if (needed <= 0)
-        {
-            return std::wstring();
-        }
-        std::wstring out(static_cast<std::size_t>(needed), L'\0');
-        if (MultiByteToWideChar(codePage, 0, input.c_str(), -1, &out[0], needed) <= 0)
-        {
-            return std::wstring();
-        }
-        if (!out.empty() && out.back() == L'\0')
-        {
-            out.pop_back();
-        }
-        return out;
-    };
-
-    std::wstring utf8 = convert(CP_UTF8);
-    if (!utf8.empty())
-    {
-        return utf8;
-    }
-
-    std::wstring acp = convert(CP_ACP);
-    if (!acp.empty())
-    {
-        return acp;
-    }
-
-    return std::wstring(input.begin(), input.end());
+    return ProcessGuard::util::narrowToWideBestEffort(input);
 }
 
 std::string wideToUtf8(const std::wstring &input)
 {
-    if (input.empty())
-    {
-        return std::string();
-    }
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (needed <= 0)
-    {
-        return std::string();
-    }
-    std::string out(static_cast<std::size_t>(needed), '\0');
-    if (WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, &out[0], needed, nullptr, nullptr) <= 0)
-    {
-        return std::string();
-    }
-    if (!out.empty() && out.back() == '\0')
-    {
-        out.pop_back();
-    }
-    return out;
+    return ProcessGuard::util::wideToUtf8(input);
 }
 
 std::string win32ErrorText(DWORD code)
 {
-    LPWSTR msgBuf = nullptr;
-    const DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
-    const DWORD len = FormatMessageW(flags, nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                                     reinterpret_cast<LPWSTR>(&msgBuf), 0, nullptr);
-    std::wstring msgW;
-    if (len > 0 && msgBuf)
-    {
-        msgW.assign(msgBuf, msgBuf + len);
-        LocalFree(msgBuf);
-    }
-    std::string msg = trim(wideToUtf8(msgW));
-    if (msg.empty())
-    {
-        msg = "Unknown error";
-    }
-    return "error=" + std::to_string(code) + " (" + msg + ")";
+    return ProcessGuard::util::win32ErrorText(code);
 }
 
 std::wstring normalizePathForCompare(const std::wstring &pathInput)
@@ -162,55 +86,12 @@ std::wstring normalizePathForCompare(const std::wstring &pathInput)
 
 std::string base64Encode(const std::string &input)
 {
-    std::string output;
-    int val = 0;
-    int valb = -6;
-    for (unsigned char c : input)
-    {
-        val = (val << 8) + c;
-        valb += 8;
-        while (valb >= 0)
-        {
-            output.push_back(kBase64Chars[(val >> valb) & 0x3F]);
-            valb -= 6;
-        }
-    }
-    if (valb > -6)
-    {
-        output.push_back(kBase64Chars[((val << 8) >> (valb + 8)) & 0x3F]);
-    }
-    while (output.size() % 4 != 0)
-    {
-        output.push_back('=');
-    }
-    return output;
+    return ProcessGuard::util::base64Encode(input);
 }
 
 std::string base64Decode(const std::string &input)
 {
-    std::string output;
-    int val = 0;
-    int valb = -8;
-    for (unsigned char c : input)
-    {
-        if (c == '=')
-        {
-            break;
-        }
-        const auto index = kBase64Chars.find(c);
-        if (index == std::string::npos)
-        {
-            break;
-        }
-        val = (val << 6) + static_cast<int>(index);
-        valb += 6;
-        if (valb >= 0)
-        {
-            output.push_back(static_cast<char>((val >> valb) & 0xFF));
-            valb -= 8;
-        }
-    }
-    return output;
+    return ProcessGuard::util::base64Decode(input);
 }
 
 bool parsePid(const std::string &text, DWORD &pid)
@@ -274,52 +155,13 @@ std::string maxRestartsLabel(int maxRestarts)
 
 bool queryProcessPath(DWORD pid, std::string &pathOut)
 {
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!process)
-    {
-        return false;
-    }
-
-    std::vector<wchar_t> buffer(MAX_PATH * 8, L'\0');
-    DWORD size = static_cast<DWORD>(buffer.size());
-    const BOOL ok = QueryFullProcessImageNameW(process, 0, buffer.data(), &size);
-    CloseHandle(process);
-    if (!ok || size == 0)
-    {
-        return false;
-    }
-
-    pathOut = wideToUtf8(std::wstring(buffer.data(), buffer.data() + size));
-    return !pathOut.empty();
+    return ProcessGuard::util::queryProcessPath(pid, pathOut);
 }
 
 bool computeFileHash(const std::string &pathUtf8, std::string &outHash)
 {
-    const std::wstring pathW = narrowToWideBestEffort(pathUtf8);
-    HANDLE file = CreateFileW(pathW.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE)
-    {
-        return false;
-    }
-
-    std::uint64_t hash = kFnvOffset;
-    char buffer[8192];
-    DWORD readBytes = 0;
-    while (ReadFile(file, buffer, static_cast<DWORD>(sizeof(buffer)), &readBytes, nullptr) && readBytes > 0)
-    {
-        for (DWORD i = 0; i < readBytes; ++i)
-        {
-            const unsigned char byte = static_cast<unsigned char>(buffer[i]);
-            hash ^= byte;
-            hash *= kFnvPrime;
-        }
-    }
-    CloseHandle(file);
-
-    std::ostringstream oss;
-    oss << std::hex << std::nouppercase << std::setw(16) << std::setfill('0') << hash;
-    outHash = oss.str();
-    return true;
+    // File integrity hash is SHA-256 (via CNG), matching the PGS service side.
+    return ProcessGuard::util::sha256FileHex(pathUtf8, outHash);
 }
 
 std::wstring parentDirectory(const std::wstring &path)
@@ -334,54 +176,7 @@ std::wstring parentDirectory(const std::wstring &path)
 
 std::wstring quoteArgW(const std::wstring &arg)
 {
-    if (arg.empty())
-    {
-        return L"\"\"";
-    }
-
-    bool needQuotes = false;
-    for (wchar_t ch : arg)
-    {
-        if (ch == L' ' || ch == L'\t' || ch == L'"')
-        {
-            needQuotes = true;
-            break;
-        }
-    }
-    if (!needQuotes)
-    {
-        return arg;
-    }
-
-    std::wstring out = L"\"";
-    int backslashes = 0;
-    for (wchar_t ch : arg)
-    {
-        if (ch == L'\\')
-        {
-            ++backslashes;
-            continue;
-        }
-        if (ch == L'"')
-        {
-            out.append(backslashes * 2 + 1, L'\\');
-            out.push_back(L'"');
-            backslashes = 0;
-            continue;
-        }
-        if (backslashes > 0)
-        {
-            out.append(backslashes, L'\\');
-            backslashes = 0;
-        }
-        out.push_back(ch);
-    }
-    if (backslashes > 0)
-    {
-        out.append(backslashes * 2, L'\\');
-    }
-    out.push_back(L'"');
-    return out;
+    return ProcessGuard::util::quoteArgW(arg);
 }
 
 bool splitLaunchCommand(
@@ -790,22 +585,7 @@ bool sendToPGS(
 
 std::vector<std::string> splitBy(const std::string &value, char delimiter)
 {
-    std::vector<std::string> parts;
-    std::string current;
-    for (char c : value)
-    {
-        if (c == delimiter)
-        {
-            parts.push_back(current);
-            current.clear();
-        }
-        else
-        {
-            current.push_back(c);
-        }
-    }
-    parts.push_back(current);
-    return parts;
+    return ProcessGuard::util::split(value, delimiter);
 }
 
 ParsedSummary parseSummaryLine(const std::string &line)
@@ -1205,6 +985,17 @@ int main()
         return 1;
     }
 
+    // Token resolution priority: explicit --token flag, then the PGS_AUTH_TOKEN
+    // environment variable (used by the Qt/Web backends so the secret never
+    // appears on the process command line), then empty (auth will fail).
+    if (token.empty())
+    {
+        if (const char *envToken = std::getenv("PGS_AUTH_TOKEN"))
+        {
+            token = envToken;
+        }
+    }
+
     WSADATA wsaData{};
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
     {
@@ -1213,7 +1004,9 @@ int main()
     }
 
     auto withToken = [&](const std::string &cmd) -> std::string {
-        return "token " + token + " " + cmd;
+        // Envelope: "token <base64(token)> <command>". Base64 lets the token
+        // contain spaces/special bytes; the service decodes + SHA-256-compares.
+        return "token " + base64Encode(token) + " " + cmd;
     };
 
     std::string wireCommand;
@@ -1340,7 +1133,7 @@ int main()
         }
 
         std::ostringstream oss;
-        oss << "register " << pid << "|" << base64Encode(path) << "|" << maxRestartsLabel(effectiveMax) << "|" << effectiveArgs;
+        oss << "register " << pid << "|" << base64Encode(path) << "|" << maxRestartsLabel(effectiveMax) << "|" << base64Encode(effectiveArgs);
         if (!hashValue.empty())
         {
             oss << "|" << hashValue;
@@ -1449,7 +1242,7 @@ int main()
         oss << "set-policy " << pid << "|" << maxRestartsLabel(maxRestarts);
         if (hasRestartArgs)
         {
-            oss << "|" << restartArgs;
+            oss << "|" << base64Encode(restartArgs);
         }
         wireCommand = oss.str();
     }

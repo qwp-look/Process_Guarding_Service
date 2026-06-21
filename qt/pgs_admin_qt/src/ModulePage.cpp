@@ -207,10 +207,13 @@ void ModulePage::runCommand(const QStringList &args)
         return;
     }
     QStringList finalArgs = args;
+    // Pass the auth token via the environment instead of the command line.
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     if (!m_token.isEmpty())
-        finalArgs << "--token" << m_token;
+        env.insert(QStringLiteral("PGS_AUTH_TOKEN"), m_token);
     appendOutput(">>> " + program + " " + finalArgs.join(' '));
     m_process->setWorkingDirectory(QFileInfo(program).absolutePath());
+    m_process->setProcessEnvironment(env);
     m_process->start(program, finalArgs);
 }
 

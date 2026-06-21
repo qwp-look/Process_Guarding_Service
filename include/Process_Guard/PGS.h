@@ -13,6 +13,7 @@
 #include "PGDefines.h"
 #include "PGLogger.h"
 #include "ModuleManager.h"
+#include "PGUtil.h"
 #include <condition_variable>
 #include <cstdint>
 #include <string>
@@ -102,6 +103,8 @@ namespace ProcessGuard
         bool start();
         void stop();
         bool isRunning() const;
+        // Opt-in toggle for PPL/module loading (default off). Must be set before initialize().
+        void setPplEnabled(bool enabled) { m_pplEnabled = enabled; }
 
         static constexpr const char *kServerIp = "127.0.0.1";
         static constexpr uint16_t kServerPort = 12345;
@@ -117,6 +120,7 @@ namespace ProcessGuard
         // command-oriented; dynamic thread-per-connection would be unnecessary.
         static constexpr std::size_t kClientWorkerCount = 4;
 
+        enum class RecvResult { Ok, Closed, Error, TooLarge };
     private:
         std::atomic<bool> m_running{false};
         std::atomic<bool> m_initialized{false};
@@ -147,6 +151,7 @@ namespace ProcessGuard
         ModuleManager m_modules;
         // <pgs_service.exe dir>\modules; scanned once during initialize().
         std::string m_modulesDir;
+        bool m_pplEnabled{false};
 
         void listenerLoop();
         void monitorLoop();
@@ -160,6 +165,8 @@ namespace ProcessGuard
         std::string handlePplCommand(const std::string &args);
         // Resolve <pgs_service.exe dir>\modules for the plugin scan.
         static std::string moduleDirectoryOfSelf();
+        bool isPathInsideModulesDir(const std::string &candidateUtf8) const;
+        bool writeInitialTokenFile(const std::string &stateDir, const std::string &token) const;
         std::string handleRegister(DWORD pid, const std::string &encodedPath, int maxRestarts, const std::string &restartArgs, const std::string &declaredHash);
         std::string handleIntentionalExit(DWORD pid);
         std::string handleUnregister(DWORD pid);
@@ -192,7 +199,7 @@ namespace ProcessGuard
         static bool computeFileHash(const std::string &path, std::string &outHash);
         static bool queryProcessPath(DWORD pid, std::string &outPath);
         static std::string defaultStateFilePath(const std::string &logFilePath);
-        static bool recvMessage(SOCKET socket, std::string &payload);
+        static RecvResult recvMessage(SOCKET socket, std::string &payload);
         static bool sendAll(SOCKET socket, const std::string &payload);
         static std::string makeGuardSummaryLine(const GuardInfo &guard, int restartCount);
         static std::string parentDirectory(const std::string &path);

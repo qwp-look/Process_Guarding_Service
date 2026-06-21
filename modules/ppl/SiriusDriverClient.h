@@ -11,6 +11,7 @@
 #define PGS_SIRIUS_DRIVER_CLIENT_H
 
 #include <windows.h>
+#include <winsvc.h>
 #include <string>
 
 #include "SiriusIO.h"
@@ -28,6 +29,8 @@ namespace pgs_ppl
     public:
         // hSelfModule is the HMODULE of the PPL module DLL, used to locate
         // Sirius.sys beside the module. May be nullptr (falls back to main exe).
+        SiriusDriverClient();
+        ~SiriusDriverClient();
         void setSelfModule(HMODULE hSelf) { m_hSelf = hSelf; }
 
         // Lazily load the driver (if needed) and open the device. Returns true
@@ -40,34 +43,40 @@ namespace pgs_ppl
         // Query process protection into out/outSigner.
         bool getPPL(ULONG pid, UCHAR &outType, UCHAR &outSigner, std::string &err);
 
+        // Release the device handle and, if PGS created the Sirius service,
+        // stop + delete it so the ARK-class driver does not stay loaded.
+        void shutdown();
+
     private:
         HMODULE m_hSelf = nullptr;
+        bool m_weCreatedService = false;
         HANDLE m_device = nullptr;
         std::wstring m_driverPath;
         CRITICAL_SECTION m_lock;
-        bool m_lockInit = false;
 
-        void lock()
-        {
-            if (!m_lockInit)
-            {
-                InitializeCriticalSection(&m_lock);
-                m_lockInit = true;
-            }
-            EnterCriticalSection(&m_lock);
-        }
-        void unlock()
-        {
-            if (m_lockInit)
-                LeaveCriticalSection(&m_lock);
-        }
+        // The critical section is initialized in the constructor (not lazily)
+        // so concurrent first-callers cannot race on InitializeCriticalSection.
+        void lock() { EnterCriticalSection(&m_lock); }
+        void unlock() { LeaveCriticalSection(&m_lock); }
+
 
         std::wstring resolveDriverPath();
+        bool loadSiriusDriver(const std::wstring &driverPath, std::string &err);
         static std::string toUtf8(const std::wstring &w);
         static std::wstring dirOf(HMODULE hModule);
     };
 
-    inline std::string SiriusDriverClient::toUtf8(const std::wstring &w)
+    inline SiriusDriverClient::SiriusDriverClient()
+{
+    InitializeCriticalSection(&m_lock);
+}
+
+inline SiriusDriverClient::~SiriusDriverClient()
+{
+    shutdown();
+    DeleteCriticalSection(&m_lock);
+}
+inline std::string SiriusDriverClient::toUtf8(const std::wstring &w)
     {
         if (w.empty())
             return std::string();
@@ -115,7 +124,7 @@ namespace pgs_ppl
     // name means PGS piggybacks on a driver StarlightGUI already loaded. Returns
     // true if the service is (now) running; the caller still opens the device
     // separately. err is set only on hard SCM failures.
-    inline bool loadSiriusDriver(const std::wstring &driverPath, std::string &err)
+    inline bool SiriusDriverClient::loadSiriusDriver(const std::wstring &driverPath, std::string &err)
     {
         SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
         if (!hSCM)
@@ -127,6 +136,9 @@ namespace pgs_ppl
         SC_HANDLE hService = OpenServiceW(hSCM, kSiriusServiceName, SERVICE_ALL_ACCESS);
         if (hService)
         {
+            // Pre-existing service (e.g. loaded by StarlightGUI): we did NOT
+            // create it, so shutdown() must leave it alone.
+            m_weCreatedService = false;
             SERVICE_STATUS status{};
             if (QueryServiceStatus(hService, &status))
             {
@@ -148,6 +160,9 @@ namespace pgs_ppl
             err = "CreateService failed, error=" + std::to_string(le);
             return false;
         }
+        // We created this service, so shutdown() is allowed to stop + delete it
+        // to avoid leaving the ARK-class driver loaded after PGS exits.
+        m_weCreatedService = true;
         StartServiceW(hService, 0, nullptr);
         CloseServiceHandle(hService);
         CloseServiceHandle(hSCM);
@@ -254,6 +269,39 @@ namespace pgs_ppl
         return true;
     }
 
+    // Release the device handle. If PGS created the Sirius service itself,
+    // stop and delete it so the powerful ARK-class kernel driver does not stay
+    // loaded (and reopenable by other local principals) after PGS exits. If the
+    // service pre-existed (e.g. StarlightGUI loaded it), it is left untouched.
+    inline void SiriusDriverClient::shutdown()
+    {
+        lock();
+        if (m_device && m_device != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(m_device);
+            m_device = nullptr;
+        }
+        const bool weCreated = m_weCreatedService;
+        m_weCreatedService = false;
+        unlock();
+
+        if (weCreated)
+        {
+            SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+            if (!hSCM)
+                return;
+            SC_HANDLE hService = OpenServiceW(hSCM, kSiriusServiceName,
+                                              SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
+            if (hService)
+            {
+                SERVICE_STATUS status{};
+                ControlService(hService, SERVICE_CONTROL_STOP, &status);
+                DeleteService(hService);
+                CloseServiceHandle(hService);
+            }
+            CloseServiceHandle(hSCM);
+        }
+    }
 } // namespace pgs_ppl
 
 #endif // PGS_SIRIUS_DRIVER_CLIENT_H

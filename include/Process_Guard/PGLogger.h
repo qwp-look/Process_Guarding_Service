@@ -81,6 +81,7 @@ namespace ProcessGuard
             const bool toStdErr = (level == LogLevel::ERROR_LEVEL || level == LogLevel::CRITICAL);
             if (!writeConsoleUtf8(formattedMsg, toStdErr))
             {
+                SetConsoleOutputCP(CP_UTF8);
                 if (toStdErr)
                 {
                     std::cerr << formattedMsg << std::endl;

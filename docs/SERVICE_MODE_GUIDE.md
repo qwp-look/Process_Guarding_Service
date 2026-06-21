@@ -120,9 +120,11 @@ PGS_SKIP_SMOKE=1 ./tools/verify_pgs.sh
 PGS 当前 token 规则：
 
 - 默认始终开启鉴权（服务模式/非服务模式一致）
-- token 仅以哈希形式持久化，不保存 token 明文
+- **空 token 不再被接受**：若本次启动未显式提供 token、且无持久化 token，服务会用密码学随机数生成一个 token，其 **SHA-256** 哈希存入内存与持久化，明文写入受限目录（仅 SYSTEM/Administrators 可读）下的 pgs_initial_token.txt 并在日志记录路径。
+- token 仅以 **SHA-256** 哈希形式持久化（状态文件版本 2），不保存明文；旧版（v1）FNV 哈希在迁移时被丢弃并强制重生成 token。
+- state/logs 目录以受限 ACL 创建（仅 SYSTEM + Administrators），避免本地其他用户读取 token 哈希。
 - token hash 会跟随守护归档一起恢复
-- 若本次启动未显式提供 token，则优先从归档恢复；只有首次启动且没有旧归档时，才回落为空 token（仍然鉴权）
+- **token 不走命令行**：Qt 管理端与 Web 控制台通过环境变量 PGS_AUTH_TOKEN 把 token 传给 pgs_bless，避免被本地其他用户经进程命令行查询泄露。
 
 ### 控制台运行模式
 
@@ -145,7 +147,7 @@ PGS 当前 token 规则：
 ./build/pgs_service.exe start
 ```
 
-服务由 SCM 恢复后，会先读取守护归档和 token hash 再恢复现场。只有首次启动且此前没有旧归档时，默认 token 才是空 token。要切换 token，使用 `token-set` 命令。
+服务由 SCM 恢复后，会先读取守护归档和 token hash 再恢复现场。只有首次启动且此前没有旧归档时，服务会自动生成随机 token 并写入 `pgs_initial_token.txt`（目录 ACL 仅 SYSTEM+Administrators）。要切换 token，使用 `token-set` 命令。
 
 ### 客户端携带 token
 
@@ -158,8 +160,15 @@ PGS 当前 token 规则：
 
 Qt 管理端：
 
-- 在 token 输入框填写 token，界面会自动附加到每条命令。
+- 在 token 输入框填写 token，界面会通过环境变量 `PGS_AUTH_TOKEN` 传给 `pgs_bless`（不再出现在命令行）。
 - 在“新 token”输入框填写新值，点击“更新 Token”会执行 `token-set`。
+
+方式 2：环境变量（推荐，避免命令行泄露）
+
+```bash
+export PGS_AUTH_TOKEN=your-secret-token
+./build/pgs_bless.exe ping
+```
 
 ### 更新 token（先验证旧 token）
 
@@ -178,7 +187,7 @@ Qt 管理端：
 
 ```bash
 ./build/pgs_bless.exe ping
-# 空 token 已启用时可成功；否则会返回 ERR auth failed or token missing
+# 未带 token 会返回 ERR auth failed（空 token 不再被接受）
 
 ./build/pgs_bless.exe ping --token your-secret-token
 # 应成功：OK pong
@@ -339,3 +348,23 @@ cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 ```
+
+## 7. 安全运行建议
+
+### 默认权限面（LocalSystem）
+
+`pgs_service` 以 Windows 服务方式安装后默认运行在 `LocalSystem` 账户下，具备 `SeTcbPrivilege`、加载驱动等高特权。叠加 PPL 模块（可加载内核驱动、对任意进程设 PPL）后，能触及的能力面非常大。请仅在受信任的单机上、且确实需要 PPL 能力时才启用相关功能。
+
+### 最小权限运行建议
+
+- **默认不启用 PPL/驱动**：PPL 模块（`modules/ppl`）与 `Sirius.sys` 内核驱动默认**不加载**。仅当设置环境变量 `PGS_ENABLE_PPL=1` 或向 `pgs_service` 传入 `--enable-ppl` 时才加载。非 opt-in 部署下，`ppl set/get/clear` 不可达，内核驱动也不会被引入。
+- **token 鉴权强制开启**：空 token 不再被接受；未配置 token 时服务自动生成随机 token 并写入受限目录下的 `pgs_initial_token.txt`（仅 SYSTEM/Administrators 可读）。token 哈希为 SHA-256，state/logs 目录以受限 ACL 创建。
+- **token 不走命令行**：Qt 管理端与 Web 控制台通过环境变量 `PGS_AUTH_TOKEN` 传 token 给 `pgs_bless`，避免被本地其他用户经进程命令行查询泄露。
+- **`module load` 路径白名单**：服务端只允许加载位于模块目录之内的 DLL，`..`/UNC/盘外绝对路径一律拒绝，避免任意 DLL 被加载进 SYSTEM 级服务进程。
+- **绑定回环**：PGS 管理端口默认绑定 `127.0.0.1`；Web 控制台默认绑定 `127.0.0.1` 并要求 `X-PGS-Token` 头 + `Host`/`Origin` 校验（防 DNS rebinding 与跨站 CSRF）。若需暴露到外网，必须额外加网络层鉴权/TLS，这属于显式部署决策。
+- **不要在不受信任的主机启用 PPL**：`Sirius.sys` 一旦加载常驻并暴露 `\\.\Sirius` 设备，具备 ARK 级内核能力（终止/隐藏/注入/改 token/读写内存/关 PatchGuard/关 DSE 等），任何能打开该设备的本地主体都获得完整内核级能力；用户态无法修改驱动设备 DACL。
+
+### 进一步收敛（按需）
+
+- 若不需要 PPL，可从构建产物中移除 `modules/ppl` 目录，使即便误设 `PGS_ENABLE_PPL=1` 也无模块可加载。
+- 考虑以自定义低权限服务账户运行 `pgs_service`（需评估守护目标进程所需的访问权），以缩小 LocalSystem 特权面。

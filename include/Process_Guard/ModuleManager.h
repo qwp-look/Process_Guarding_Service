@@ -11,7 +11,7 @@
  * @section threading Threading
  * All public methods take a process-wide mutex (m_mutex). PGS runs a pool of
  * 4 client-worker threads that may call invoke() concurrently, so:
- *  - invoke() is safe to call from multiple threads at once.
+ *  - invoke()/list() take a shared lock so multiple worker threads can call
  *  - load()/unload() mutate the table under the same lock, so a concurrent
  *    invoke() will either see the old or the new module set, never a torn one.
  *  - Module code itself is responsible for its own internal thread-safety.
@@ -35,6 +35,7 @@
 #include <windows.h>
 
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -109,7 +110,7 @@ namespace ProcessGuard
             int (*invoke)(const char *, char *, size_t) = nullptr;
         };
 
-        mutable std::mutex m_mutex;
+        mutable std::shared_mutex m_mutex;
         std::vector<Entry> m_modules; // lookup by lowercased name (linear; set is tiny)
 
         // Internal load assuming the caller already holds m_mutex. Used by both
@@ -117,6 +118,8 @@ namespace ProcessGuard
         bool loadLocked(const std::string &path, std::string &err);
 
         static std::string lower(const std::string &s); // ASCII lowercase for name keys
+        // Probe a candidate DLL for an export via an image-resource map (no DllMain).
+        static bool hasExportByName(const std::wstring &path, const char *exportName);
     };
 
 } // namespace ProcessGuard

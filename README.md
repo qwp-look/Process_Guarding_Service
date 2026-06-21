@@ -169,10 +169,10 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 当前实现改为：
 
-- `PGS` 默认始终开启 token 鉴权（包括服务模式和非服务模式）
-- token 仅以哈希形式持久化，不保存 token 明文
+- `PGS` 默认始终开启 token 鉴权（包括服务模式和非服务模式），**永不接受空 token**
+- token 哈希采用 SHA-256（BCrypt），仅以哈希形式持久化，不保存 token 明文
 - token hash 会跟随守护归档一起落盘并在服务重启后恢复
-- 若本次启动未显式提供 token，则会优先从归档恢复 token hash；只有首次启动且没有旧归档时，才回落为空 token（仍然鉴权，不是关闭鉴权）
+- 若本次启动未显式提供 token，则优先从归档恢复 token hash；归档也没有时，自动生成随机 64 位十六进制 token，将其 SHA-256 写入归档，明文写入 `<stateDir>/pgs_initial_token.txt`（`state` 目录 DACL 仅授予 SYSTEM + Administrators）。查看该文件获取初始 token
 
 ### A) Windows 服务模式
 
@@ -184,7 +184,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 ```
 
 服务安装后由 SCM 负责异常恢复；服务进程被系统重新拉起后，会先读守护归档与 token hash，再继续恢复守护对象。
-如果这是第一次启动且此前没有归档，默认 token 才会是空 token；若要改为新 token，请使用 `token-set`（见下）。
+如果这是第一次启动且此前没有归档，服务会自动生成随机 token 并写入 `pgs_initial_token.txt`（位置见上文）；若要改为自定义 token，请使用 `token-set`（见下）。
 
 ### B) 非服务模式（控制台）
 
@@ -194,7 +194,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 ./build/pgs_service.exe run --token your-secret-token
 ```
 
-若不传 `--token`，则会优先尝试从归档恢复 token hash；没有归档时回落为空 token。
+若不传 `--token`，则会优先尝试从归档恢复 token hash；归档也没有时自动生成随机 token（明文写入 `pgs_initial_token.txt`）。
 
 ### B.1) 归档文件位置
 
@@ -213,7 +213,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 Qt 管理端：
 
-- 在界面 `token` 输入框填写 token；GUI 会自动附加 `--token`。
+- 在界面 `token` 输入框填写 token；GUI 通过环境变量 `PGS_AUTH_TOKEN` 传递给 `pgs_bless`（不走命令行，避免本地其他用户可见）。
 - 在界面 `新 token` 输入框填写新值，点击 `更新 Token`，会执行 `token-set`。
 
 ### D) 更新 Token（先校验旧 token）

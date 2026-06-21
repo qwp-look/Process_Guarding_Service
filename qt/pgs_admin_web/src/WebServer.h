@@ -57,11 +57,13 @@ private:
     QHttpServerResponse handleServiceStatus();
     QHttpServerResponse handleServiceAction(const QString &action);
     QHttpServerResponse handleIndex() const;
+    QHttpServerResponse handleIndexHtml() const;
+    bool isRequestAuthorized(const QHttpServerRequest &request) const;
 
     // Phase-1 implementation intentionally reuses pgs_bless/pgs_service as the
     // integration boundary. That keeps the browser console thin and lets it
     // inherit mature CLI behavior instead of duplicating protocol logic. A
-    // future shared PGSClient layer can replace this without changing the UI.
+    // future shared util layer can replace this without changing the UI.
     CommandResult runTool(const QString &program, const QStringList &args, int timeoutMs = 30000) const;
     QString resolvedBlessToolPath() const;
     QString resolvedServiceToolPath() const;
@@ -72,6 +74,7 @@ private:
     static QHttpServerResponse jsonCommandResult(const CommandResult &result, const QString &message = QString(), bool allowRawStdout = true);
 
     Options m_options;
+    QString m_apiToken;
     QHttpServer *m_server = nullptr;
     QTcpServer *m_tcpServer = nullptr;
 };

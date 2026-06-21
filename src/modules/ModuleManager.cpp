@@ -18,29 +18,18 @@
  */
 #include "Process_Guard/PGModule.h"
 #include "Process_Guard/ModuleManager.h"
+#include "Process_Guard/PGUtil.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cwchar>
 #include <string>
 #include <vector>
+#include <cstring>
 
 namespace ProcessGuard
 {
 
-    namespace
-    {
-        // UTF-8 -> UTF-16 helper for Win32 wide APIs (LoadLibraryW, FindFirstFileW, ...).
-        std::wstring widen(const std::string &s)
-        {
-            if (s.empty())
-                return std::wstring();
-            int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-            std::wstring out(len, L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), len);
-            return out;
-        }
-    }
 
     ModuleManager::ModuleManager() = default;
 
@@ -48,7 +37,7 @@ namespace ProcessGuard
     // matter; modules must not call back into PGS during shutdown.
     ModuleManager::~ModuleManager()
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_mutex);
         for (Entry &e : m_modules)
         {
             if (e.shutdown)
@@ -68,10 +57,31 @@ namespace ProcessGuard
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return out;
     }
+    // Probe whether a candidate DLL exports the given symbol WITHOUT running its
+    // DllMain or loading/initializing its dependencies. We map it with
+    // DONT_RESOLVE_DLL_REFERENCES: per MSDN the system maps the image, makes its
+    // exports resolvable via GetProcAddress, but does NOT call DllMain and does
+    // NOT load referenced modules. This is the only safe way to inspect a
+    // candidate before a real LoadLibraryW: loading a second copy of a runtime
+    // DLL (e.g. libstdc++-6.dll placed beside a module) would re-run its
+    // DllMain/static init and deadlock the loader. Only DLLs that actually
+    // export PG_GetName (a mandatory PGS module export) get a real load.
+    bool ModuleManager::hasExportByName(const std::wstring &path, const char *exportName)
+    {
+        HMODULE h = LoadLibraryExW(path.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+        if (!h)
+        {
+            return false;
+        }
+        const bool found = (GetProcAddress(h, exportName) != nullptr);
+        FreeLibrary(h);
+        return found;
+    }
+
 
     bool ModuleManager::loadLocked(const std::string &path, std::string &err)
     {
-        const std::wstring wpath = widen(path);
+        const std::wstring wpath = util::utf8ToWide(path);
         HMODULE handle = LoadLibraryW(wpath.c_str());
         if (!handle)
         {
@@ -142,14 +152,14 @@ namespace ProcessGuard
 
     bool ModuleManager::load(const std::string &path, std::string &err)
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_mutex);
         return loadLocked(path, err);
     }
 
     bool ModuleManager::unload(const std::string &name, std::string &err)
     {
         const std::string key = lower(name);
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_mutex);
         for (auto it = m_modules.begin(); it != m_modules.end(); ++it)
         {
             if (lower(it->name) == key)
@@ -176,17 +186,26 @@ namespace ProcessGuard
     // observers (module list) never see a partial set.
     int ModuleManager::loadFromDirectory(const std::string &dir)
     {
-        const std::wstring wdir = widen(dir);
+        const std::wstring wdir = util::utf8ToWide(dir);
         auto ensureSep = [](std::wstring &p) {
             if (!p.empty() && p.back() != L'\\' && p.back() != L'/')
                 p += L'\\';
         };
 
         int loaded = 0;
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_mutex);
 
         // Load a DLL given by a wide path: widen->UTF-8->loadLocked (caller holds lock).
         auto loadWide = [&](const std::wstring &full) {
+            // Skip DLLs that are not PGS modules. A full LoadLibraryW on a
+            // non-module DLL (e.g. libstdc++-6.dll placed beside a module) would
+            // load a second copy of a runtime library, re-run its DllMain/static
+            // init and can deadlock the loader. Probe for the mandatory PG_GetName
+            // export via an image-resource map (no DllMain) first.
+            if (!hasExportByName(full, "PG_GetName"))
+            {
+                return;
+            }
             int len = WideCharToMultiByte(CP_UTF8, 0, full.c_str(), -1, nullptr, 0, nullptr, nullptr);
             std::string utf8(len > 0 ? len - 1 : 0, '\0');
             if (len > 0)
@@ -254,7 +273,7 @@ namespace ProcessGuard
 
     std::vector<ModuleManager::ModuleInfo> ModuleManager::list() const
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
         std::vector<ModuleInfo> out;
         out.reserve(m_modules.size());
         for (const Entry &e : m_modules)
@@ -269,7 +288,7 @@ namespace ProcessGuard
                                std::string &response, std::string &err)
     {
         const std::string key = lower(name);
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
         for (const Entry &e : m_modules)
         {
             if (lower(e.name) == key)

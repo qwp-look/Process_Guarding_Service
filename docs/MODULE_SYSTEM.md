@@ -307,6 +307,11 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 - PPL 提权是高敏感操作。把任意进程提为 PPL（尤其 `WinTcb`/`WinSystem`）后，该进程将难以被终止/调试/读取内存——请明确知晓后果再操作。
 - `Sirius.sys` 为第三方（StarlightGUI，作者 Stars）提供的内核驱动二进制，Apache-2.0 授权再分发。复用意味着 PGS 依赖该驱动的加载环境（测试签名或其签名）。长期更干净的做法是自建驱动，但工作量与维护成本显著更高。
 - 模块系统会执行任意 DLL 中的代码。仅加载可信来源的模块；模块目录的写入权限应受控。
+- **module load 路径白名单**：服务端只允许加载位于 PGS 模块目录（<pgs_service.exe 目录>/modules）之内的 DLL，..、UNC、盘外绝对路径一律拒绝。避免任意本地主体借 module load 把任意 DLL 加载进 SYSTEM 级服务进程。
+- **PPL/驱动按需启用（opt-in）**：默认启动 PGS **不会**加载 ppl 模块、也不会加载 Sirius.sys。仅当设置环境变量 PGS_ENABLE_PPL=1 或向 pgs_service 传入 --enable-ppl 时，loadFromDirectory 才加载 ppl 模块目录。降低默认引入内核驱动的风险。
+- **ppl set 可对任意进程设 PPL**：包括对 PGS 自身或任意第三方进程设 WinTcb/Antimalware。这是产品设计能力，风险由「opt-in 加载 + 强制 token 鉴权」收敛；非 opt-in 部署下该能力不可达。
+- **Sirius.sys 攻击面告警**：一旦加载，Sirius.sys 常驻并暴露设备 \\\\.\\Sirius，具备 ARK 级内核能力（终止/隐藏/挂起进程、注入 DLL、改进程 token、读写内存、关 PatchGuard、关 DSE、删回调等）。任何能打开该设备的本地主体都获得完整内核级能力。PGS 仅在「我们自己创建了该服务」时才在关闭时 STOP+DeleteService 卸载它（StarlightGUI 已加载的不动）；用户态无法修改驱动的设备 DACL，请勿在不受信任的主机上启用 PPL。
+- **鉴权前置**：所有 module/ppl 命令仍受 PGS token 鉴权保护；空 token 不再被接受（无 token 时服务自动生成随机 token 并写入受限目录下的 pgs_initial_token.txt）。
 
 ---
 

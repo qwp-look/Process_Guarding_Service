@@ -163,7 +163,9 @@ PG_MODULE_API int PG_Init(void * /*reserved*/)
 
 PG_MODULE_API void PG_Shutdown(void)
 {
-    // Device handle leaks at process exit; nothing to do here.
+    // Close the device handle and, if PGS created the Sirius service, stop +
+    // delete it so the ARK-class kernel driver does not stay loaded after exit.
+    g_driver.shutdown();
 }
 
 // PG_Invoke: parse "op=<set|get|clear>;pid=N[;signer=X]" and dispatch.

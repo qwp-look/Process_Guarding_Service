@@ -134,8 +134,8 @@
 - `pgs_service run --token <value>` 可设置本次进程启动 token
 - 若本次启动未显式指定 token，则会优先从归档恢复 token hash
 - `set-token` 命令用于在线切换 token：必须先验证旧 token 才会更新，并会立即写回归档
-- 只有首次启动且此前没有归档时，才会回落为空 token（鉴权仍开启）
-- 客户端行为：`pgs_bless` 使用 `--token <value>`，Qt GUI 使用 token 输入框并传给 `pgs_bless`
+- 只有首次启动且此前没有归档时，自动生成随机 64 位十六进制 token（明文写入 `pgs_initial_token.txt`），永不接受空 token
+- 客户端行为：`pgs_bless` 使用 `--token <value>` 或环境变量 `PGS_AUTH_TOKEN`；Qt GUI 通过 `PGS_AUTH_TOKEN` 环境变量传给 `pgs_bless`（不走命令行，避免本地泄露）
 
 ## 5. 重启流程
 
@@ -181,7 +181,7 @@
 
 ## 6. 哈希校验
 
-`register` 可带哈希字段（FNV-1a 64-bit hex）：
+`register` 可带哈希字段（SHA-256 hex）：
 
 - 提供且匹配：通过
 - 提供且不匹配：拒绝注册

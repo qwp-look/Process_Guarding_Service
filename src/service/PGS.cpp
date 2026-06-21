@@ -24,120 +24,20 @@
 #pragma comment(lib, "userenv.lib")
 #endif
 
+
 namespace
 {
-// File-local helpers in this translation unit intentionally stay small and
-// dependency-free. They normalize input, translate encodings, and wrap a few
-// Windows-specific primitives so the PGS member functions can focus on guard
-// lifecycle rather than string plumbing.
-const std::string kBase64Chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789+/";
+// File-local helpers: only the few that are NOT in ProcessGuard::util live here
+// (numeric/bool parsing and the WTS session-token helper). Encoding, hashing,
+// path/process and string helpers now come from Process_Guard/PGUtil.h.
 
 constexpr int kDefaultMaxRestarts = 3;
 constexpr const char *kRestartIndexToken = "${PGS_RESTART_INDEX}";
-constexpr int kStateFileVersion = 1;
-constexpr std::uint64_t kFnvOffset = 1469598103934665603ull;
-constexpr std::uint64_t kFnvPrime = 1099511628211ull;
-
-std::string trim(std::string value)
-{
-    const auto isNotSpace = [](unsigned char c) { return !std::isspace(c); };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), isNotSpace));
-    value.erase(std::find_if(value.rbegin(), value.rend(), isNotSpace).base(), value.end());
-    return value;
-}
-
-std::string toLowerAscii(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return value;
-}
-
-std::string wideToUtf8(const std::wstring &input)
-{
-    if (input.empty())
-    {
-        return std::string();
-    }
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (needed <= 0)
-    {
-        return std::string();
-    }
-    std::string out(static_cast<std::size_t>(needed), '\0');
-    if (WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, &out[0], needed, nullptr, nullptr) <= 0)
-    {
-        return std::string();
-    }
-    if (!out.empty() && out.back() == '\0')
-    {
-        out.pop_back();
-    }
-    return out;
-}
-
-std::string base64Decode(const std::string &input)
-{
-    std::string output;
-    int val = 0;
-    int valb = -8;
-    for (unsigned char c : input)
-    {
-        if (c == '=')
-        {
-            break;
-        }
-        const auto index = kBase64Chars.find(c);
-        if (index == std::string::npos)
-        {
-            break;
-        }
-        val = (val << 6) + static_cast<int>(index);
-        valb += 6;
-        if (valb >= 0)
-        {
-            output.push_back(static_cast<char>((val >> valb) & 0xFF));
-            valb -= 8;
-        }
-    }
-    return output;
-}
-
-std::string replaceAll(std::string text, const std::string &from, const std::string &to)
-{
-    if (from.empty())
-    {
-        return text;
-    }
-    std::size_t startPos = 0;
-    while ((startPos = text.find(from, startPos)) != std::string::npos)
-    {
-        text.replace(startPos, from.length(), to);
-        startPos += to.length();
-    }
-    return text;
-}
-
-std::string hashToken(const std::string &token)
-{
-    std::uint64_t hash = kFnvOffset;
-    for (unsigned char c : token)
-    {
-        hash ^= c;
-        hash *= kFnvPrime;
-    }
-    std::ostringstream oss;
-    oss << std::hex << std::nouppercase << std::setw(16) << std::setfill('0') << hash;
-    return oss.str();
-}
+constexpr int kStateFileVersion = 2;
 
 bool parseUnsignedLongLong(const std::string &value, std::uint64_t &out)
 {
-    const std::string text = trim(value);
+    const std::string text = ProcessGuard::util::trim(value);
     if (text.empty())
     {
         return false;
@@ -167,7 +67,7 @@ bool parseDwordValue(const std::string &value, DWORD &out)
 
 bool parseBoolFlag(const std::string &value, bool &out)
 {
-    const std::string text = trim(value);
+    const std::string text = ProcessGuard::util::trim(value);
     if (text == "1")
     {
         out = true;
@@ -190,108 +90,14 @@ bool queryUserTokenForSession(DWORD sessionId, HANDLE &userToken)
     }
     return WTSQueryUserToken(sessionId, &userToken) == TRUE;
 }
-
-std::wstring utf8ToWide(const std::string &input)
-{
-    if (input.empty())
-    {
-        return std::wstring();
-    }
-    const int needed = MultiByteToWideChar(CP_UTF8, 0, input.c_str(), -1, nullptr, 0);
-    if (needed <= 0)
-    {
-        return std::wstring();
-    }
-    std::wstring out(static_cast<std::size_t>(needed), L'\0');
-    if (MultiByteToWideChar(CP_UTF8, 0, input.c_str(), -1, &out[0], needed) <= 0)
-    {
-        return std::wstring();
-    }
-    if (!out.empty() && out.back() == L'\0')
-    {
-        out.pop_back();
-    }
-    return out;
-}
-
-std::string normalizePathForCompare(const std::string &pathUtf8)
-{
-    const std::wstring pathW = utf8ToWide(pathUtf8);
-    if (pathW.empty())
-    {
-        return std::string();
-    }
-
-    std::vector<wchar_t> fullPathBuf(32768, L'\0');
-    const DWORD fullLen = GetFullPathNameW(pathW.c_str(), static_cast<DWORD>(fullPathBuf.size()), fullPathBuf.data(), nullptr);
-    if (fullLen == 0 || fullLen >= fullPathBuf.size())
-    {
-        return std::string();
-    }
-
-    std::wstring normalized(fullPathBuf.data(), fullLen);
-    std::replace(normalized.begin(), normalized.end(), L'/', L'\\');
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
-        return static_cast<wchar_t>(towlower(ch));
-    });
-    return wideToUtf8(normalized);
-}
-
-std::wstring quoteArgW(const std::wstring &arg)
-{
-    if (arg.empty())
-    {
-        return L"\"\"";
-    }
-
-    bool needQuotes = false;
-    for (wchar_t ch : arg)
-    {
-        if (ch == L' ' || ch == L'\t' || ch == L'"')
-        {
-            needQuotes = true;
-            break;
-        }
-    }
-    if (!needQuotes)
-    {
-        return arg;
-    }
-
-    std::wstring out = L"\"";
-    int backslashes = 0;
-    for (wchar_t ch : arg)
-    {
-        if (ch == L'\\')
-        {
-            ++backslashes;
-            continue;
-        }
-        if (ch == L'"')
-        {
-            out.append(backslashes * 2 + 1, L'\\');
-            out.push_back(L'"');
-            backslashes = 0;
-            continue;
-        }
-        if (backslashes > 0)
-        {
-            out.append(backslashes, L'\\');
-            backslashes = 0;
-        }
-        out.push_back(ch);
-    }
-    if (backslashes > 0)
-    {
-        out.append(backslashes * 2, L'\\');
-    }
-    out.push_back(L'"');
-    return out;
-}
 } // namespace
 
 namespace ProcessGuard
 {
+
+using namespace util; // pull in base64/utf8/hash/path helpers from PGUtil.h
+    // Alias the utf8 path-normalizer to the historical call-site name.
+    inline std::string normalizePathForCompare(const std::string &p) { return util::normalizePathForCompareUtf8(p); }
 
 PGS::PGS() = default;
 
@@ -317,6 +123,28 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         return false;
     }
 
+    // Ensure the data root (logs + state) is created with a restrictive DACL
+    // (SYSTEM + Administrators only) so the persisted token hash and guard
+    // archive are not world-readable under ProgramData.
+    {
+        std::filesystem::path statePath = std::filesystem::path(defaultStateFilePath(logFilePath));
+        std::filesystem::path stateDir = statePath.parent_path();
+        std::filesystem::path root = stateDir.parent_path();
+        if (!root.empty())
+        {
+            util::secureCreateDirectory(root.string());
+        }
+        if (!stateDir.empty())
+        {
+            util::secureCreateDirectory(stateDir.string());
+        }
+        std::filesystem::path logRoot = std::filesystem::path(logFilePath).parent_path();
+        if (!logRoot.empty() && logRoot.filename() == "logs")
+        {
+            util::secureCreateDirectory(logRoot.string());
+        }
+    }
+
     m_stateFilePath = defaultStateFilePath(logFilePath);
     if (!loadPersistedState())
     {
@@ -326,6 +154,7 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     m_requireAuth = true;
     if (!authTokenHash.empty())
     {
+        // Host supplied an explicit (already-hashed) token hash. Trust it as-is.
         m_authTokenHash = toLowerAscii(trim(authTokenHash));
         Logger::warning("PGS: auth enabled (token hash provided by host)");
     }
@@ -334,8 +163,23 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         std::lock_guard<std::mutex> lock(m_authMutex);
         if (m_authTokenHash.empty())
         {
-            m_authTokenHash = hashToken(std::string());
-            Logger::warning("PGS: auth enabled (empty token hash fallback)");
+            // No persisted token and no host-supplied one: generate a strong
+            // random token, persist its SHA-256 hash, and write the plaintext
+            // bootstrap token to a restricted file so the operator can read it
+            // (once) and configure clients. We never accept an empty token.
+            const std::string generated = util::randomBytesHex(32);
+            m_authTokenHash = toLowerAscii(sha256Hex(generated));
+            const std::string stateDir = std::filesystem::path(m_stateFilePath).parent_path().string();
+            if (writeInitialTokenFile(stateDir, generated))
+            {
+                Logger::warning("PGS: auth enabled (random token generated; bootstrap token written to "
+                                + (stateDir.empty() ? std::string("pgs_initial_token.txt")
+                                                    : stateDir + "\\pgs_initial_token.txt") + ")");
+            }
+            else
+            {
+                Logger::warning("PGS: auth enabled (random token generated; FAILED to write bootstrap token file)");
+            }
         }
         else
         {
@@ -348,14 +192,24 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     // individual DLLs are logged inside ModuleManager and do not abort init.
     m_modulesDir = moduleDirectoryOfSelf();
     {
-        const int loaded = m_modules.loadFromDirectory(m_modulesDir);
-        if (loaded > 0)
+        // PPL module loading is opt-in: it pulls in the Sirius kernel driver
+        // (an ARK-class driver exposing far more than PPL). Only load modules
+        // when the operator explicitly enables PPL via PGS_ENABLE_PPL=1.
+        if (m_pplEnabled)
         {
-            Logger::warning("PGS: loaded " + std::to_string(loaded) + " module(s) from " + m_modulesDir);
+            const int loaded = m_modules.loadFromDirectory(m_modulesDir);
+            if (loaded > 0)
+            {
+                Logger::warning("PGS: loaded " + std::to_string(loaded) + " module(s) from " + m_modulesDir);
+            }
+            else
+            {
+                Logger::warning("PGS: no modules loaded from " + m_modulesDir);
+            }
         }
         else
         {
-            Logger::warning("PGS: no modules loaded from " + m_modulesDir);
+            Logger::warning("PGS: module loading disabled (PPL opt-in off; set PGS_ENABLE_PPL=1 to enable)");
         }
     }
     m_initialized = true;
@@ -580,15 +434,30 @@ bool PGS::loadPersistedState()
 
     if (version != kStateFileVersion)
     {
-        Logger::warning("PGS: unsupported state file version, ignoring persisted archive");
-        m_persistedGuards.clear();
-        m_nextGuardId = 1ull;
-        return false;
+        // Migration: v1 stored a non-cryptographic FNV-1a token hash. We do not
+        // trust it under SHA-256 auth, so drop only the auth hash (forcing a
+        // fresh random token to be generated in initialize()) while KEEPING the
+        // guard records so SCM-restart recovery still works. The file is then
+        // rewritten at v2 by the next persistState().
+        if (version == 1)
+        {
+            Logger::warning("PGS: migrating state file v1 -> v2 (guard records kept, auth token reset)");
+            persistedAuthHash.clear();
+        }
+        else
+        {
+            Logger::warning("PGS: unsupported state file version, ignoring persisted archive");
+            m_persistedGuards.clear();
+            m_nextGuardId = 1ull;
+            return false;
+        }
     }
 
     m_nextGuardId = std::max<std::uint64_t>(1ull, nextGuardId);
     {
         std::lock_guard<std::mutex> authLock(m_authMutex);
+        // Only accept a persisted auth hash at v2. An empty hash here makes
+        // initialize() generate a fresh random token.
         m_authTokenHash = persistedAuthHash;
     }
 
@@ -898,15 +767,22 @@ void PGS::handleClient(SOCKET clientSocket)
 
     std::string response = "ERR recv failed";
     std::string request;
-    if (recvMessage(clientSocket, request))
+    const RecvResult recvState = recvMessage(clientSocket, request);
+    if (recvState == RecvResult::Ok)
     {
         // Authentication, command parsing, and dispatch are intentionally kept
         // inside processMessage() so the transport layer stays simple here.
         response = processMessage(request);
     }
-    else if (request.size() >= kMaxMessageSize)
+    else if (recvState == RecvResult::TooLarge)
     {
         response = "ERR message too large";
+    }
+    else if (recvState == RecvResult::Closed && !request.empty())
+    {
+        // Peer closed after sending a partial (newline-less) line: still try
+        // to process what we have, mirroring the previous lenient behavior.
+        response = processMessage(request);
     }
 
     if (response.empty())
@@ -1044,6 +920,12 @@ void PGS::monitorLoop()
                     persisted.hashVerified = newGuard.hashVerified;
                 }
                 persistState();
+                // Note (TOCTOU): by this point the dead guard was already
+                // erased from m_guards, so a concurrent "unregister <oldPid>"
+                // would have returned "pid not found". The guard is re-added
+                // under its new pid per the restart policy. To permanently stop
+                // a guard that keeps dying, use "intentional" or unregister the
+                // new pid after it restarts.
                 Logger::warning("PGS: auto-attached restarted guard pid=" + std::to_string(newGuard.pid));
             }
             else
@@ -1109,7 +991,10 @@ std::string PGS::processMessage(const std::string &message)
             return "ERR invalid max-restarts";
         }
 
-        const std::string restartArgs = (fields.size() >= 4) ? trim(fields[3]) : std::string();
+        // restartArgs is base64-encoded on the wire so '|', newlines and
+        // leading/trailing spaces survive intact (path is also base64). The
+        // declared hash is a hex string with no '|'.
+        const std::string restartArgs = (fields.size() >= 4) ? base64Decode(fields[3]) : std::string();
         const std::string declaredHash = (fields.size() >= 5) ? trim(fields[4]) : std::string();
         return handleRegister(pid, trim(fields[1]), maxRestarts, restartArgs, declaredHash);
     }
@@ -1151,7 +1036,7 @@ std::string PGS::processMessage(const std::string &message)
         {
             return "ERR invalid max-restarts in set-policy";
         }
-        const std::string restartArgs = (fields.size() >= 3) ? trim(fields[2]) : std::string();
+        const std::string restartArgs = (fields.size() >= 3) ? base64Decode(fields[2]) : std::string();
         return handleSetPolicy(pid, maxRestarts, restartArgs);
     }
 
@@ -1423,8 +1308,8 @@ std::string PGS::handleSetToken(const std::string &encodedOldToken, const std::s
 {
     const std::string oldToken = base64Decode(encodedOldToken);
     const std::string newToken = base64Decode(encodedNewToken);
-    const std::string oldHash = hashToken(oldToken);
-    const std::string newHash = hashToken(newToken);
+    const std::string oldHash = sha256Hex(oldToken);
+    const std::string newHash = sha256Hex(newToken);
 
     {
         std::lock_guard<std::mutex> lock(m_authMutex);
@@ -1728,109 +1613,28 @@ std::string PGS::maxRestartsLabel(int maxRestarts)
 
 std::vector<std::string> PGS::splitByChar(const std::string &value, char delimiter)
 {
-    std::vector<std::string> parts;
-    std::string current;
-    for (char ch : value)
-    {
-        if (ch == delimiter)
-        {
-            parts.push_back(current);
-            current.clear();
-        }
-        else
-        {
-            current.push_back(ch);
-        }
-    }
-    parts.push_back(current);
-    return parts;
+    return util::split(value, delimiter);
 }
 
 std::string PGS::base64Encode(const std::string &input)
 {
-    std::string output;
-    int val = 0;
-    int valb = -6;
-    for (unsigned char c : input)
-    {
-        val = (val << 8) + c;
-        valb += 8;
-        while (valb >= 0)
-        {
-            output.push_back(kBase64Chars[(val >> valb) & 0x3F]);
-            valb -= 6;
-        }
-    }
-    if (valb > -6)
-    {
-        output.push_back(kBase64Chars[((val << 8) >> (valb + 8)) & 0x3F]);
-    }
-    while (output.size() % 4 != 0)
-    {
-        output.push_back('=');
-    }
-    return output;
+    return util::base64Encode(input);
 }
 
 bool PGS::computeFileHash(const std::string &path, std::string &outHash)
 {
-    const std::wstring pathW = utf8ToWide(path);
-    if (pathW.empty())
-    {
-        return false;
-    }
-
-    HANDLE file = CreateFileW(pathW.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE)
-    {
-        return false;
-    }
-
-    std::uint64_t hash = kFnvOffset;
-    char buffer[8192];
-    DWORD readBytes = 0;
-    while (ReadFile(file, buffer, static_cast<DWORD>(sizeof(buffer)), &readBytes, nullptr) && readBytes > 0)
-    {
-        for (DWORD i = 0; i < readBytes; ++i)
-        {
-            const unsigned char byte = static_cast<unsigned char>(buffer[i]);
-            hash ^= byte;
-            hash *= kFnvPrime;
-        }
-    }
-    CloseHandle(file);
-
-    std::ostringstream oss;
-    oss << std::hex << std::nouppercase << std::setw(16) << std::setfill('0') << hash;
-    outHash = oss.str();
-    return true;
+    // File integrity hash is SHA-256 (via CNG). The previous FNV-1a hash was
+    // non-cryptographic and trivially collidable; SHA-256 is still fast enough
+    // for the rare register/verify path.
+    return util::sha256FileHex(path, outHash);
 }
 
 bool PGS::queryProcessPath(DWORD pid, std::string &outPath)
 {
-    // QueryFullProcessImageNameW gives the service its own source of truth for
-    // the image path, which is later used for register validation and restarts.
-    outPath.clear();
-    HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!processHandle)
-    {
-        return false;
-    }
-
-    std::vector<wchar_t> buffer(32768, L'\0');
-    DWORD size = static_cast<DWORD>(buffer.size());
-    const BOOL ok = QueryFullProcessImageNameW(processHandle, 0, buffer.data(), &size);
-    CloseHandle(processHandle);
-    if (!ok || size == 0)
-    {
-        return false;
-    }
-
-    outPath = wideToUtf8(std::wstring(buffer.data(), buffer.data() + size));
-    return !outPath.empty();
+    return util::queryProcessPath(pid, outPath);
 }
 
-bool PGS::recvMessage(SOCKET socket, std::string &payload)
+PGS::RecvResult PGS::recvMessage(SOCKET socket, std::string &payload)
 {
     payload.clear();
     bool sawData = false;
@@ -1841,11 +1645,11 @@ bool PGS::recvMessage(SOCKET socket, std::string &payload)
         const int received = recv(socket, buffer, static_cast<int>(sizeof(buffer)), 0);
         if (received == 0)
         {
-            return sawData;
+            return sawData ? RecvResult::Closed : RecvResult::Error;
         }
         if (received < 0)
         {
-            return false;
+            return RecvResult::Error;
         }
 
         sawData = true;
@@ -1856,14 +1660,14 @@ bool PGS::recvMessage(SOCKET socket, std::string &payload)
         // bound to avoid memory abuse and accidental truncation bugs.
         if (payload.size() > kMaxMessageSize)
         {
-            return false;
+            return RecvResult::TooLarge;
         }
 
         const std::size_t newlinePos = payload.find('\n');
         if (newlinePos != std::string::npos)
         {
             payload.resize(newlinePos);
-            return true;
+            return RecvResult::Ok;
         }
     }
 }
@@ -1917,10 +1721,10 @@ std::string PGS::parentDirectory(const std::string &path)
 
 bool PGS::stripAuthEnvelope(const std::string &message, std::string &commandLine) const
 {
-    // Authentication is deliberately simple: the client sends the clear-text
-    // token on the local management socket, while the service only stores and
-    // compares a hash in memory. The command line that leaves this function is
-    // always the auth-free payload understood by processMessage().
+    // Authentication envelope: "token <base64(token)> <commandLine>". The token
+    // is base64-encoded so it may contain arbitrary bytes/spaces; the service
+    // only stores and compares a SHA-256 hash in memory. An empty token is never
+    // accepted (initialize() always establishes a non-empty token).
     commandLine = trim(message);
     if (commandLine.empty())
     {
@@ -1943,8 +1747,13 @@ bool PGS::stripAuthEnvelope(const std::string &message, std::string &commandLine
         return false;
     }
 
-    const std::string token = commandLine.substr(tokenStart, tokenEnd - tokenStart);
-    const std::string inputHash = hashToken(token);
+    const std::string encodedToken = commandLine.substr(tokenStart, tokenEnd - tokenStart);
+    const std::string token = base64Decode(encodedToken);
+    if (token.empty())
+    {
+        return false;
+    }
+    const std::string inputHash = sha256Hex(token);
     std::lock_guard<std::mutex> lock(m_authMutex);
     if (inputHash != m_authTokenHash)
     {
@@ -2041,6 +1850,76 @@ std::string PGS::moduleDirectoryOfSelf()
     return out;
 }
 
+bool PGS::isPathInsideModulesDir(const std::string &candidateUtf8) const
+{
+    if (m_modulesDir.empty() || candidateUtf8.empty())
+    {
+        return false;
+    }
+    const std::string candidateNorm = normalizePathForCompareUtf8(candidateUtf8);
+    const std::string modulesNorm = normalizePathForCompareUtf8(m_modulesDir);
+    if (candidateNorm.empty() || modulesNorm.empty())
+    {
+        return false;
+    }
+    // Require the candidate to be strictly under the modules directory.
+    // Both sides are already lowercased, backslashed, absolute.
+    if (candidateNorm == modulesNorm)
+    {
+        return false; // the directory itself is not a DLL
+    }
+    const std::string prefix = modulesNorm + "\\";
+    if (candidateNorm.rfind(prefix, 0) != 0)
+    {
+        return false;
+    }
+    // Must be an existing .dll file.
+    const DWORD attr = GetFileAttributesW(utf8ToWide(candidateUtf8).c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool PGS::writeInitialTokenFile(const std::string &stateDir, const std::string &token) const
+{
+    std::filesystem::path filePath = stateDir.empty() ? std::filesystem::path("pgs_initial_token.txt")
+                                                      : std::filesystem::path(stateDir) / "pgs_initial_token.txt";
+    // Ensure the directory exists with a restrictive ACL before writing.
+    if (!stateDir.empty())
+    {
+        util::secureCreateDirectory(stateDir);
+    }
+    std::ofstream out(filePath, std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!out.is_open())
+    {
+        return false;
+    }
+    out << token;
+    out.flush();
+    out.close();
+
+    // Apply the same restrictive DACL to the file (SYSTEM + Administrators).
+    const std::wstring wpath = utf8ToWide(filePath.string());
+    PSECURITY_DESCRIPTOR psd = nullptr;
+    ULONG sdSize = 0;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &psd, &sdSize) &&
+        psd)
+    {
+        BOOL daclPresent = FALSE;
+        BOOL daclDefaulted = FALSE;
+        PACL dacl = nullptr;
+        GetSecurityDescriptorDacl(psd, &daclPresent, &dacl, &daclDefaulted);
+        SetNamedSecurityInfoW(const_cast<LPWSTR>(wpath.c_str()), SE_FILE_OBJECT,
+                              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                              nullptr, nullptr, dacl, nullptr);
+        LocalFree(psd);
+    }
+    return true;
+}
+
 // "module" sub-protocol dispatcher. Wire format (after auth envelope):
 //   module list
 //   module load <base64-path>
@@ -2078,6 +1957,15 @@ std::string PGS::handleModuleCommand(const std::string &args)
         if (path.empty())
         {
             return "ERR invalid base64 path";
+        }
+        // Security: only allow loading DLLs that live inside the service's
+        // modules directory. Without this, any authenticated client could
+        // LoadLibrary an arbitrary DLL into the (LocalSystem) service process
+        // and run code as SYSTEM.
+        if (!isPathInsideModulesDir(path))
+        {
+            Logger::warning("PGS: rejected module load outside modules dir, path=" + path);
+            return "ERR module load restricted to modules directory";
         }
         std::string err;
         if (m_modules.load(path, err))

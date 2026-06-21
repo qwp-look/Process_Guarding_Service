@@ -15,6 +15,8 @@
 #include <QProcessEnvironment>
 #include <QTcpServer>
 #include <QUrlQuery>
+#include <QRandomGenerator>
+#include <QCryptographicHash>
 
 namespace
 {
@@ -67,9 +69,10 @@ table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px 12p
 </div>
 </div>
 <script>
+window.PGS_API_TOKEN="__PGS_API_TOKEN__";
 const logBox=document.getElementById('log-box');const guardBody=document.getElementById('guard-body');
 function logLine(m){const t=new Date().toLocaleTimeString();logBox.textContent+=`[${t}] ${m}\n`;logBox.scrollTop=logBox.scrollHeight}
-async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const text=await r.text();let data={};try{data=text?JSON.parse(text):{}}catch{data={ok:false,message:text}}if(!r.ok||data.ok===false){throw new Error(data.message||text||`request failed: ${r.status}`)}return data}
+async function api(path,options={}){const hdrs=Object.assign({'Content-Type':'application/json'},options.headers||{});hdrs['X-PGS-Token']=window.PGS_API_TOKEN;const r=await fetch(path,Object.assign({},options,{headers:hdrs}));const text=await r.text();let data={};try{data=text?JSON.parse(text):{}}catch{data={ok:false,message:text}}if(!r.ok||data.ok===false){throw new Error(data.message||text||`request failed: ${r.status}`)}return data}
 function guardPayload(){return{pid:document.getElementById('guard-pid').value.trim(),path:document.getElementById('guard-path').value.trim(),max_restarts:document.getElementById('guard-max').value.trim(),restart_args:document.getElementById('guard-restart-args').value.trim()}}
 async function refreshAll(){await Promise.allSettled([pingPgs(),serviceStatus(),refreshGuards()])}
 async function pingPgs(){try{const d=await api('/api/ping');document.getElementById('metric-ping').textContent='ok';logLine(d.message||'ping ok')}catch(e){document.getElementById('metric-ping').textContent='down';logLine(`ping failed: ${e.message}`)}}
@@ -92,30 +95,85 @@ setInterval(refreshGuards,2000);refreshAll();
 WebServer::WebServer(Options options, QObject *parent)
     : QObject(parent), m_options(std::move(options)), m_server(new QHttpServer(this))
 {
+    // Generate a per-process API token that the browser must echo back in the
+    // X-PGS-Token header. It is embedded in the served index page (same-origin
+    // readable) so a cross-site page cannot read it and therefore cannot forge
+    // the custom header on a cross-origin request.
+    QByteArray bytes(32, '\0');
+    for (int i = 0; i < bytes.size(); ++i)
+    {
+        bytes[i] = static_cast<char>(QRandomGenerator::global()->generate() & 0xFF);
+    }
+    m_apiToken = QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
 }
 
+// Authorize an /api/* request: require the X-PGS-Token header to match the
+// per-process API token, AND verify Host is loopback (DNS-rebinding defense)
+// and Origin (when present) is the local listening origin (CSRF defense).
+// Because X-PGS-Token is a custom header, a cross-site fetch cannot set it
+// without a CORS preflight, which this server never grants.
+bool WebServer::isRequestAuthorized(const QHttpServerRequest &request) const
+{
+    const QString token = request.value("X-PGS-Token").trimmed();
+    if (token.isEmpty() || token != m_apiToken)
+    {
+        return false;
+    }
+
+    // Host header must refer to the loopback address we listen on.
+    const QString host = request.value("Host").trimmed();
+    const QString expectedHost = QStringLiteral("%1:%2").arg(m_options.bindAddress).arg(m_options.httpPort);
+    const QString expectedAlt = QStringLiteral("localhost:%1").arg(m_options.httpPort);
+    if (!host.isEmpty() && host != expectedHost && host != expectedAlt)
+    {
+        return false;
+    }
+
+    // Origin (sent by browsers on cross-origin/cors requests): when present it
+    // must be the local listening origin or empty.
+    const QString origin = request.value("Origin").trimmed();
+    if (!origin.isEmpty())
+    {
+        const QString selfOrigin = QStringLiteral("http://%1").arg(expectedHost);
+        const QString selfOriginAlt = QStringLiteral("http://%1").arg(expectedAlt);
+        if (origin != selfOrigin && origin != selfOriginAlt)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Served HTML now embeds the API token so the same-origin browser UI can call
+// /api/* with the X-PGS-Token header. A cross-site page cannot read this HTML.
+QHttpServerResponse WebServer::handleIndexHtml() const
+{
+    QString html = indexHtml();
+    html.replace(QStringLiteral("__PGS_API_TOKEN__"), m_apiToken);
+    return QHttpServerResponse(QByteArray("text/html; charset=utf-8"), html.toUtf8());
+}
 bool WebServer::start()
 {
     using Method = QHttpServerRequest::Method;
     // Routes are intentionally coarse-grained and JSON-oriented. The browser UI
     // should consume stable HTTP resources, not the raw OK/ERR line protocol
     // spoken by PGS itself.
-    m_server->route("/", Method::Get, this, [this]() { return handleIndex(); });
+    m_server->route("/", Method::Get, this, [this]() { return handleIndexHtml(); });
     m_server->route("/api/health", Method::Get, this, [this]() { return handleHealth(); });
-    m_server->route("/api/ping", Method::Get, this, [this]() { return handlePing(); });
-    m_server->route("/api/guards", Method::Get, this, [this]() { return handleGuards(); });
-    m_server->route("/api/guard", Method::Get, this, [this](const QHttpServerRequest &request) { return handleGuard(request); });
-    m_server->route("/api/bless", Method::Post, this, [this](const QHttpServerRequest &request) { return handleBless(request); });
-    m_server->route("/api/bless-start", Method::Post, this, [this](const QHttpServerRequest &request) { return handleBlessStart(request); });
-    m_server->route("/api/policy", Method::Post, this, [this](const QHttpServerRequest &request) { return handlePolicy(request); });
-    m_server->route("/api/unbless", Method::Post, this, [this](const QHttpServerRequest &request) { return handleUnbless(request); });
-    m_server->route("/api/intentional", Method::Post, this, [this](const QHttpServerRequest &request) { return handleIntentional(request); });
-    m_server->route("/api/token", Method::Post, this, [this](const QHttpServerRequest &request) { return handleTokenUpdate(request); });
-    m_server->route("/api/service/status", Method::Get, this, [this]() { return handleServiceStatus(); });
-    m_server->route("/api/service/install", Method::Post, this, [this]() { return handleServiceAction("install"); });
-    m_server->route("/api/service/start", Method::Post, this, [this]() { return handleServiceAction("start"); });
-    m_server->route("/api/service/stop", Method::Post, this, [this]() { return handleServiceAction("stop"); });
-    m_server->route("/api/service/uninstall", Method::Post, this, [this]() { return handleServiceAction("uninstall"); });
+    m_server->route("/api/ping", Method::Get, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handlePing(); });
+    m_server->route("/api/guards", Method::Get, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleGuards(); });
+    m_server->route("/api/guard", Method::Get, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleGuard(request); });
+    m_server->route("/api/bless", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleBless(request); });
+    m_server->route("/api/bless-start", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleBlessStart(request); });
+    m_server->route("/api/policy", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handlePolicy(request); });
+    m_server->route("/api/unbless", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleUnbless(request); });
+    m_server->route("/api/intentional", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleIntentional(request); });
+    m_server->route("/api/token", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleTokenUpdate(request); });
+    m_server->route("/api/service/status", Method::Get, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleServiceStatus(); });
+    m_server->route("/api/service/install", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleServiceAction("install"); });
+    m_server->route("/api/service/start", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleServiceAction("start"); });
+    m_server->route("/api/service/stop", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleServiceAction("stop"); });
+    m_server->route("/api/service/uninstall", Method::Post, this, [this](const QHttpServerRequest &request) { if (!isRequestAuthorized(request)) return jsonError("unauthorized", 401); return handleServiceAction("uninstall"); });
 
     if (!m_tcpServer)
     {
@@ -398,7 +456,14 @@ WebServer::CommandResult WebServer::runTool(const QString &program, const QStrin
     process.setProgram(program);
     process.setArguments(args);
     process.setWorkingDirectory(QFileInfo(program).absolutePath());
-    process.setProcessEnvironment(QProcessEnvironment::systemEnvironment());
+    // Pass the PGS auth token through the environment instead of the command
+    // line so other local users cannot read it via process command-line queries.
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    if (!m_options.pgsToken.isEmpty())
+    {
+        env.insert(QStringLiteral("PGS_AUTH_TOKEN"), m_options.pgsToken);
+    }
+    process.setProcessEnvironment(env);
     process.start();
     result.started = process.waitForStarted(5000);
     if (!result.started)
@@ -471,12 +536,10 @@ QString WebServer::resolvedServiceToolPath() const
 QStringList WebServer::blessBaseArguments() const
 {
     // The browser never needs to understand the raw token protocol. The web
-    // backend holds the current PGS token and injects it into every CLI call.
+    // backend holds the current PGS token and injects it into every CLI call
+    // via the PGS_AUTH_TOKEN environment variable (see runTool), never on the
+    // command line where other local users could read it.
     QStringList args{"--host", m_options.pgsHost, "--port", QString::number(m_options.pgsPort)};
-    if (!m_options.pgsToken.isEmpty())
-    {
-        args << "--token" << m_options.pgsToken;
-    }
     return args;
 }
 
