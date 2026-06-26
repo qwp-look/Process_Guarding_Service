@@ -35,6 +35,12 @@ if errorlevel 1 (
 REM Module system: ModuleManager is linked into pgs_service.exe.
 echo [2.5/9] Compiling module manager...
 %COMPILER% %CXXFLAGS% -c src\modules\ModuleManager.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\ModuleManager.o
+echo [2.6/9] Compiling PGS protocol layer...
+%COMPILER% %CXXFLAGS% -c src\service\PGSProtocol.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGSProtocol.o
+if errorlevel 1 (
+    echo Failed: src\service\PGSProtocol.cpp
+    exit /b 1
+)
 if errorlevel 1 (
     echo Failed: src\modules\ModuleManager.cpp
     exit /b 1
@@ -48,7 +54,7 @@ if errorlevel 1 (
 )
 
 echo [4/7] Linking pgs_service.exe...
-%COMPILER% -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -ladvapi32 -lwtsapi32 -luserenv -lbcrypt
+%COMPILER% -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\PGSProtocol.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -ladvapi32 -lwtsapi32 -luserenv -lbcrypt
 if errorlevel 1 (
     echo Failed: link pgs_service.exe
     exit /b 1
@@ -75,8 +81,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [8/8] Building pgs_bless.exe...
-%COMPILER% %CXXFLAGS% -o %BUILD_DIR%\pgs_bless.exe tools\pgs_bless.cpp -I %INCLUDE_DIR% -lws2_32 -ladvapi32 -lbcrypt
+echo [8/8] Building pgs_bless.exe (links shared PGSClient)...
+%COMPILER% %CXXFLAGS% -c src\common\PGSClient.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGSClient.o
+if errorlevel 1 (
+    echo Failed: src\common\PGSClient.cpp
+    exit /b 1
+)
+%COMPILER% %CXXFLAGS% -o %BUILD_DIR%\pgs_bless.exe tools\pgs_bless.cpp %BUILD_DIR%\PGSClient.o -I %INCLUDE_DIR% -lws2_32 -ladvapi32 -lbcrypt
 if errorlevel 1 (
     echo Failed: tools\pgs_bless.cpp
     exit /b 1

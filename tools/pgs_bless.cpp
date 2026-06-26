@@ -21,6 +21,7 @@
 #endif
 
 #include "Process_Guard/PGUtil.h"
+#include "Process_Guard/PGSClient.h"
 namespace
 {
 
@@ -121,36 +122,12 @@ bool parsePid(const std::string &text, DWORD &pid)
 
 bool parseMaxRestarts(const std::string &value, int &outMaxRestarts)
 {
-    if (value == "no")
-    {
-        outMaxRestarts = -1;
-        return true;
-    }
-    if (value.empty())
-    {
-        return false;
-    }
-    for (char c : value)
-    {
-        if (c < '0' || c > '9')
-        {
-            return false;
-        }
-    }
-    try
-    {
-        outMaxRestarts = std::stoi(value);
-        return outMaxRestarts >= 0;
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return ProcessGuard::util::parseMaxRestarts(value, outMaxRestarts);
 }
 
 std::string maxRestartsLabel(int maxRestarts)
 {
-    return maxRestarts < 0 ? "no" : std::to_string(maxRestarts);
+    return ProcessGuard::client::maxRestartsLabel(maxRestarts);
 }
 
 bool queryProcessPath(DWORD pid, std::string &pathOut)
@@ -503,84 +480,21 @@ bool startProcessFromCommand(
     return true;
 }
 
-bool sendAll(SOCKET socket, const std::string &payload)
-{
-    std::size_t totalSent = 0;
-    while (totalSent < payload.size())
-    {
-        const int sent = send(socket,
-                              payload.data() + totalSent,
-                              static_cast<int>(payload.size() - totalSent),
-                              0);
-        if (sent <= 0)
-        {
-            return false;
-        }
-        totalSent += static_cast<std::size_t>(sent);
-    }
-    return true;
-}
-
 bool sendToPGS(
     const std::string &host,
     unsigned short port,
     const std::string &commandPayload,
     std::string &responseOut)
 {
-    // The CLI speaks the same small line-oriented protocol as the Qt admin.
-    // Even though requests are short, we still honor socket timeouts and full
-    // writes so automation does not depend on single-send behavior.
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET)
-    {
-        return false;
-    }
-
-    sockaddr_in serverAddr{};
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr) != 1)
-    {
-        closesocket(sock);
-        return false;
-    }
-
-    if (connect(sock, reinterpret_cast<sockaddr *>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
-    {
-        closesocket(sock);
-        return false;
-    }
-
-    const DWORD timeoutMs = kSocketTimeoutMs;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeoutMs), sizeof(timeoutMs));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeoutMs), sizeof(timeoutMs));
-
-    std::string payload = commandPayload;
-    if (payload.empty() || payload.back() != '\n')
-    {
-        payload.push_back('\n');
-    }
-    if (!sendAll(sock, payload))
-    {
-        closesocket(sock);
-        return false;
-    }
-
-    responseOut.clear();
-    char buffer[1024];
-    for (;;)
-    {
-        const int received = recv(sock, buffer, static_cast<int>(sizeof(buffer)), 0);
-        if (received <= 0)
-        {
-            break;
-        }
-        responseOut.append(buffer, static_cast<std::size_t>(received));
-    }
-
-    closesocket(sock);
-    responseOut = trim(responseOut);
-    return true;
+    // Delegate to the shared PGSClient transport so the CLI, Qt and Web front
+    // ends share one implementation of the line-oriented protocol. The caller
+    // is responsible for wrapping the command in the auth envelope (withToken).
+    ProcessGuard::client::ClientOptions opts;
+    opts.host = host;
+    opts.port = port;
+    const auto resp = ProcessGuard::client::sendCommand(opts, commandPayload, kSocketTimeoutMs);
+    responseOut = resp.payload;
+    return resp.ok;
 }
 
 std::vector<std::string> splitBy(const std::string &value, char delimiter)
@@ -607,33 +521,7 @@ ParsedSummary parseSummaryLine(const std::string &line)
 
 std::string jsonEscape(const std::string &value)
 {
-    std::string out;
-    out.reserve(value.size() + 8);
-    for (char c : value)
-    {
-        switch (c)
-        {
-        case '\\':
-            out += "\\\\";
-            break;
-        case '"':
-            out += "\\\"";
-            break;
-        case '\n':
-            out += "\\n";
-            break;
-        case '\r':
-            out += "\\r";
-            break;
-        case '\t':
-            out += "\\t";
-            break;
-        default:
-            out.push_back(c);
-            break;
-        }
-    }
-    return out;
+    return ProcessGuard::client::jsonEscape(value);
 }
 
 void printSummaries(const std::vector<std::string> &lines, bool jsonOutput)
@@ -1006,7 +894,7 @@ int main()
     auto withToken = [&](const std::string &cmd) -> std::string {
         // Envelope: "token <base64(token)> <command>". Base64 lets the token
         // contain spaces/special bytes; the service decodes + SHA-256-compares.
-        return "token " + base64Encode(token) + " " + cmd;
+        return ProcessGuard::client::withAuthToken(token, cmd);
     };
 
     std::string wireCommand;

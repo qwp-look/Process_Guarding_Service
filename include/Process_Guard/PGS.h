@@ -119,6 +119,7 @@ namespace ProcessGuard
         // Small fixed-size worker pool because request traffic is low-volume and
         // command-oriented; dynamic thread-per-connection would be unnecessary.
         static constexpr std::size_t kClientWorkerCount = 4;
+        static constexpr int kDefaultMaxRestarts = 3;
 
         enum class RecvResult { Ok, Closed, Error, TooLarge };
     private:

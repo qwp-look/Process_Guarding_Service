@@ -208,6 +208,74 @@ namespace ProcessGuard
             return parts;
         }
 
+        // Parse a decimal pid (digits only, 1..0xFFFFFFFF, 0 rejected). Shared by
+        // the service core and the CLI so both apply the same strict validation.
+        inline bool parsePid(const std::string &text, DWORD &outPid)
+        {
+            const std::string value = trim(text);
+            if (value.empty())
+            {
+                return false;
+            }
+            for (char c : value)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            try
+            {
+                const unsigned long parsed = std::stoul(value);
+                if (parsed == 0 || parsed > 0xFFFFFFFFul)
+                {
+                    return false;
+                }
+                outPid = static_cast<DWORD>(parsed);
+                return true;
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+        }
+
+        // Parse max-restarts: "no" => -1 (unlimited), else a non-negative decimal.
+        inline bool parseMaxRestarts(const std::string &text, int &outMaxRestarts)
+        {
+            const std::string value = trim(text);
+            if (value == "no")
+            {
+                outMaxRestarts = -1;
+                return true;
+            }
+            if (value.empty())
+            {
+                return false;
+            }
+            for (char c : value)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            try
+            {
+                outMaxRestarts = std::stoi(value);
+                return outMaxRestarts >= 0;
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+        }
+
+        inline std::string maxRestartsLabel(int maxRestarts)
+        {
+            return maxRestarts < 0 ? std::string("no") : std::to_string(maxRestarts);
+        }
+
         inline std::string replaceAll(std::string text, const std::string &from, const std::string &to)
         {
             if (from.empty())
@@ -445,6 +513,22 @@ namespace ProcessGuard
                 oss << std::setw(2) << static_cast<unsigned int>(b);
             }
             return oss.str();
+        }
+
+        // Constant-time equality for fixed-length secrets/hashes. Leaks only the
+        // length (acceptable for SHA-256 hex), never the first differing byte.
+        inline bool constantTimeEquals(const std::string &a, const std::string &b)
+        {
+            if (a.size() != b.size())
+            {
+                return false;
+            }
+            unsigned char diff = 0;
+            for (std::size_t i = 0; i < a.size(); ++i)
+            {
+                diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+            }
+            return diff == 0;
         }
 
         // Create a directory (recursively) and apply a restrictive DACL granting

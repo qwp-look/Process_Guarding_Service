@@ -16,17 +16,21 @@ if (QT_VERSION_MAJOR EQUAL 6)
         src/main.cpp
         src/WebServer.h
         src/WebServer.cpp
+        ../../src/common/PGSClient.cpp
     )
 else()
     add_executable(pgs_admin_web
         src/main.cpp
         src/WebServer.h
         src/WebServer.cpp
+        ../../src/common/PGSClient.cpp
     )
 endif()
 
+target_include_directories(pgs_admin_web PRIVATE ../../include)
 target_link_libraries(pgs_admin_web PRIVATE
     Qt${QT_VERSION_MAJOR}::Core
     Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::HttpServer
+    ws2_32
 )

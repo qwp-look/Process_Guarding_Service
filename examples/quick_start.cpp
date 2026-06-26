@@ -132,34 +132,6 @@ void notifyIntentionalExit()
     sendToPGS(oss.str());
 }
 
-bool parseMaxRestarts(const std::string &value, int &outMaxRestarts)
-{
-    if (value == "no")
-    {
-        outMaxRestarts = -1;
-        return true;
-    }
-    if (value.empty())
-    {
-        return false;
-    }
-    for (char c : value)
-    {
-        if (c < '0' || c > '9')
-        {
-            return false;
-        }
-    }
-    try
-    {
-        outMaxRestarts = std::stoi(value);
-        return outMaxRestarts >= 0;
-    }
-    catch (...)
-    {
-        return false;
-    }
-}
 
 void showUsage(const char *exeName)
 {

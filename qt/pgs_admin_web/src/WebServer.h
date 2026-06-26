@@ -65,6 +65,7 @@ private:
     // inherit mature CLI behavior instead of duplicating protocol logic. A
     // future shared util layer can replace this without changing the UI.
     CommandResult runTool(const QString &program, const QStringList &args, int timeoutMs = 30000) const;
+    CommandResult runPgsDirect(const QString &wireCommand) const;
     QString resolvedBlessToolPath() const;
     QString resolvedServiceToolPath() const;
     QStringList blessBaseArguments() const;

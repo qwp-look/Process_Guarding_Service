@@ -17,12 +17,66 @@
 #include <QUrlQuery>
 #include <QRandomGenerator>
 #include <QCryptographicHash>
+#include "Process_Guard/PGSClient.h"
 
 namespace
 {
 QString bodyValue(const QJsonObject &obj, const QString &key)
 {
     return obj.value(key).toString().trimmed();
+}
+
+// Parse one "PID=1;SESSION=0;ALIVE=1;...;PATH_B64=...;RESTART_ARGS_B64=..." line
+// into the same JSON shape pgs_bless --json produces, so the browser frontend
+// does not change when the web backend switches from QProcess to direct TCP.
+QJsonObject parseGuardKvLine(const QString &line)
+{
+    QJsonObject obj;
+    std::string pathB64;
+    std::string argsB64;
+    const QStringList parts = line.split(QLatin1Char(';'));
+    for (const QString &part : parts)
+    {
+        const int eq = part.indexOf(QLatin1Char('='));
+        if (eq < 0)
+        {
+            continue;
+        }
+        const QString key = part.left(eq).trimmed().toLower();
+        const QString val = part.mid(eq + 1).trimmed();
+        if (key == QLatin1String("path_b64"))
+        {
+            pathB64 = val.toStdString();
+        }
+        else if (key == QLatin1String("restart_args_b64"))
+        {
+            argsB64 = val.toStdString();
+        }
+        else
+        {
+            obj.insert(key, val);
+        }
+    }
+    obj.insert(QStringLiteral("path"), QString::fromStdString(ProcessGuard::client::base64Decode(pathB64)));
+    obj.insert(QStringLiteral("restart_args"), QString::fromStdString(ProcessGuard::client::base64Decode(argsB64)));
+    return obj;
+}
+
+// Split a raw PGS "list"/"get" reply into guard JSON objects. The reply shape is
+// "OK [count=N]\nPID=...;...\nPID=...;...". ERR replies yield an empty list.
+QJsonArray parseGuardReply(const QString &reply)
+{
+    QJsonArray out;
+    const QStringList lines = reply.split(QLatin1Char('\n'));
+    for (const QString &line : lines)
+    {
+        const QString trimmed = line.trimmed();
+        if (trimmed.startsWith(QLatin1String("PID=")))
+        {
+            out.append(parseGuardKvLine(trimmed));
+        }
+    }
+    return out;
 }
 
 QString indexHtml()
@@ -210,29 +264,19 @@ QHttpServerResponse WebServer::handleHealth() const
 
 QHttpServerResponse WebServer::handlePing()
 {
-    QStringList args{"ping"};
-    args << blessBaseArguments();
-    return jsonCommandResult(runTool(resolvedBlessToolPath(), args), "PGS ping completed");
+    return jsonCommandResult(runPgsDirect(QStringLiteral("ping")), QStringLiteral("PGS ping completed"));
 }
 
 QHttpServerResponse WebServer::handleGuards()
 {
-    QStringList args{"list", "--json"};
-    args << blessBaseArguments();
-    const CommandResult result = runTool(resolvedBlessToolPath(), args);
-    if (!result.started || !result.finished || result.exitCode != 0)
+    const CommandResult result = runPgsDirect(QStringLiteral("list"));
+    if (!result.started || result.exitCode != 0)
     {
-        return jsonCommandResult(result, "failed to query guards");
-    }
-    QJsonParseError parseError;
-    const QJsonDocument doc = QJsonDocument::fromJson(result.stdOut.toUtf8(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !doc.isArray())
-    {
-        return jsonError(QStringLiteral("guard list JSON parse failed: %1").arg(parseError.errorString()), 500);
+        return jsonCommandResult(result, QStringLiteral("failed to query guards"));
     }
     QJsonObject obj;
     obj.insert("ok", true);
-    obj.insert("guards", doc.array());
+    obj.insert("guards", parseGuardReply(result.stdOut));
     return QHttpServerResponse(obj);
 }
 
@@ -243,22 +287,15 @@ QHttpServerResponse WebServer::handleGuard(const QHttpServerRequest &request)
     {
         return jsonError("pid is required");
     }
-    QStringList args{"get", "--pid", pid, "--json"};
-    args << blessBaseArguments();
-    const CommandResult result = runTool(resolvedBlessToolPath(), args);
-    if (!result.started || !result.finished || result.exitCode != 0)
+    const CommandResult result = runPgsDirect(QStringLiteral("get ") + pid);
+    if (!result.started || result.exitCode != 0)
     {
-        return jsonCommandResult(result, "failed to query guard");
+        return jsonCommandResult(result, QStringLiteral("failed to query guard"));
     }
-    QJsonParseError parseError;
-    const QJsonDocument doc = QJsonDocument::fromJson(result.stdOut.toUtf8(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !doc.isArray())
-    {
-        return jsonError(QStringLiteral("guard JSON parse failed: %1").arg(parseError.errorString()), 500);
-    }
+    const QJsonArray guards = parseGuardReply(result.stdOut);
     QJsonObject obj;
     obj.insert("ok", true);
-    obj.insert("guard", doc.array().isEmpty() ? QJsonObject{} : doc.array().first().toObject());
+    obj.insert("guard", guards.isEmpty() ? QJsonObject{} : guards.first().toObject());
     return QHttpServerResponse(obj);
 }
 
@@ -334,15 +371,11 @@ QHttpServerResponse WebServer::handlePolicy(const QHttpServerRequest &request)
     {
         return jsonError("pid and max_restarts are required");
     }
-
-    QStringList args{"policy", "--pid", pid, "--max-restarts", maxRestarts};
+    // Wire format: "set-policy <pid>|<maxRestarts>|<base64(restartArgs)>"
     const QString restartArgs = bodyValue(body, "restart_args");
-    if (!restartArgs.isEmpty())
-    {
-        args << "--restart-args" << restartArgs;
-    }
-    args << blessBaseArguments();
-    return jsonCommandResult(runTool(resolvedBlessToolPath(), args), "policy updated");
+    const std::string argsB64 = ProcessGuard::client::base64Encode(restartArgs.toStdString());
+    const QString wire = QStringLiteral("set-policy %1|%2|%3").arg(pid, maxRestarts, QString::fromStdString(argsB64));
+    return jsonCommandResult(runPgsDirect(wire), QStringLiteral("policy updated"));
 }
 
 QHttpServerResponse WebServer::handleUnbless(const QHttpServerRequest &request)
@@ -351,22 +384,19 @@ QHttpServerResponse WebServer::handleUnbless(const QHttpServerRequest &request)
     const QString path = bodyValue(body, "path");
     const QString pid = bodyValue(body, "pid");
 
-    QStringList args;
+    // By-pid unregister is a pure protocol round-trip, so go direct. By-path
+    // still needs client-side list+match (pgs_bless unbless-path), so keep QProcess.
+    if (!pid.isEmpty())
+    {
+        return jsonCommandResult(runPgsDirect(QStringLiteral("unregister ") + pid), QStringLiteral("unbless completed"));
+    }
     if (!path.isEmpty())
     {
-        args << "unbless-path" << "--path" << path;
+        QStringList args{"unbless-path", "--path", path};
+        args << blessBaseArguments();
+        return jsonCommandResult(runTool(resolvedBlessToolPath(), args), QStringLiteral("unbless completed"));
     }
-    else if (!pid.isEmpty())
-    {
-        args << "unbless" << "--pid" << pid;
-    }
-    else
-    {
-        return jsonError("pid or path is required");
-    }
-
-    args << blessBaseArguments();
-    return jsonCommandResult(runTool(resolvedBlessToolPath(), args), "unbless completed");
+    return jsonError("pid or path is required");
 }
 
 QHttpServerResponse WebServer::handleIntentional(const QHttpServerRequest &request)
@@ -377,9 +407,7 @@ QHttpServerResponse WebServer::handleIntentional(const QHttpServerRequest &reque
     {
         return jsonError("pid is required");
     }
-    QStringList args{"intentional", "--pid", pid};
-    args << blessBaseArguments();
-    return jsonCommandResult(runTool(resolvedBlessToolPath(), args), "intentional exit marked");
+    return jsonCommandResult(runPgsDirect(QStringLiteral("intentional ") + pid), QStringLiteral("intentional exit marked"));
 }
 
 QHttpServerResponse WebServer::handleTokenUpdate(const QHttpServerRequest &request)
@@ -392,20 +420,19 @@ QHttpServerResponse WebServer::handleTokenUpdate(const QHttpServerRequest &reque
         return jsonError("new_token is required");
     }
 
-    QStringList args{"token-set", "--new-token", newToken};
-    if (!oldToken.isEmpty())
+    // Wire format: "set-token <base64(oldToken)>|<base64(newToken)>".
+    // The service verifies oldToken against the current hash before rotating.
+    const std::string oldB64 = ProcessGuard::client::base64Encode((oldToken.isEmpty() ? m_options.pgsToken : oldToken).toStdString());
+    const std::string newB64 = ProcessGuard::client::base64Encode(newToken.toStdString());
+    const QString wire = QStringLiteral("set-token %1|%2").arg(QString::fromStdString(oldB64), QString::fromStdString(newB64));
+    const CommandResult result = runPgsDirect(wire);
+    if (!result.started || result.exitCode != 0)
     {
-        args << "--old-token" << oldToken;
-    }
-    args << blessBaseArguments();
-    const CommandResult result = runTool(resolvedBlessToolPath(), args);
-    if (!result.started || !result.finished || result.exitCode != 0)
-    {
-        return jsonCommandResult(result, "token update failed");
+        return jsonCommandResult(result, QStringLiteral("token update failed"));
     }
 
     m_options.pgsToken = newToken;
-    return jsonCommandResult(result, "token updated");
+    return jsonCommandResult(result, QStringLiteral("token updated"));
 }
 
 QHttpServerResponse WebServer::handleServiceStatus()
@@ -437,6 +464,28 @@ QHttpServerResponse WebServer::handleServiceAction(const QString &action)
 QHttpServerResponse WebServer::handleIndex() const
 {
     return QHttpServerResponse(QByteArray("text/html; charset=utf-8"), indexHtml().toUtf8());
+}
+
+// Talk to PGS directly over the shared TCP client instead of spawning
+// pgs_bless.exe. Used for pure protocol round-trips (ping/list/get/policy/
+// unregister/intentional/set-token) where no client-side launch logic is
+// needed. Commands that must create processes (bless-start) still go through
+// runTool() + pgs_bless.exe.
+WebServer::CommandResult WebServer::runPgsDirect(const QString &wireCommand) const
+{
+    CommandResult result;
+    ProcessGuard::client::ClientOptions opts;
+    opts.host = m_options.pgsHost.toStdString();
+    opts.port = m_options.pgsPort;
+    opts.token = m_options.pgsToken.toStdString();
+    const std::string envelope = ProcessGuard::client::withAuthToken(opts.token, wireCommand.toStdString());
+    const auto resp = ProcessGuard::client::sendCommand(opts, envelope);
+    result.started = resp.ok;
+    result.finished = resp.ok;
+    result.exitCode = resp.ok ? 0 : -1;
+    result.stdOut = QString::fromStdString(resp.payload);
+    result.errorText = QString::fromStdString(resp.error);
+    return result;
 }
 
 WebServer::CommandResult WebServer::runTool(const QString &program, const QStringList &args, int timeoutMs) const

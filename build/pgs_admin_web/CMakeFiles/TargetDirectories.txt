@@ -1,0 +1,5 @@
+C:/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service/build/pgs_admin_web/CMakeFiles/pgs_admin_web.dir
+C:/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service/build/pgs_admin_web/CMakeFiles/edit_cache.dir
+C:/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service/build/pgs_admin_web/CMakeFiles/rebuild_cache.dir
+C:/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service/build/pgs_admin_web/CMakeFiles/pgs_admin_web_autogen_timestamp_deps.dir
+C:/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service/build/pgs_admin_web/CMakeFiles/pgs_admin_web_autogen.dir

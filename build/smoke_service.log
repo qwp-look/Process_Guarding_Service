@@ -1,0 +1,5 @@
+[2026-06-26 22:45:13.669] [WARN] PGS service host boot, logPath=C:/tmp/pgs_pd\ProcessGuard\logs\pgs_service.log
+[2026-06-26 22:45:13.671] [WARN] PGS: auth enabled (random token generated; FAILED to write bootstrap token file)
+[2026-06-26 22:45:13.671] [WARN] PGS: module loading disabled (PPL opt-in off; set PGS_ENABLE_PPL=1 to enable)
+[2026-06-26 22:45:13.671] [WARN] PGS: initialized
+[2026-06-26 22:45:13.673] [WARN] PGS: started
