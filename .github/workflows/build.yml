@@ -12,26 +12,23 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Cache the pacman package download cache. The windows-2025 image ships
-      # MSYS2 itself at C:\msys64 but NOT the mingw-w64 toolchain (gcc/cmake/
-      # make), so the first run downloads ~300MB of packages. By caching
-      # C:\msys64\var\cache\pacman\pkg, subsequent runs reuse the downloaded
-      # .pkg.tar.zst files and pacman only unpacks them locally -- no network
-      # re-download. This cuts the toolchain step from ~80s to ~15s.
-      - name: Cache MSYS2 pacman packages
+      # Cache the INSTALLED MinGW64 toolchain (C:\msys64\mingw64), not just the
+      # pacman package files. The windows-2025 image preinstalls MSYS2 itself
+      # but NOT the mingw-w64 toolchain, so without this every run spends ~75s
+      # letting pacman sync databases + verify signatures + unpack ~40 packages
+      # into a clean image. Caching the installed tree lets us skip pacman
+      # entirely on hit: g++.exe/cmake/make are already in place.
+      - name: Cache MinGW64 toolchain
+        id: mingw-cache
         uses: actions/cache@v4
         with:
-          path: C:\msys64\var\cache\pacman\pkg
-          key: msys2-mingw64-pkgs-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            msys2-mingw64-pkgs-${{ runner.os }}-
+          path: C:\msys64\mingw64
+          key: msys2-mingw64-installed-${{ runner.os }}-v1
 
       - name: Install MinGW64 toolchain
+        if: steps.mingw-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          # MSYS2 is preinstalled at C:\msys64 (pacman 6.1.0) but the mingw-w64
-          # gcc/cmake/make packages are not. Install them; with the cache above,
-          # pacman reuses cached .pkg files and only fetches what is missing.
           & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make'
 
       - name: Build C++ core, CLI and examples
