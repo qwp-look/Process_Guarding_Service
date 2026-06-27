@@ -12,18 +12,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Cache the INSTALLED MinGW64 toolchain (C:\msys64\mingw64), not just the
-      # pacman package files. The windows-2025 image preinstalls MSYS2 itself
-      # but NOT the mingw-w64 toolchain, so without this every run spends ~75s
-      # letting pacman sync databases + verify signatures + unpack ~40 packages
-      # into a clean image. Caching the installed tree lets us skip pacman
-      # entirely on hit: g++.exe/cmake/make are already in place.
+      # Cache only the compile-critical parts of the installed MinGW64
+      # toolchain (bin/lib/include + the mingw target sysroot). We exclude
+      # share/ on purpose: it is ~40k doc/man/cmake-help files that the
+      # build never reads, and actions/cache restore time scales with file
+      # count, so listing them blew the restore from ~15s to ~40s.
       - name: Cache MinGW64 toolchain
         id: mingw-cache
         uses: actions/cache@v4
         with:
-          path: C:\msys64\mingw64
-          key: msys2-mingw64-installed-${{ runner.os }}-v1
+          path: |
+            C:\msys64\mingw64\bin
+            C:\msys64\mingw64\lib
+            C:\msys64\mingw64\include
+            C:\msys64\mingw64\x86_64-w64-mingw32
+          key: msys2-mingw64-installed-${{ runner.os }}-v2
 
       - name: Install MinGW64 toolchain
         if: steps.mingw-cache.outputs.cache-hit != 'true'
