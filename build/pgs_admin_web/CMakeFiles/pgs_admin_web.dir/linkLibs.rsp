@@ -1,1 +1,0 @@
- C:/msys64/mingw64/lib/libQt6HttpServer.dll.a -lws2_32 C:/msys64/mingw64/lib/libQt6WebSockets.dll.a C:/msys64/mingw64/lib/libQt6Network.dll.a C:/msys64/mingw64/lib/libQt6Core.dll.a -lmpr -luserenv -lws2_32 -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 

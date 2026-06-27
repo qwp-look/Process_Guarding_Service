@@ -1,0 +1,41 @@
+# Build output (all toolchains: MinGW g++, CMake, Qt)
+build/
+*/build/
+*/*/build/
+
+# Object files, static/shared libraries, debug symbols
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.pdb
+*.exp
+*.ilk
+*.idb
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake.user
+
+# Qt generated / user-local build
+*.user
+*.user.*
+qrc_*.cpp
+moc_*.cpp
+ui_*.h
+
+# Editor / IDE local state
+.vs/
+*.swp
+*~
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
