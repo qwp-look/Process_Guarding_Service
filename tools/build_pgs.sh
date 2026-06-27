@@ -27,13 +27,13 @@ echo "[4/7] Linking pgs_service.exe..."
 g++ -std=c++17 -Wall -Wextra -O2 \
   build/PGLogger.o build/PGS.o build/PGSProtocol.o build/ModuleManager.o build/pgs_service.o \
   -o build/pgs_service.exe \
-  -lws2_32 -ladvapi32 -lwtsapi32 -luserenv
+  -lws2_32 -ladvapi32 -lwtsapi32 -luserenv -lbcrypt
 
 echo "[5/7] Building guard_example.exe..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/guard_example.cpp -o build/guard_example.exe -lws2_32
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/guard_example.cpp -o build/guard_example.exe -lws2_32 -ladvapi32 -lbcrypt
 
 echo "[6/7] Building quick_start.exe..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/quick_start.cpp -o build/quick_start.exe -lws2_32
+g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/quick_start.cpp -o build/quick_start.exe -lws2_32 -ladvapi32 -lbcrypt
 
 echo "[7/8] Building smoke_worker.exe..."
 g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/smoke_worker.cpp -o build/smoke_worker.exe -lws2_32

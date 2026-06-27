@@ -30,6 +30,8 @@
 - `tools/verify_pgs.sh`：使用原生 `MSYS2 MinGW64` 做文件检查 + C++/Qt/Web 实际编译验证
 - `tools/smoke_test_pgs.sh`：控制台 `run` 模式烟测，覆盖 token 持久化与守护恢复
 - `tools/verify.bat`：Windows 入口，内部转调 `MSYS2 bash` 执行 `tools/verify_pgs.sh`
+- `src/common/PGSClient.cpp`：共享 TCP 行协议客户端（CLI / Web 复用）
+- `src/service/PGSProtocol.cpp`：协议分发与命令处理，和核心生命周期逻辑分离
 
 ## 2. MSYS2 MinGW64 手动编译（C++ 部分）
 
@@ -171,7 +173,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 - `PGS` 默认始终开启 token 鉴权（包括服务模式和非服务模式），**永不接受空 token**
 - token 哈希采用 SHA-256（BCrypt），仅以哈希形式持久化，不保存 token 明文
-- token hash 会跟随守护归档一起落盘并在服务重启后恢复
+- token hash 会跟随守护归档一起落盘并在服务重启后恢复（前提是服务进程有权限写入 `ProgramData\ProcessGuard`；非管理员环境下请用管理员 VM 验证）
 - 若本次启动未显式提供 token，则优先从归档恢复 token hash；归档也没有时，自动生成随机 64 位十六进制 token，将其 SHA-256 写入归档，明文写入 `<stateDir>/pgs_initial_token.txt`（`state` 目录 DACL 仅授予 SYSTEM + Administrators）。查看该文件获取初始 token
 
 ### A) Windows 服务模式
@@ -319,6 +321,7 @@ Qt 管理端：
 - 浏览器访问它提供的本地页面，再由它去调用现有 `pgs_bless.exe` / `pgs_service.exe`。
 - 当前版本提供：守护列表、Ping、Bless、Bless-Start、Policy、Unbless、Intentional、Token 更新、服务安装/启动/停止/卸载/状态查询。
 - 它默认面向本机运维，建议只绑定 `127.0.0.1`。
+- Web 后端已直连 `PGSClient`，把最频繁的 `ping/list/get` 轮询从 `QProcess` 中拿掉，减少进程创建和 stdout JSON 解析开销。
 - 当前第一阶段后端优先复用成熟的 CLI 工具链；后续再抽公共 `PGSClient`，避免在多个入口重复维护协议细节。
 - 详细规划与后续方向见 `docs/WEB_CONTROL_CONSOLE_PLAN.md`。
 
@@ -379,3 +382,8 @@ pgs_bless.exe ppl clear --pid <pid>
 ```
 
 完整说明（ABI、如何写新模块、排错、版权）见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
+## 9. CI 与验证
+
+- GitHub Actions 已新增 MSYS2 MinGW64 构建 + smoke test。
+- 本地 smoke test 的“服务重启后恢复持久化 token / 守护集”步骤需要管理员权限；在非管理员沙盒里会因为 `ProgramData\ProcessGuard` 的 ACL 受限而失败。
+- 如果你要我补完整验证，开一个管理员 VM 最稳。

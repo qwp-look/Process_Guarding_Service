@@ -1,9 +1,3 @@
-# Continuous integration for ProcessGuard (PGS).
-# Builds the C++ core + CLI + examples with MSYS2 MinGW64, then runs the
-# console smoke test so a regression in the protocol / persistence / restart
-# path is caught before merge. Qt targets are not built here to keep the CI
-# matrix lightweight; they share the same headers and the C++ build covers
-# compile-time breakage in the shared code.
 name: build
 
 on:
@@ -14,31 +8,27 @@ on:
 
 jobs:
   mingw-build:
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-cmake
-            make
+      - name: Install MSYS2
+        shell: pwsh
+        run: |
+          $msysPath = 'C:\msys64'
+          if (-not (Test-Path $msysPath)) {
+            & choco install msys2 --yes --no-progress
+          }
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make'
 
       - name: Build C++ core, CLI and examples
+        shell: pwsh
         run: |
-          export PATH=/mingw64/bin:/usr/bin
-          hash -r
-          tools/build_pgs.sh
+          $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd /d/$(cygpath -u "$PWD") && ./tools/build_pgs.sh'
 
       - name: Run smoke test
+        shell: pwsh
         run: |
-          export PATH=/mingw64/bin:/usr/bin
-          hash -r
-          tools/smoke_test_pgs.sh
+          $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd /d/$(cygpath -u "$PWD") && ./tools/smoke_test_pgs.sh'

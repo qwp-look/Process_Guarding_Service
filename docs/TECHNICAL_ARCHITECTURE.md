@@ -6,16 +6,18 @@
 
 - `PGS`：守护核心（注册、监控、重启、策略）
 - `pgs_service`：Windows 服务宿主（对接 SCM）
-- `pgs_bless`：命令行运维工具
-- `pgs_admin_qt`：Qt 图形运维端（通过 `QProcess` 调用 `pgs_bless`）
-- `pgs_admin_web`：浏览器控制端（独立 Web 管理进程）
+- `pgs_bless`：命令行运维工具（现已链接共享 `PGSClient`，与 Web/CLI 复用同一 TCP 行协议实现）
+- `pgs_admin_qt`：Qt 图形运维端（保留 `QProcess` 作为异步 UI 边界；仍通过 `pgs_bless` / `pgs_service` 做复杂运维动作）
+- `pgs_admin_web`：浏览器控制端（已直连 `PGSClient`，不再为每次 API 请求起 `pgs_bless.exe`）
 
 ## 2. 模块与职责
 
 - `include/Process_Guard/PGS.h`：核心类型与接口
-- `src/service/PGS.cpp`：协议处理、进程监控、重启逻辑
+- `src/service/PGS.cpp`：生命周期、监控、持久化、socket 传输
+- `src/service/PGSProtocol.cpp`：管理协议分发、命令处理、模块 / PPL 路由
 - `src/service/pgs_service.cpp`：服务安装/启动/停止/状态
-- `tools/pgs_bless.cpp`：CLI 命令解析与协议调用
+- `tools/pgs_bless.cpp`：CLI 命令解析与协议调用（共享 `PGSClient`）
+- `src/common/PGSClient.cpp`：共享 TCP 行协议客户端（CLI / Qt / Web 复用）
 - `src/common/PGLogger.cpp` + `include/Process_Guard/PGLogger.h`：日志
 - `include/Process_Guard/PGModule.h`：模块 C ABI（PG_GetName/Init/Invoke 等）
 - `include/Process_Guard/ModuleManager.h` + `src/modules/ModuleManager.cpp`：模块注册表（加载/卸载/调用）
@@ -88,6 +90,30 @@
 
 - `C:\ProgramData\ProcessGuard\state\pgs_guard_state.db`
 
+### 3.4 `PGSClient`
+
+`PGSClient` 是 CLI / Qt / Web 共享的 TCP 行协议实现：
+
+- 负责 `token <base64(token)> <command>` 的认证封装
+- 负责单连接的发送 / 接收 / 超时控制
+- 复用 `PGUtil.h` 里的 base64、JSON 转义和分隔工具
+- 让 `pgs_bless`、Qt 管理端、Web 管理端不再各自重复实现 socket 逻辑
+
+这层只管“怎么把一行命令安全地送到 PGS”，不管业务语义。
+
+### 3.5 `PGSProtocol.cpp`
+
+协议分发从 `PGS.cpp` 拆出到 `src/service/PGSProtocol.cpp` 后，职责更清晰：
+
+- `PGS.cpp`：生命周期、持久化、monitor / restart、socket transport
+- `PGSProtocol.cpp`：`processMessage()`、`register/get/list/policy/token/module/ppl` 这些管理命令
+
+这样做的收益是：
+
+- 协议演进不会把监控 / 重启逻辑一起搅动
+- 代码体积更容易控制
+- 读协议的时候不用在 2000+ 行的大文件里来回跳
+
 ## 4. 协议设计
 
 命令（完整清单）：
@@ -117,8 +143,8 @@
 
 实现细节补充：
 
-- 协议仍为纯文本、换行结束
-- 监听线程只负责 `accept`
+- 协议仍为纯文本、换行结束；`PGSClient` 是共享的发送 / 接收实现，CLI 与 Web 直接复用它。
+- 监听线程只负责 `accept`；worker 池负责 `recv/process/send`
 - 客户端连接进入队列后，由固定 worker 线程负责 `recv/process/send`
 - socket 设置了收发超时
 - 单条消息存在大小上限，避免长消息无界增长
@@ -451,3 +477,12 @@ release\
 ```
 
 运行：以管理员开终端，`pgs_service.exe run --token <你的token>`，另开终端 `pgs_bless.exe ping --token <你的token>`。
+## 8. CI 与验证
+
+- GitHub Actions 会在 windows-latest 上用 MSYS2 MinGW64 构建 C++ 主线并跑 smoke test。
+- Qt Web 端也会单独构建，确保共享 PGSClient 没有破坏 Web 管理端。
+- 需要管理员权限才能完整验证 ProgramData 下的持久化恢复（见鲁棒性文档）。
+
+## 7.2 CI 备注
+
+- GitHub Actions 现在走 Windows runner + MSYS2 的方式；`actions/checkout@v4` 的 Node 20 警告是 runner 侧提示，不是本项目失败原因。
