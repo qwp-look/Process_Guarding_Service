@@ -12,23 +12,31 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install MSYS2
+      # The windows-2025 runner image ships MSYS2 at C:\msys64 with the
+      # MinGW64 toolchain (gcc/cmake/make) already installed, so we skip the
+      # choco + pacman download that used to cost ~1m per run. We only fall
+      # back to pacman when the compiler is genuinely missing.
+      - name: Ensure MinGW64 toolchain
         shell: pwsh
         run: |
-          $msysPath = 'C:\msys64'
-          if (-not (Test-Path $msysPath)) {
-            & choco install msys2 --yes --no-progress
+          if (Test-Path 'C:\msys64\mingw64\bin\g++.exe') {
+            Write-Host 'MinGW64 toolchain already present, skipping install.'
+          } else {
+            & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make'
           }
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make'
 
       - name: Build C++ core, CLI and examples
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd /d/$(cygpath -u "$PWD") && ./tools/build_pgs.sh'
+          # Hand the checkout path to bash explicitly. Earlier we used
+          # cygpath -u "$PWD", but $PWD is empty when pwsh spawns bash, which
+          # made cd resolve to /home/runneradmin and fail. $env:GITHUB_WORKSPACE
+          # is always set by the Actions runtime and points at the checkout.
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && ./tools/build_pgs.sh'
 
       - name: Run smoke test
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd /d/$(cygpath -u "$PWD") && ./tools/smoke_test_pgs.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && ./tools/smoke_test_pgs.sh'
