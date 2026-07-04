@@ -23,9 +23,15 @@
 #include <algorithm>
 #include <cctype>
 #include <cwchar>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <cstring>
+
+// v3 module security: Authenticode verification via WinVerifyTrust.
+#include <wintrust.h>
+#include <softpub.h>
 
 namespace ProcessGuard
 {
@@ -82,6 +88,44 @@ namespace ProcessGuard
     bool ModuleManager::loadLocked(const std::string &path, std::string &err)
     {
         const std::wstring wpath = util::utf8ToWide(path);
+
+        // v3 security gate: refuse to LoadLibrary a module that is not on the
+        // allowlist (fail-closed when the allowlist is empty and we are not in
+        // permissive/development mode), and enforce an Authenticode signature
+        // when the allowlist entry requires one. This runs BEFORE the real
+        // LoadLibraryW so an untrusted DLL never gets its DllMain under PGS.
+        if (!m_permissive)
+        {
+            const std::string key = moduleKeyFromPath(path);
+            if (key.empty())
+            {
+                err = "module not in allowlist (cannot derive key)";
+                return false;
+            }
+            const AllowEntry *entry = findAllowEntry(key);
+            if (!entry)
+            {
+                err = "module not in allowlist: " + key;
+                return false;
+            }
+            if (entry->requireSigned && !verifySignature(wpath))
+            {
+                err = "signature verification failed: " + key;
+                return false;
+            }
+            // Optional pinned-hash check against the file on disk.
+            if (!entry->sha256.empty())
+            {
+                std::string actual;
+                if (!util::sha256FileHex(path, actual) ||
+                    util::toLowerAscii(actual) != util::toLowerAscii(entry->sha256))
+                {
+                    err = "hash mismatch: " + key;
+                    return false;
+                }
+            }
+        }
+
         HMODULE handle = LoadLibraryW(wpath.c_str());
         if (!handle)
         {
@@ -186,6 +230,9 @@ namespace ProcessGuard
     // observers (module list) never see a partial set.
     int ModuleManager::loadFromDirectory(const std::string &dir)
     {
+        // v3: load (or reload) the allowlist from <dir>\modules.allow BEFORE
+        // scanning so every candidate loadLocked sees an up-to-date gate.
+        loadAllowlist(dir);
         const std::wstring wdir = util::utf8ToWide(dir);
         auto ensureSep = [](std::wstring &p) {
             if (!p.empty() && p.back() != L'\\' && p.back() != L'/')
@@ -305,4 +352,124 @@ namespace ProcessGuard
         return false;
     }
 
-} // namespace ProcessGuard
+    // ---- v3 allowlist + Authenticode helpers --------------------------------
+
+    std::string ModuleManager::moduleKeyFromPath(const std::string &path)
+    {
+        // Per-folder layout: <dir>\<name>\<name>.dll -> key = "<name>" (folder).
+        // Loose layout: <dir>\<name>.dll -> key = "<name>" (stem). Mirrored from
+        // the per-folder convention so the allowlist matches either shape.
+        const auto pos = path.find_last_of("\\/");
+        const std::string leaf = (pos == std::string::npos) ? path : path.substr(pos + 1);
+        if (leaf.size() > 4 && leaf.substr(leaf.size() - 4) == ".dll")
+        {
+            // it's a filename; prefer the parent folder when one exists
+            if (pos != std::string::npos)
+            {
+                const std::string parent = path.substr(0, pos);
+                const auto ppos = parent.find_last_of("\\/");
+                if (ppos != std::string::npos)
+                {
+                    return lower(parent.substr(ppos + 1));
+                }
+            }
+            return lower(leaf.substr(0, leaf.size() - 4));
+        }
+        return lower(leaf);
+    }
+
+    const ModuleManager::AllowEntry *ModuleManager::findAllowEntry(const std::string &moduleKey) const
+    {
+        const std::string key = lower(moduleKey);
+        for (const auto &e : m_allowlist)
+        {
+            if (lower(e.name) == key)
+            {
+                return &e;
+            }
+        }
+        return nullptr;
+    }
+
+    void ModuleManager::loadAllowlist(const std::string &dir)
+    {
+        // Allowlist format (one entry per line, '#' comments, blank ignored):
+        //   name
+        //   name|<sha256Hex>
+        //   name|<sha256Hex>|signed
+        //   name||signed      (signature required, no pinned hash)
+        // Empty allowlist => fail-closed (permissive mode is the only escape).
+        std::vector<AllowEntry> built;
+        const std::string file = (dir.empty() ? std::string() : (dir + "\\")) + "modules.allow";
+        std::ifstream in(file, std::ios::in | std::ios::binary);
+        if (in.is_open())
+        {
+            std::string line;
+            while (std::getline(in, line))
+            {
+                if (!line.empty() && line.back() == '\r')
+                {
+                    line.pop_back();
+                }
+                const std::string trimmed = util::trim(line);
+                if (trimmed.empty() || trimmed[0] == '#')
+                {
+                    continue;
+                }
+                AllowEntry e;
+                const auto bar1 = trimmed.find('|');
+                if (bar1 == std::string::npos)
+                {
+                    e.name = util::trim(trimmed);
+                }
+                else
+                {
+                    e.name = util::trim(trimmed.substr(0, bar1));
+                    const auto bar2 = trimmed.find('|', bar1 + 1);
+                    const std::string mid = (bar2 == std::string::npos)
+                        ? util::trim(trimmed.substr(bar1 + 1))
+                        : util::trim(trimmed.substr(bar1 + 1, bar2 - bar1 - 1));
+                    e.sha256 = mid;
+                    if (bar2 != std::string::npos)
+                    {
+                        const std::string last = util::trim(trimmed.substr(bar2 + 1));
+                        e.requireSigned = (last == "signed" || last == "1" || last == "true" || last == "yes");
+                    }
+                }
+                if (!e.name.empty())
+                {
+                    built.push_back(std::move(e));
+                }
+            }
+        }
+        else
+        {
+            // Missing file: leave m_allowlist empty so the gate is fail-closed.
+        }
+        m_allowlist = std::move(built);
+        m_allowlistLoaded = true;
+    }
+
+    bool ModuleManager::verifySignature(const std::wstring &path)
+    {
+        // WinVerifyTrust with the published-software policy. Authenticode
+        // chain validation; returns true only when the file is signed AND the
+        // signing chain is trusted by the system.
+        WINTRUST_FILE_INFO fi{};
+        fi.cbStruct = sizeof(fi);
+        fi.pcwszFilePath = path.c_str();
+
+        WINTRUST_DATA wd{};
+        wd.cbStruct = sizeof(wd);
+        wd.dwUIChoice = WTD_UI_NONE;
+        wd.dwUnionChoice = WTD_CHOICE_FILE;
+        wd.pFile = &fi;
+        wd.dwStateAction = WTD_STATEACTION_VERIFY;
+        wd.dwProvFlags = WTD_SAFER_FLAG;
+
+        GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        const LONG rc = WinVerifyTrust(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE), &policy, &wd);
+        wd.dwStateAction = WTD_STATEACTION_CLOSE;
+        WinVerifyTrust(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE), &policy, &wd);
+        return rc == 0;
+    }} // namespace ProcessGuard

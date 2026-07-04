@@ -46,6 +46,9 @@ echo
 ./tools/build_pgs.sh
 
 echo
+./tools/run_unit_tests.sh
+
+echo
 if [[ "${PGS_SKIP_SMOKE:-0}" == "1" ]]; then
   echo "[Smoke] skipped because PGS_SKIP_SMOKE=1"
 else

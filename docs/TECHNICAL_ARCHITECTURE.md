@@ -486,3 +486,74 @@ release\
 ## 7.2 CI 备注
 
 - GitHub Actions 现在走 Windows runner + MSYS2 的方式；`actions/checkout@v4` 的 Node 20 警告是 runner 侧提示，不是本项目失败原因。
+## 16. v3 加固补充（Job Object / IOCP / WindowsApps / 归档 v3 / 模块白名单）
+
+> 本节为 v3 加固引入的架构变更汇总，遇与上文不一致处以本节为准。策略语义详见 [`GUARD_POLICIES.md`](GUARD_POLICIES.md)，模块细节详见 [`MODULE_SYSTEM.md`](MODULE_SYSTEM.md)，服务身份详见 [`SERVICE_MODE_GUIDE.md`](SERVICE_MODE_GUIDE.md)。
+
+### 16.1 数据结构（v3 字段）
+
+`PGDefines.h` 新增 `AppKind { Win32 = 0, WinApp = 1 }`。以下结构全部向后兼容扩展，缺省即旧语义：
+
+- **`GuardInfo`** 增：`appKind`、`aumid`（WindowsApps 的 ApplicationUserModelId）、`restartWindowSec`、`restartDelayMs`、`backoff`(bool)、`hangTimeoutMs`、`killOnExit`(bool)、`jobHandle`( HANDLE, 命名 Job)、`recentRestartMs`（向量，滑动窗口内重启时间戳）。
+- **`RestartPolicyState`** 增：`restartWindowSec`、`restartDelayMs`、`backoff`、`hangTimeoutMs`、`killOnExit`；`restartCount` 改为由 `recentRestartMs` 在窗口内裁剪后的长度得出（`window=0` 时退化为生命周期累计，完全兼容旧 `maxRestarts` 语义）。
+- **`PersistedGuardState`** 增：`appKind`、`aumid`、`restartWindowSec`、`restartDelayMs`、`backoff`、`hangTimeoutMs`、`killOnExit`。
+
+`fileHash` 字段注释更正：实际为 **SHA-256 hex（经 CNG/BCrypt 计算）**，而非早先文档误写的 FNV-1a。
+
+### 16.2 Job Object 全级联监控
+
+每个 guard 持有一个**命名 Job** `Global\PGS-Job-<guardId>`（`CreateJobObjectW` 带 `lpName`）。默认**不**置 `JOB_OBJECT_LIMIT_BREAKAWAY_OK`，故子进程/孙进程自动留挂在此 job 内，可被统一观测与级联清场。
+
+监控由原先 200ms 轮询改为 **IOCP 完成端口**：
+
+- `start()` 用 `CreateIoCompletionPort` 建一个完成端口，经 `JOBOBJECT_ASSOCIATE_COMPLETION_PORT` 绑定到每个 guard 的 Job。
+- `monitorLoop` 改为 `GetQueuedCompletionStatus` 等待 `JOB_OBJECT_MSG_EXIT_PROCESS` / `NEW_PROCESS` / `ACTIVE_PROCESS` / `PROCESS_MEMORY` 等通知；**进程退出即时触发**重启判断，异常拖尾从 ≤200ms 降到个位数毫秒。
+- `--monitor-interval`（默认 200ms）退化为「hang 体检周期」与「IOCP 兜底超时」。
+
+级联语义：`restart` / `unregister` / `intentional` 触发 `TerminateJobObject(hJob)` 清掉整族孙进程后再重拉，实现「重启一并清场」。服务自重启后若原进程仍活，`OpenJobObject` 取回命名 Job 并 `AssignProcessToJobObject` 重新挂接（Win8+ nested job 允许跨 PGS 进程复接管），不重启它。
+
+**`KILL_ON_JOB_CLOSE` 默认关闭**：保证 PGS 自身崩溃时守护对象仍存活，归档复接管才成立。`--kill-on-exit` 在注册时打开该标志，用户显式选择「PGS 退出时连守护对象一起死」。理由写在 `createGuardJob()` 注释里。
+
+### 16.3 WindowsApps（UWP/Store）守护
+
+新增 `--aumid <ApplicationUserModelId>` 与 `--winapp`（强制标记 WinApp、跳过探测）。
+
+**自动探测**：注册 path 命中 `...\WindowsApps\<PackageFullName>\` 模式时，读其 `<PackageRoot>\AppxManifest.xml`，解析 `<Identity Name= Publisher= Version= ProcessorArchitecture=/>` 与首个 `<Application Id=/>`；用 BCrypt(SHA-256) 实现微软文档化的 publisher hash 算法生成 `PackageFamilyName = Name_M4Hash`，再得 `AUMID = PackageFamilyName!ApplicationId`。**不引入 WinRT**。解析失败/非 WindowsApps 路径则要求显式 `--aumid`。
+
+**激活**：`restartGuard()` 按 `appKind` 分支——Win32 走原 `restartGuardInSession`/`CreateProcessW`；WinApp 走 `restartAppGuard()`：复用 `queryUserTokenForSession` impersonate 目标会话 token → `CoInitializeEx` → `CoCreateInstance(CLSID_ApplicationActivationManager)` → `IApplicationActivationManager::ActivateApplication(aumid, args, AO_NONE, &pid)`；失败回退 `ShellExecuteW("shell:AppsFolder\<AUMID>")`。纯 BCrypt+COM，无 WinRT 头依赖。
+
+**持久化**：WinApp guard 的 `path` 存其原始可执行路径（用于 hash/人读），`restartArgs` 存激活参数，`aumid` 单独归档（见 16.4）。
+
+### 16.4 归档 schema v2 → v3
+
+`kStateFileVersion = 3`。`GUARD` 行 tab 字段在旧 9 字段后追加 6 个，缺省填 `-`（向后兼容旧 9 字段记录）：
+
+```
+GUARD\t<guardId>\t<lastKnownPid>\t<sessionId>\t<maxRestartsLabel>\t<pathB64>\t<restartArgsB64>\t<fileHash>\t<intentional>\t<hashVerified>\t<appKind(win32|winapp)>\t<aumidB64(->)>>\t<restartWindowSec>\t<restartDelayMs>\t<backoff(0|1)>\t<hangTimeoutMs>\t<killOnExit(0|1)>
+```
+
+另新增（可选行）：
+
+- `RESTART\t<guardId>\t<epochMs>`：记录窗口内各次重启时间戳，归档前裁剪到窗口内；`loadPersistedState` 据此重建 `recentRestartMs`。
+- `SERVER_PORT\t<port>`：恢复监听端口；缺省 12345。
+- `MODULES_PERMISSIVE\t1`：恢复 `--allow-all-modules` 宽松开关。
+
+**迁移**：`version==2` 走保持迁移（老记录字段补默认：Win32/无 aumid/window=0=生命周期累计/delay=0/no backoff/hang=0/killOnExit=0），日志提示一次升级；`version<2` 沿用现有 v1→v2 重置 token 哈希的迁移链。旧客户端协议动词（register/unregister/...）保持不变，`bless`/`unbless`/`bless-start` 作为协议层别名加入，消除「CLI 用 bless、协议用 register」的认知分叉。
+
+### 16.5 协议版本与 stats
+
+- 新增 `version` 命令返回 `OK protocol=3 min=2`；`ping`/`stats` 响应追加 `protocol=3`。
+- `stats` 升级为：`OK guards=<N> active=<N> totalRestarts=<N> restartsInWindow=<N> uptime=<S>`。
+- `stats` / `list --json` / `get` 均补 `appKind`/`aumid`/`restartWindow`/`recentRestarts`。
+
+### 16.6 模块白名单 + Authenticode（架构视角）
+
+`ModuleManager::load` 校验链：命中白名单 → （签名要求开启时）`WinVerifyTrust` 验 Authenticode → 全过才 `LoadLibrary`。白名单文件 `<exe>\modules\modules.allow`，逐行 `name[|sha256Hex[|signed]]`。**默认 fail-closed**：白名单缺失即拒绝加载任何模块并告警；`--allow-all-modules`（持久化于 `MODULES_PERMISSIVE\t1`）开启旧宽松行为用于开发。详见 `MODULE_SYSTEM.md`。
+
+### 16.7 `--port` 与服务身份
+
+`pgs_service` 的 `run`/`install` 新增 `--port <port>`；`install` 写入服务 binPath `--service --port <p>`；`PGS::initialize` 接受外部端口，优先于 `kServerPort`(12345)，并经归档 `SERVER_PORT` 行恢复。服务身份默认仍 LocalSystem（跨会话 `restartGuardInSession` 依赖），`--service-account`/`--service-password` 可选低权账号但风险见 `SERVICE_MODE_GUIDE.md`。
+
+### 16.8 节流说明
+
+本轮 token 仍走环境变量 `PGS_AUTH_TOKEN`（继承风险与后续 named-pipe 演进建议记录于 `SERVICE_MODE_GUIDE.md`，本轮不重设计）。

@@ -719,6 +719,14 @@ int main()
     bool hasRequest = false;
     std::string signerText;
     bool hasSigner = false;
+    // v3 advanced guard policy (all default to legacy behaviour).
+    int restartWindowSec = 0;
+    int restartDelayMs = 0;
+    bool restartBackoff = false;
+    int hangTimeoutMs = 0;
+    bool killOnExit = false;
+    std::string aumid;
+    bool winapp = false;
 
     if (parsePid(argsUtf8[1], pid))
     {
@@ -866,6 +874,47 @@ int main()
         {
             signerText = needValue("--signer");
             hasSigner = true;
+            continue;
+        }
+
+        // v3 advanced guard-policy flags (optional, apply to bless / bless-start).
+        if (arg == "--restart-window")
+        {
+            const std::string v = needValue("--restart-window");
+            try { restartWindowSec = std::stoi(v); } catch (...) { std::cerr << "Invalid --restart-window\n"; return 1; }
+            continue;
+        }
+        if (arg == "--restart-delay")
+        {
+            const std::string v = needValue("--restart-delay");
+            try { restartDelayMs = std::stoi(v); } catch (...) { std::cerr << "Invalid --restart-delay\n"; return 1; }
+            continue;
+        }
+        if (arg == "--restart-backoff")
+        {
+            restartBackoff = true;
+            continue;
+        }
+        if (arg == "--hang-timeout")
+        {
+            const std::string v = needValue("--hang-timeout");
+            try { hangTimeoutMs = std::stoi(v); } catch (...) { std::cerr << "Invalid --hang-timeout\n"; return 1; }
+            continue;
+        }
+        if (arg == "--kill-on-exit")
+        {
+            killOnExit = true;
+            continue;
+        }
+        if (arg == "--aumid")
+        {
+            aumid = needValue("--aumid");
+            if (aumid.empty()) { return 1; }
+            continue;
+        }
+        if (arg == "--winapp")
+        {
+            winapp = true;
             continue;
         }
 
@@ -1022,10 +1071,17 @@ int main()
 
         std::ostringstream oss;
         oss << "register " << pid << "|" << base64Encode(path) << "|" << maxRestartsLabel(effectiveMax) << "|" << base64Encode(effectiveArgs);
-        if (!hashValue.empty())
-        {
-            oss << "|" << hashValue;
-        }
+        // v3 guard-policy fields (positions 5..11 after pid|path|max|args|hash).
+        // The hash slot is always emitted (empty => compatible/no-hash mode) so
+        // the trailing fields stay aligned with the protocol parser.
+        oss << "|" << hashValue
+            << "|" << restartWindowSec
+            << "|" << restartDelayMs
+            << "|" << (restartBackoff ? "1" : "0")
+            << "|" << hangTimeoutMs
+            << "|" << (killOnExit ? "1" : "0")
+            << "|" << (winapp ? "winapp" : "win32")
+            << "|" << base64Encode(aumid);
         wireCommand = oss.str();
     }
     else if (command == "unbless" || command == "unregister")

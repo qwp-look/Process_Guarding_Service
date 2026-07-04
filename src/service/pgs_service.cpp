@@ -62,10 +62,23 @@ public:
             m_pgs.setPplEnabled(true);
         }
 
+        // v3: apply host-supplied policy overrides BEFORE initialize() so the
+        // core honours them at startup. setModulesPermissive marks the choice
+        // as user-set so it survives loadPersistedState() (which would otherwise
+        // restore the archived MODULES_PERMISSIVE value).
+        if (args.port > 0)
+        {
+            m_pgs.setServerPort(static_cast<std::uint16_t>(args.port));
+        }
+        if (args.allowAllModules)
+        {
+            m_pgs.setModulesPermissive(true);
+        }
+
         if (!args.command.empty())
         {
             if (args.command == "install")
-                return installService() ? 0 : 1;
+                return installService(args) ? 0 : 1;
             if (args.command == "uninstall")
                 return uninstallService() ? 0 : 1;
             if (args.command == "start")
@@ -92,6 +105,18 @@ private:
         bool hasToken{false};
         std::string token;
         bool enablePpl{false};
+        // v3 G: install/run can bind an explicit port; install embeds it into
+        // the service binPath so SCM startup honours it. Default 0 = use the
+        // PGS default / restored-from-archive port.
+        int port = 0;
+        // v3 G: optional low-privilege service account. Empty = LocalSystem
+        // (default; required for full cross-session restart). WARNING: a non-
+        // LocalSystem account loses restartGuardInSession() ability and the
+        // fallback launches the process in Session 0 (no user desktop).
+        std::string serviceAccount;
+        std::string servicePassword;
+        // v3 E: permissive module-loading escape hatch (fails the allowlist).
+        bool allowAllModules{false};
     };
 
     std::string m_serviceName;
@@ -107,7 +132,7 @@ private:
     inline static PGSServiceHost *s_instance = nullptr;
     inline static PGSServiceHost *s_consoleInstance = nullptr;
 
-    bool installService()
+    bool installService(const ParsedArgs &args)
     {
         SC_HANDLE scm = OpenSCManagerA(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
         if (!scm)
@@ -119,6 +144,23 @@ private:
         char exePath[MAX_PATH]{};
         GetModuleFileNameA(nullptr, exePath, MAX_PATH);
         std::string binPath = "\"" + std::string(exePath) + "\" --service";
+        // v3 G: persist the chosen listen port into the service command line so
+        // SCM-started instances bind the same port without needing --port again.
+        if (args.port > 0)
+        {
+            binPath += " --port " + std::to_string(args.port);
+        }
+
+        // v3 G: optional low-privilege service account. LocalSystem (nullptr)
+        // is the default and is REQUIRED for full cross-session
+        // restartGuardInSession() — a non-LocalSystem account will lose that
+        // ability and the fallback launches guarded processes in Session 0.
+        const char *account = args.serviceAccount.empty() ? nullptr : args.serviceAccount.c_str();
+        const char *password = args.servicePassword.empty() ? nullptr : args.servicePassword.c_str();
+        if (account)
+        {
+            std::cout << "WARNING: installing with a non-LocalSystem account; cross-session guard restart will be limited to the Session-0 fallback.\n";
+        }
 
         SC_HANDLE service = CreateServiceA(
             scm,
@@ -132,8 +174,8 @@ private:
             nullptr,
             nullptr,
             nullptr,
-            nullptr,
-            nullptr);
+            account,
+            password);
 
         if (!service)
         {
@@ -530,6 +572,52 @@ private:
             if (arg == "--enable-ppl")
             {
                 out.enablePpl = true;
+                continue;
+            }
+
+            // v3 G: explicit listen port (overrides the default / archive).
+            if (arg == "--port")
+            {
+                const std::string next = (i + 1 < argc) ? argv[i + 1] : std::string();
+                if (next.empty())
+                {
+                    return false;
+                }
+                const int p = std::stoi(next);
+                if (p <= 0 || p > 65535)
+                {
+                    return false;
+                }
+                out.port = p;
+                ++i;
+                continue;
+            }
+
+            // v3 E: permissive module-loading escape hatch (bypasses the
+            // allowlist). Fail-closed by default; opt in for development only.
+            if (arg == "--allow-all-modules")
+            {
+                out.allowAllModules = true;
+                continue;
+            }
+
+            // v3 G: optional low-privilege service account for install.
+            if (arg == "--service-account")
+            {
+                if (i + 1 >= argc)
+                {
+                    return false;
+                }
+                out.serviceAccount = argv[++i];
+                continue;
+            }
+            if (arg == "--service-password")
+            {
+                if (i + 1 >= argc)
+                {
+                    return false;
+                }
+                out.servicePassword = argv[++i];
                 continue;
             }
 

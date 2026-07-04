@@ -38,10 +38,13 @@ jobs:
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          # Use GITHUB_WORKSPACE (always set by the Actions runtime) instead of
-          # $PWD, which is empty when pwsh spawns bash and caused
-          # "cd /d//home/runneradmin: No such file".
           & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && ./tools/build_pgs.sh'
+
+      - name: Run unit tests
+        shell: pwsh
+        run: |
+          $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && ./tools/run_unit_tests.sh'
 
       - name: Run smoke test
         shell: pwsh
