@@ -387,3 +387,17 @@ pgs_bless.exe ppl clear --pid <pid>
 - GitHub Actions 已新增 MSYS2 MinGW64 构建 + smoke test。
 - 本地 smoke test 的“服务重启后恢复持久化 token / 守护集”步骤需要管理员权限；在非管理员沙盒里会因为 `ProgramData\ProcessGuard` 的 ACL 受限而失败。
 - 如果你要我补完整验证，开一个管理员 VM 最稳。
+---
+
+## v3 hardening 速览
+
+- **守护监控**：Job Object 全级联 + IOCP 即时退出通知（取代纯轮询），重启清场整族进程。
+- **重启策略**：`--restart-window`/`--restart-delay`/`--restart-backoff`/`--hang-timeout`/`--kill-on-exit`
+  详见 [`docs/GUARD_POLICIES.md`](docs/GUARD_POLICIES.md)。
+- **WindowsApps**：`--winapp --aumid <id>` 或自动探测 `WindowsApps\` 路径，经 AUMID 激活重启。
+- **模块安全**：`modules.allow` 白名单 + 可选 Authenticode；默认 fail-closed，
+  `pgs_service run --allow-all-modules` 为开发逃生阀，见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
+- **端口可配**：`pgs_service run|install --port <p>`，归档 `SERVER_PORT` 自动恢复。
+- **协议**：`version` 返回 `protocol=3 min=2`；`ping`/`stats` 带 `protocol=3`；新增 `bless`/`unbless`
+  作为 `register`/`unregister` 别名。文件 hash 为 **SHA-256**（旧的注释里写的 FNV-1a 是笔误）。
+- **归档**：`v2 → v3` 平滑迁移，旧档新字段补默认值。

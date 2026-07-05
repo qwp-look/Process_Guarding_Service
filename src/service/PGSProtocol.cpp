@@ -14,6 +14,8 @@
 #include "Process_Guard/PGS.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -42,8 +44,19 @@ std::string PGS::processMessage(const std::string &message)
     }
 
     const auto spacePos = normalized.find(' ');
-    const std::string command = (spacePos == std::string::npos) ? normalized : normalized.substr(0, spacePos);
+    std::string command = (spacePos == std::string::npos) ? normalized : normalized.substr(0, spacePos);
     const std::string args = (spacePos == std::string::npos) ? std::string() : trim(normalized.substr(spacePos + 1));
+
+    // v3 user-facing verb aliases map to the canonical wire verbs so the CLI
+    // ("bless"/"unbless") and the on-wire protocol stop diverging.
+    if (command == "bless")
+    {
+        command = "register";
+    }
+    else if (command == "unbless")
+    {
+        command = "unregister";
+    }
 
     if (command == "register")
     {
@@ -70,7 +83,65 @@ std::string PGS::processMessage(const std::string &message)
         // declared hash is a hex string with no '|'.
         const std::string restartArgs = (fields.size() >= 4) ? base64Decode(fields[3]) : std::string();
         const std::string declaredHash = (fields.size() >= 5) ? trim(fields[4]) : std::string();
-        return handleRegister(pid, trim(fields[1]), maxRestarts, restartArgs, declaredHash);
+
+        // v3 optional advanced guard policy. Field positions 5..10:
+        //   restart-window|restart-delay|backoff|hang-timeout|kill-on-exit|appKind
+        // Field 11 is a base64 AUMID (only meaningful when appKind=winapp).
+        // All default to legacy behaviour (Win32, lifetime restart count).
+        int restartWindowSec = 0;
+        {
+            DWORD v = 0;
+            if (fields.size() >= 6 && util::parseDwordValue(trim(fields[5]), v))
+            {
+                restartWindowSec = static_cast<int>(v);
+            }
+        }
+        int restartDelayMs = 0;
+        {
+            DWORD v = 0;
+            if (fields.size() >= 7 && util::parseDwordValue(trim(fields[6]), v))
+            {
+                restartDelayMs = static_cast<int>(v);
+            }
+        }
+        bool backoff = false;
+        if (fields.size() >= 8)
+        {
+            const std::string bv = trim(fields[7]);
+            backoff = (bv == "1" || bv == "true" || bv == "yes");
+        }
+        int hangTimeoutMs = 0;
+        {
+            DWORD v = 0;
+            if (fields.size() >= 9 && util::parseDwordValue(trim(fields[8]), v))
+            {
+                hangTimeoutMs = static_cast<int>(v);
+            }
+        }
+        bool killOnExit = false;
+        if (fields.size() >= 10)
+        {
+            const std::string bv = trim(fields[9]);
+            killOnExit = (bv == "1" || bv == "true" || bv == "yes");
+        }
+        AppKind appKind = AppKind::Win32;
+        if (fields.size() >= 11)
+        {
+            const std::string low = toLowerAscii(trim(fields[10]));
+            if (low == "1" || low == "winapp" || low == "uwp" || low == "store")
+            {
+                appKind = AppKind::WinApp;
+            }
+        }
+        std::string aumid;
+        if (fields.size() >= 12)
+        {
+            aumid = base64Decode(fields[11]);
+        }
+
+        return handleRegister(pid, trim(fields[1]), maxRestarts, restartArgs, declaredHash,
+                              appKind, aumid, restartWindowSec, restartDelayMs, backoff,
+                              hangTimeoutMs, killOnExit);
     }
 
     if (command == "intentional")
@@ -151,13 +222,54 @@ std::string PGS::processMessage(const std::string &message)
 
     if (command == "ping")
     {
-        return "OK pong";
+        return "OK pong protocol=3";
+    }
+
+    if (command == "version")
+    {
+        // Protocol version. v3 adds advanced policy fields and WindowsApps;
+        // min=2 means v2 clients (no advanced fields) still register fine.
+        return "OK protocol=3 min=2";
     }
 
     if (command == "stats")
     {
         std::lock_guard<std::mutex> lock(m_guardsMutex);
-        return "OK guards=" + std::to_string(m_guards.size());
+        std::size_t totalRestarts = 0;
+        std::size_t windowedRestarts = 0;
+        const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        for (const auto &entry : m_guards)
+        {
+            const auto pit = m_policyByGuardId.find(entry.second.guardId);
+            if (pit == m_policyByGuardId.end())
+            {
+                continue;
+            }
+            totalRestarts += static_cast<std::size_t>(pit->second.restartCount);
+            const int win = entry.second.restartWindowSec;
+            if (win > 0 && !pit->second.recentRestartMs.empty())
+            {
+                windowedRestarts += static_cast<std::size_t>(
+                    util::pruneRestartWindow(pit->second.recentRestartMs, nowMs, win).size());
+            }
+        }
+        std::size_t active = 0;
+        for (const auto &entry : m_guards)
+        {
+            if (entry.second.handle && WaitForSingleObject(entry.second.handle, 0) == WAIT_TIMEOUT)
+            {
+                ++active;
+            }
+        }
+        const auto uptimeSec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - m_startTime).count();
+        return "OK guards=" + std::to_string(m_guards.size()) +
+               " active=" + std::to_string(active) +
+               " totalRestarts=" + std::to_string(totalRestarts) +
+               " restartsInWindow=" + std::to_string(windowedRestarts) +
+               " uptime=" + std::to_string(uptimeSec) +
+               " protocol=3";
     }
 
     return "ERR unknown command";
@@ -168,7 +280,14 @@ std::string PGS::handleRegister(
     const std::string &encodedPath,
     int maxRestarts,
     const std::string &restartArgs,
-    const std::string &declaredHash)
+    const std::string &declaredHash,
+    AppKind appKind,
+    const std::string &aumid,
+    int restartWindowSec,
+    int restartDelayMs,
+    bool backoff,
+    int hangTimeoutMs,
+    bool killOnExit)
 {
     // Registration is the trust boundary between clients and the service. The
     // service re-derives everything important that it can:
@@ -254,7 +373,15 @@ std::string PGS::handleRegister(
             processHandle,
             false,
             hashVerified,
-            guardId};
+            guardId,
+            appKind,
+            aumid,
+            restartWindowSec,
+            restartDelayMs,
+            backoff,
+            hangTimeoutMs,
+            killOnExit,
+            nullptr};
 
         if (existing != m_guards.end())
         {
@@ -269,10 +396,16 @@ std::string PGS::handleRegister(
             m_guards.emplace(pid, std::move(updated));
         }
 
+        // v3: assign the live process to a per-guard Job Object so the monitor
+        // can observe the whole process family and TerminateJobObject the
+        // family on restart. Harmless if it fails (poll-based exit detection
+        // still works); assignGuardToJob logs the reason.
+        assignGuardToJob(m_guards[pid]);
+
         auto policyIt = m_policyByGuardId.find(guardId);
         if (policyIt == m_policyByGuardId.end())
         {
-            m_policyByGuardId.emplace(guardId, RestartPolicyState{maxRestarts, 0});
+            m_policyByGuardId.emplace(guardId, RestartPolicyState{maxRestarts, 0, {}});
         }
         else
         {
@@ -289,6 +422,13 @@ std::string PGS::handleRegister(
         persisted.fileHash = storedHash;
         persisted.intentional = false;
         persisted.hashVerified = hashVerified;
+        persisted.appKind = appKind;
+        persisted.aumid = aumid;
+        persisted.restartWindowSec = restartWindowSec;
+        persisted.restartDelayMs = restartDelayMs;
+        persisted.backoff = backoff;
+        persisted.hangTimeoutMs = hangTimeoutMs;
+        persisted.killOnExit = killOnExit;
     }
 
     persistState();
@@ -343,6 +483,11 @@ std::string PGS::handleUnregister(DWORD pid)
         m_guards.erase(it);
         m_policyByGuardId.erase(guardId);
         m_persistedGuards.erase(guardId);
+        // v3: stop observing this guard's Job Object. The guarded process is
+        // left running - "unregister" means stop protecting, not kill. Closing
+        // PGS's job handle leaves the process alive; the kernel job lingers
+        // until the last process in it exits. See docs/GUARD_POLICIES.md.
+        closeGuardJob(guardId);
     }
 
     persistState();
@@ -440,7 +585,14 @@ std::string PGS::makeGuardSummaryLine(const GuardInfo &guard, int restartCount)
         << ";HASH_VERIFIED=" << (guard.hashVerified ? "1" : "0")
         << ";HASH=" << (guard.fileHash.empty() ? "-" : guard.fileHash)
         << ";PATH_B64=" << base64Encode(guard.path)
-        << ";RESTART_ARGS_B64=" << base64Encode(guard.restartArgs);
+        << ";RESTART_ARGS_B64=" << base64Encode(guard.restartArgs)
+        << ";APP_KIND=" << (guard.appKind == AppKind::WinApp ? "winapp" : "win32")
+        << ";AUMID_B64=" << base64Encode(guard.aumid)
+        << ";RESTART_WINDOW=" << guard.restartWindowSec
+        << ";RESTART_DELAY=" << guard.restartDelayMs
+        << ";BACKOFF=" << (guard.backoff ? "1" : "0")
+        << ";HANG_TIMEOUT=" << guard.hangTimeoutMs
+        << ";KILL_ON_EXIT=" << (guard.killOnExit ? "1" : "0");
     return oss.str();
 }
 

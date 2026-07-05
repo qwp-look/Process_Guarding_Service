@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal enabledelayedexpansion
 
 chcp 65001 >nul 2>&1
@@ -8,7 +8,7 @@ set "COMPILER=C:\msys64\mingw64\bin\g++.exe"
 set "PATH=C:\msys64\mingw64\bin;%PATH%"
 set "INCLUDE_DIR=include"
 set "BUILD_DIR=build"
-set "CXXFLAGS=-std=c++17 -Wall -Wextra -O2"
+set "CXXFLAGS=-std=c++17 -Wall -Wextra -O2 -DNTDDI_VERSION=0x06020000"
 
 if not exist "%COMPILER%" (
     echo Compiler not found: %COMPILER%
@@ -54,7 +54,7 @@ if errorlevel 1 (
 )
 
 echo [4/7] Linking pgs_service.exe...
-%COMPILER% -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\PGSProtocol.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -ladvapi32 -lwtsapi32 -luserenv -lbcrypt
+%COMPILER% -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\PGSProtocol.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
 if errorlevel 1 (
     echo Failed: link pgs_service.exe
     exit /b 1
@@ -97,6 +97,9 @@ REM PPL module: built as a separate DLL (-shared) into build\modules, then
 REM Sirius.sys and the MinGW runtime DLLs are copied next to it so PGS can
 REM auto-load the module and the module can load the driver at runtime.
 echo [9/9] Building pgs_ppl_module.dll...
+REM v3: ship a default allowlist that permits the bundled people module. Operators
+REM add lines "name[|sha256|signed]" to <exe>\modules\modules.allow to approve more.
+echo ppl> "%BUILD_DIR%\modules\modules.allow"
 REM Per-folder module layout: build\modules\<name>\<name>.dll + module.html + assets.
 REM The folder name MUST match the module PG_GetName() return value so the
 REM Qt UI and `module call --name <folder>` resolve correctly.

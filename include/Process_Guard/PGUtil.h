@@ -566,6 +566,155 @@ namespace ProcessGuard
             LocalFree(psd);
             return rc == ERROR_SUCCESS;
         }
+        // ---- v3 hardening: testable pure helpers ---------------------------------
+
+        // Numeric/bool parsing (mirror the file-local PGS.cpp helpers so unit
+        // tests can exercise them without linking the whole service core).
+        inline bool parseUnsignedLongLong(const std::string &value, std::uint64_t &out)
+        {
+            const std::string text = trim(value);
+            if (text.empty())
+            {
+                return false;
+            }
+            try
+            {
+                const unsigned long long parsed = std::stoull(text);
+                out = static_cast<std::uint64_t>(parsed);
+                return true;
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+        }
+
+        inline bool parseDwordValue(const std::string &value, DWORD &out)
+        {
+            std::uint64_t parsed = 0;
+            if (!parseUnsignedLongLong(value, parsed) || parsed > 0xFFFFFFFFull)
+            {
+                return false;
+            }
+            out = static_cast<DWORD>(parsed);
+            return true;
+        }
+
+        inline bool parseBoolFlag(const std::string &value, bool &out)
+        {
+            const std::string text = trim(value);
+            if (text == "1")
+            {
+                out = true;
+                return true;
+            }
+            if (text == "0")
+            {
+                out = false;
+                return true;
+            }
+            return false;
+        }
+
+        // PackageFamilyName publisher hash (Microsoft-documented algorithm):
+        //   1. SHA-256 of the publisher string (UTF-8)
+        //   2. low-order 8 bytes (bytes 24..31 of the 32-byte digest)
+        //   3. standard base64 of those 8 bytes, then URL-safe ( '+'->'-',
+        //      '/'->'_' ) and strip '=' padding
+        // Returns the 11-char suffix appended after "<Name>_" in a PFN.
+        inline std::string pfnHashFromPublisher(const std::string &publisher)
+        {
+            const std::string sha = sha256Hex(publisher);
+            if (sha.size() != 64)
+            {
+                return std::string();
+            }
+            std::string last8(8, '\0');
+            for (int i = 0; i < 8; ++i)
+            {
+                unsigned int b = 0;
+                std::istringstream iss(sha.substr(48 + i * 2, 2));
+                iss >> std::hex >> b;
+                last8[static_cast<std::size_t>(i)] = static_cast<char>(b);
+            }
+            std::string b64 = base64Encode(last8);
+            for (char &c : b64)
+            {
+                if (c == '+')
+                {
+                    c = '-';
+                }
+                else if (c == '/')
+                {
+                    c = '_';
+                }
+            }
+            const auto eq = b64.find('=');
+            if (eq != std::string::npos)
+            {
+                b64.resize(eq);
+            }
+            return b64;
+        }
+
+        inline std::string packageFamilyNameFrom(const std::string &name, const std::string &publisher)
+        {
+            const std::string h = pfnHashFromPublisher(publisher);
+            if (h.empty())
+            {
+                return std::string();
+            }
+            return name + "_" + h;
+        }
+
+        inline std::string deriveAumidFromParts(const std::string &name, const std::string &publisher, const std::string &appId)
+        {
+            const std::string pfn = packageFamilyNameFrom(name, publisher);
+            if (pfn.empty())
+            {
+                return std::string();
+            }
+            return pfn + "!" + appId;
+        }
+
+        // Sliding-window restart pruning. windowSec<=0 means "lifetime count"
+        // (legacy): return the vector untouched so restartCount never self-heals.
+        // Else keep only timestamps strictly newer than (now - window*1000ms).
+        inline std::vector<std::int64_t> pruneRestartWindow(const std::vector<std::int64_t> &times,
+                                                            std::int64_t nowMs, int windowSec)
+        {
+            if (windowSec <= 0)
+            {
+                return times;
+            }
+            const std::int64_t cutoff = nowMs - static_cast<std::int64_t>(windowSec) * 1000;
+            std::vector<std::int64_t> out;
+            for (std::int64_t t : times)
+            {
+                if (t > cutoff)
+                {
+                    out.push_back(t);
+                }
+            }
+            return out;
+        }
+
+        // Exponential restart backoff: delay * 2^min(index,6), capped at 60s.
+        // baseDelayMs<=0 yields itself (no negative delays; 0 = immediate).
+        inline int computeBackoffDelay(int baseDelayMs, int restartIndex)
+        {
+            if (baseDelayMs <= 0)
+            {
+                return baseDelayMs < 0 ? 0 : baseDelayMs;
+            }
+            const int shifts = restartIndex > 6 ? 6 : restartIndex;
+            std::int64_t d = static_cast<std::int64_t>(baseDelayMs) << shifts;
+            if (d > 60000)
+            {
+                d = 60000;
+            }
+            return static_cast<int>(d);
+        }
     } // namespace util
 } // namespace ProcessGuard
 

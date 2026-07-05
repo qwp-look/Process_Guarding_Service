@@ -207,4 +207,71 @@ echo "[Smoke] cleaning restored guard..."
 ./build/pgs_bless.exe intentional --pid "$guard_pid" --token "$token" >/dev/null
 force_stop_process "$guard_pid"
 
+
+echo "[Smoke] v3: IOCP immediate restart + window-exhaust stop..."
+
+window_list_path="$repo_root/build/smoke_window_list.json"
+window_list_win="$(cygpath -w "$window_list_path")"
+
+# echo the pid of any currently-guarded smoke_worker (empty if none)
+find_worker_pid() {
+  ./build/pgs_bless.exe list --json --token "$token" >"$window_list_path" 2>/dev/null || true
+  "$ps_exe" -NoProfile -Command "\$items = Get-Content -Raw '$window_list_win' | ConvertFrom-Json; \$item = \$items | Where-Object { \$_.path -like '*smoke_worker.exe' } | Select-Object -First 1; if (\$item) { Write-Output \$item.pid }" 2>/dev/null | tr -d '\r\n'
+  return 0
+}
+
+# register a fresh worker: max-restarts 1 => one restart allowed, second kill stops
+window_bless_output="$(
+  ./build/pgs_bless.exe bless-start \
+    --path "$worker_path_win" \
+    --start-args "--sleep-ms 30000" \
+    --max-restarts 1 \
+    --restart-window 30 \
+    --restart-delay 0 \
+    --hash auto \
+    --token "$token"
+)"
+w_guard_pid="$(printf '%s\n' "$window_bless_output" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+if [[ -z "$w_guard_pid" ]]; then
+  echo "[Smoke] v3: failed to parse worker guard pid"
+  exit 1
+fi
+
+echo "[Smoke] v3: kill #1 -> expect IOCP-triggered immediate restart..."
+force_stop_process "$w_guard_pid"
+first_restarted=""
+for _ in $(seq 1 20); do
+  first_restarted="$(find_worker_pid)"
+  if [[ -n "$first_restarted" && "$first_restarted" != "$w_guard_pid" ]]; then
+    break
+  fi
+  sleep 0.2
+done
+if [[ -z "$first_restarted" || "$first_restarted" == "$w_guard_pid" ]]; then
+  echo "[Smoke] v3: worker was NOT restarted after kill #1 (IOCP fast-path)"
+  exit 1
+fi
+echo "[Smoke] v3: kill #1 restarted as pid=$first_restarted"
+
+echo "[Smoke] v3: kill #2 -> expect window-exhaust, NO further restart..."
+force_stop_process "$first_restarted"
+# give the monitor a moment to (not) restart, then confirm it stays dead
+sleep 1
+still_dead=1
+for _ in $(seq 1 15); do
+  cur_pid="$(find_worker_pid)"
+  if [[ -n "$cur_pid" && "$cur_pid" != "$w_guard_pid" && "$cur_pid" != "$first_restarted" ]]; then
+    still_dead=0
+    break
+  fi
+  sleep 0.3
+done
+if [[ "$still_dead" -ne 1 ]]; then
+  echo "[Smoke] v3: worker was restarted after kill #2 despite max-restarts=1 (window policy not honored)"
+  exit 1
+fi
+echo "[Smoke] v3: window-exhaust stop confirmed (no restart after kill #2)"
+
+# tidy: unregister the exhausted guard if its entry lingers
+./build/pgs_bless.exe unregister --pid "$first_restarted" --token "$token" >/dev/null 2>&1 || true
 echo "[Smoke] smoke test completed"

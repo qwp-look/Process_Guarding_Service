@@ -3,6 +3,10 @@
 #include <ws2tcpip.h>
 #include <wtsapi32.h>
 #include <userenv.h>
+#include <shellapi.h>
+#include <objbase.h>
+#include <initguid.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <chrono>
@@ -22,6 +26,8 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "wtsapi32.lib")
 #pragma comment(lib, "userenv.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
 #endif
 
 
@@ -32,54 +38,47 @@ namespace
 // path/process and string helpers now come from Process_Guard/PGUtil.h.
 
 constexpr const char *kRestartIndexToken = "${PGS_RESTART_INDEX}";
-constexpr int kStateFileVersion = 2;
+constexpr int kStateFileVersion = 3;     // v3: advanced guard policy + WindowsApps
+constexpr int kLegacyStateFileVersion = 2;
+// Per-guard Job Object naming. The "Global\" kernel namespace requires
+// SeCreateGlobalPrivilege (held by LocalSystem / Administrators), which is why
+// the default service account must stay LocalSystem for full-cascade to work.
+constexpr const char *kJobNamePrefix = "Global\\PGS-Job-";
+constexpr const char *kModulesAllowlistFile = "modules.allow";
 
-bool parseUnsignedLongLong(const std::string &value, std::uint64_t &out)
+// Enable a named privilege on the current process token (best-effort: ok if the
+// privilege is absent, only fail if it cannot be enabled when present). Returns
+// true if the privilege is enabled afterwards.
+#ifndef SE_TCB_NAME_W
+#define SE_TCB_NAME_W L"SeTcbPrivilege"
+#endif
+bool enableProcessPrivilege(LPCWSTR privName)
 {
-    const std::string text = ProcessGuard::util::trim(value);
-    if (text.empty())
+    HANDLE tok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok) || !tok)
     {
         return false;
     }
-    try
+    LUID luid{};
+    if (!LookupPrivilegeValueW(nullptr, privName, &luid))
     {
-        const unsigned long long parsed = std::stoull(text);
-        out = static_cast<std::uint64_t>(parsed);
-        return true;
-    }
-    catch (const std::exception &)
-    {
+        CloseHandle(tok);
         return false;
     }
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    BOOL ok = AdjustTokenPrivileges(tok, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+    const DWORD err = GetLastError();
+    CloseHandle(tok);
+    return ok && err == ERROR_SUCCESS;
 }
 
-bool parseDwordValue(const std::string &value, DWORD &out)
-{
-    std::uint64_t parsed = 0;
-    if (!parseUnsignedLongLong(value, parsed) || parsed > 0xFFFFFFFFull)
-    {
-        return false;
-    }
-    out = static_cast<DWORD>(parsed);
-    return true;
-}
-
-bool parseBoolFlag(const std::string &value, bool &out)
-{
-    const std::string text = ProcessGuard::util::trim(value);
-    if (text == "1")
-    {
-        out = true;
-        return true;
-    }
-    if (text == "0")
-    {
-        out = false;
-        return true;
-    }
-    return false;
-}
-
+// Obtain the user token for a WTS session. WTSQueryUserToken requires the
+// SE_TCB_NAME privilege, which LocalSystem holds natively but an elevated
+// admin process holds disabled-by-default. We therefore enable SE_TCB on the
+// current token (no-op when already enabled) and retry once on first failure.
 bool queryUserTokenForSession(DWORD sessionId, HANDLE &userToken)
 {
     userToken = nullptr;
@@ -87,6 +86,13 @@ bool queryUserTokenForSession(DWORD sessionId, HANDLE &userToken)
     {
         return false;
     }
+    if (WTSQueryUserToken(sessionId, &userToken))
+    {
+        return true;
+    }
+    // Retry after enabling SE_TCB_NAME (covers elevated-admin `run` mode; the
+    // privilege exists in the token but starts disabled).
+    enableProcessPrivilege(SE_TCB_NAME_W);
     return WTSQueryUserToken(sessionId, &userToken) == TRUE;
 }
 } // namespace
@@ -190,6 +196,10 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     // initialised. A missing/empty directory is fine (loaded=0); failures of
     // individual DLLs are logged inside ModuleManager and do not abort init.
     m_modulesDir = moduleDirectoryOfSelf();
+    // v3: gate the allowlist. m_modulesPermissive was restored from the archive
+    // above (MODULES_PERMISSIVE) or left false; push it to the registry so the
+    // permissive escape hatch applies during this loadFromDirectory() scan.
+    m_modules.setPermissive(m_modulesPermissive);
     {
         // PPL module loading is opt-in: it pulls in the Sirius kernel driver
         // (an ARK-class driver exposing far more than PPL). Only load modules
@@ -234,6 +244,15 @@ bool PGS::start()
     {
         m_running = false;
         return false;
+    }
+
+    // v3: single IOCP shared by all per-guard Job Objects. Created BEFORE
+    // restorePersistedGuards() so re-attached/restarted guards can bind their
+    // job completion port to it at job-creation time.
+    m_ioPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
+    if (!m_ioPort)
+    {
+        Logger::warning("PGS: IOCP creation failed, will fall back to polling only, error=" + std::to_string(GetLastError()));
     }
 
     if (!restorePersistedGuards())
@@ -343,6 +362,8 @@ bool PGS::loadPersistedState()
     int version = 0;
     std::uint64_t nextGuardId = 1;
     std::string persistedAuthHash;
+    std::uint16_t archivedServerPort = 0;
+    bool archivedModulesPermissive = false;
     std::string line;
     while (std::getline(in, line))
     {
@@ -394,6 +415,32 @@ bool PGS::loadPersistedState()
             continue;
         }
 
+        if (fields[0] == "SERVER_PORT")
+        {
+            if (fields.size() >= 2)
+            {
+                DWORD sp = 0;
+                if (parseDwordValue(fields[1], sp) && sp > 0)
+                {
+                    archivedServerPort = static_cast<std::uint16_t>(sp);
+                }
+            }
+            continue;
+        }
+
+        if (fields[0] == "MODULES_PERMISSIVE")
+        {
+            if (fields.size() >= 2)
+            {
+                bool b = false;
+                if (parseBoolFlag(fields[1], b))
+                {
+                    archivedModulesPermissive = b;
+                }
+            }
+            continue;
+        }
+
         if (fields[0] == "GUARD")
         {
             if (fields.size() < 10)
@@ -423,6 +470,46 @@ bool PGS::loadPersistedState()
                 return false;
             }
 
+            // v3 advanced guard-policy fields (trailing the v2 base). Older
+            // archives that stop at field[9] get the legacy defaults here.
+            {
+                DWORD dv = 0;
+                if (fields.size() > 12 && parseDwordValue(fields[12], dv))
+                {
+                    persisted.restartWindowSec = static_cast<int>(dv);
+                }
+                if (fields.size() > 13 && parseDwordValue(fields[13], dv))
+                {
+                    persisted.restartDelayMs = static_cast<int>(dv);
+                }
+                if (fields.size() > 15 && parseDwordValue(fields[15], dv))
+                {
+                    persisted.hangTimeoutMs = static_cast<int>(dv);
+                }
+            }
+            if (fields.size() > 10)
+            {
+                const std::string aks = trim(fields[10]);
+                if (aks == "1" || aks == "winapp" || aks == "uwp" || aks == "store")
+                {
+                    persisted.appKind = AppKind::WinApp;
+                }
+            }
+            if (fields.size() > 11 && fields[11] != "-")
+            {
+                persisted.aumid = base64Decode(fields[11]);
+            }
+            if (fields.size() > 14)
+            {
+                const std::string bv = trim(fields[14]);
+                persisted.backoff = (bv == "1" || bv == "true" || bv == "yes");
+            }
+            if (fields.size() > 16)
+            {
+                const std::string bv = trim(fields[16]);
+                persisted.killOnExit = (bv == "1" || bv == "true" || bv == "yes");
+            }
+
             if (persisted.path.empty() || persisted.guardId == 0)
             {
                 return false;
@@ -438,19 +525,24 @@ bool PGS::loadPersistedState()
 
     if (version != kStateFileVersion)
     {
-        // Migration: v1 stored a non-cryptographic FNV-1a token hash. We do not
-        // trust it under SHA-256 auth, so drop only the auth hash (forcing a
-        // fresh random token to be generated in initialize()) while KEEPING the
-        // guard records so SCM-restart recovery still works. The file is then
-        // rewritten at v2 by the next persistState().
+        // Migration: the v3 archive only ADDS trailing fields over v2, so v1 and
+        // v2 are forward-compatible. v1's FNV-1a token hash is not trusted under
+        // SHA-256 auth, so we drop only the auth hash (initialize() will mint a
+        // fresh random token) while KEEPING guard records for SCM-restart
+        // recovery. v2 already has the SHA-256 hash; its guards parsed with the
+        // advanced-policy defaults above. The next persistState() rewrites at v3.
         if (version == 1)
         {
-            Logger::warning("PGS: migrating state file v1 -> v2 (guard records kept, auth token reset)");
+            Logger::warning("PGS: migrating state file v1 -> v3 (guard records kept, auth token reset)");
             persistedAuthHash.clear();
+        }
+        else if (version == kLegacyStateFileVersion)
+        {
+            Logger::warning("PGS: migrating state file v2 -> v3 (guard records kept, advanced policy defaulted)");
         }
         else
         {
-            Logger::warning("PGS: unsupported state file version, ignoring persisted archive");
+            Logger::warning("PGS: unsupported state file version " + std::to_string(version) + ", ignoring persisted archive");
             m_persistedGuards.clear();
             m_nextGuardId = 1ull;
             return false;
@@ -461,10 +553,19 @@ bool PGS::loadPersistedState()
     m_nextGuardId = std::max<std::uint64_t>(1ull, nextGuardId);
     {
         std::lock_guard<std::mutex> authLock(m_authMutex);
-        // Only accept a persisted auth hash at v2. An empty hash here makes
+        // Accept a persisted auth hash at v2/v3. An empty hash here makes
         // initialize() generate a fresh random token.
         m_authTokenHash = persistedAuthHash;
     }
+
+    // v3: restore the archived listen port only when the host has not
+    // explicitly overridden it (here: m_serverPort still at the default). The
+    // module-permissive flag gates the ModuleManager allowlist (see E).
+    if (m_serverPort == kServerPort && archivedServerPort != 0)
+    {
+        m_serverPort = archivedServerPort;
+    }
+    m_modulesPermissive = archivedModulesPermissive;
 
     Logger::warning("PGS: loaded persisted archive entries=" + std::to_string(m_persistedGuards.size()) +
                     ", state-file=" + m_stateFilePath);
@@ -522,6 +623,8 @@ void PGS::persistState()
     out << "VERSION\t" << kStateFileVersion << "\n";
     out << "NEXT_GUARD_ID\t" << std::max<std::uint64_t>(1ull, nextGuardId) << "\n";
     out << "AUTH_TOKEN_HASH\t" << authHash << "\n";
+    out << "SERVER_PORT\t" << m_serverPort << "\n";
+    out << "MODULES_PERMISSIVE\t" << (m_modulesPermissive ? "1" : "0") << "\n";
     for (const auto &guard : snapshot)
     {
         out << "GUARD\t"
@@ -533,7 +636,14 @@ void PGS::persistState()
             << base64Encode(guard.restartArgs) << "\t"
             << (guard.fileHash.empty() ? "-" : guard.fileHash) << "\t"
             << (guard.intentional ? "1" : "0") << "\t"
-            << (guard.hashVerified ? "1" : "0") << "\n";
+            << (guard.hashVerified ? "1" : "0") << "\t"
+            << (guard.appKind == AppKind::WinApp ? "winapp" : "win32") << "\t"
+            << (guard.aumid.empty() ? "-" : base64Encode(guard.aumid)) << "\t"
+            << guard.restartWindowSec << "\t"
+            << guard.restartDelayMs << "\t"
+            << (guard.backoff ? "1" : "0") << "\t"
+            << guard.hangTimeoutMs << "\t"
+            << (guard.killOnExit ? "1" : "0") << "\n";
     }
     out.flush();
     out.close();
@@ -590,7 +700,18 @@ bool PGS::tryAttachPersistedGuard(const PersistedGuardState &persisted, GuardInf
         processHandle,
         persisted.intentional,
         persisted.hashVerified,
-        persisted.guardId};
+        persisted.guardId,
+        persisted.appKind,
+        persisted.aumid,
+        persisted.restartWindowSec,
+        persisted.restartDelayMs,
+        persisted.backoff,
+        persisted.hangTimeoutMs,
+        persisted.killOnExit,
+        nullptr};
+    // v3: reopen (or create) the survivor's per-guard Job so monitoring of the
+    // whole process family resumes after a service crash.
+    assignGuardToJob(outGuard);
     return true;
 }
 
@@ -623,13 +744,20 @@ bool PGS::restorePersistedGuards()
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             m_guards[restored.pid] = restored;
-            m_policyByGuardId[restored.guardId] = RestartPolicyState{persisted.maxRestarts, 0};
+            m_policyByGuardId[restored.guardId] = RestartPolicyState{persisted.maxRestarts, 0, {}};
             auto it = m_persistedGuards.find(restored.guardId);
             if (it != m_persistedGuards.end())
             {
                 it->second.lastKnownPid = restored.pid;
                 it->second.sessionId = restored.sessionId;
                 it->second.path = restored.path;
+                it->second.appKind = restored.appKind;
+                it->second.aumid = restored.aumid;
+                it->second.restartWindowSec = restored.restartWindowSec;
+                it->second.restartDelayMs = restored.restartDelayMs;
+                it->second.backoff = restored.backoff;
+                it->second.hangTimeoutMs = restored.hangTimeoutMs;
+                it->second.killOnExit = restored.killOnExit;
             }
             Logger::warning("PGS: restored persisted live guard pid=" + std::to_string(restored.pid) +
                             ", guard-id=" + std::to_string(restored.guardId));
@@ -656,14 +784,24 @@ bool PGS::restorePersistedGuards()
             nullptr,
             false,
             persisted.hashVerified,
-            persisted.guardId};
+            persisted.guardId,
+            persisted.appKind,
+            persisted.aumid,
+            persisted.restartWindowSec,
+            persisted.restartDelayMs,
+            persisted.backoff,
+            persisted.hangTimeoutMs,
+            persisted.killOnExit,
+            nullptr};
 
         GuardInfo restarted;
         if (restartGuard(desired, 0, restarted))
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             m_guards[restarted.pid] = restarted;
-            m_policyByGuardId[restarted.guardId] = RestartPolicyState{persisted.maxRestarts, 0};
+            // v3: assign the freshly restarted process to its per-guard Job.
+            assignGuardToJob(m_guards[restarted.pid]);
+            m_policyByGuardId[restarted.guardId] = RestartPolicyState{persisted.maxRestarts, 0, {}};
             auto &stored = m_persistedGuards[restarted.guardId];
             stored.guardId = restarted.guardId;
             stored.lastKnownPid = restarted.pid;
@@ -674,6 +812,13 @@ bool PGS::restorePersistedGuards()
             stored.fileHash = restarted.fileHash;
             stored.intentional = false;
             stored.hashVerified = restarted.hashVerified;
+            stored.appKind = restarted.appKind;
+            stored.aumid = restarted.aumid;
+            stored.restartWindowSec = restarted.restartWindowSec;
+            stored.restartDelayMs = restarted.restartDelayMs;
+            stored.backoff = restarted.backoff;
+            stored.hangTimeoutMs = restarted.hangTimeoutMs;
+            stored.killOnExit = restarted.killOnExit;
             Logger::warning("PGS: restored persisted missing guard by restart pid=" + std::to_string(restarted.pid) +
                             ", guard-id=" + std::to_string(restarted.guardId));
             changed = true;
@@ -805,24 +950,124 @@ void PGS::handleClient(SOCKET clientSocket)
 void PGS::monitorLoop()
 {
     // monitorLoop owns the "watch / decide / restart / cleanup" cycle:
-    // 1. scan the live guard map for dead handles
-    // 2. remove dead entries from the active map
-    // 3. outside the lock, decide whether each guard should restart
-    // 4. either relaunch and reattach it, or permanently retire its policy
+    // 1. fire deferred (backoff/delay) restarts whose delay has elapsed
+    // 2. drain the shared IOCP so process/family exits wake us within ~50ms
+    //    (IOCP is the fast wake path; the handle poll below is the backstop)
+    // 3. scan the live guard map for dead handles (+ optional GUI hang probe)
+    // 4. for newly-dead guards, decide restart under sliding-window policy
+    // 5. either relaunch+reattach (and reassign its per-guard Job) or retire
     //
-    // Doing restart work outside m_guardsMutex avoids turning expensive Win32
-    // process creation calls into a global stop-the-world pause for list/get/
-    // register requests.
+    // All restart/create work runs outside m_guardsMutex so a slow CreateProcess
+    // cannot block list/get/register requests.
+    struct PendingRestart
+    {
+        GuardInfo guard;
+        int restartIndex;
+        std::chrono::steady_clock::time_point readyAt;
+    };
+    std::vector<PendingRestart> pending;
+
     while (m_running.load())
     {
-        std::vector<GuardInfo> deadGuards;
+        const auto now = std::chrono::steady_clock::now();
 
+        // Fire deferred restarts whose backoff/delay has elapsed.
+        for (auto pit = pending.begin(); pit != pending.end();)
+        {
+            if (pit->readyAt > now)
+            {
+                ++pit;
+                continue;
+            }
+            GuardInfo restarted;
+            if (restartGuard(pit->guard, pit->restartIndex, restarted))
+            {
+                {
+                    std::lock_guard<std::mutex> lock(m_guardsMutex);
+                    auto existingNew = m_guards.find(restarted.pid);
+                    if (existingNew != m_guards.end() && existingNew->second.handle)
+                    {
+                        CloseHandle(existingNew->second.handle);
+                    }
+                    m_guards[restarted.pid] = restarted;
+                    assignGuardToJob(m_guards[restarted.pid]);
+                    auto &persisted = m_persistedGuards[restarted.guardId];
+                    persisted.guardId = restarted.guardId;
+                    persisted.lastKnownPid = restarted.pid;
+                    persisted.sessionId = restarted.sessionId;
+                    persisted.path = restarted.path;
+                    persisted.maxRestarts = restarted.maxRestarts;
+                    persisted.restartArgs = restarted.restartArgs;
+                    persisted.fileHash = restarted.fileHash;
+                    persisted.intentional = false;
+                    persisted.hashVerified = restarted.hashVerified;
+                    persisted.appKind = restarted.appKind;
+                    persisted.aumid = restarted.aumid;
+                    persisted.restartWindowSec = restarted.restartWindowSec;
+                    persisted.restartDelayMs = restarted.restartDelayMs;
+                    persisted.backoff = restarted.backoff;
+                    persisted.hangTimeoutMs = restarted.hangTimeoutMs;
+                    persisted.killOnExit = restarted.killOnExit;
+                }
+                persistState();
+                Logger::warning("PGS: auto-attached restarted guard pid=" + std::to_string(restarted.pid));
+            }
+            else
+            {
+                {
+                    std::lock_guard<std::mutex> lock(m_guardsMutex);
+                    m_policyByGuardId.erase(pit->guard.guardId);
+                    auto persisted = m_persistedGuards.find(pit->guard.guardId);
+                    if (persisted != m_persistedGuards.end())
+                    {
+                        persisted->second.lastKnownPid = 0;
+                    }
+                }
+                persistState();
+                Logger::error("PGS: restart failed permanently, guard removed path=" + pit->guard.path);
+            }
+            if (pit->guard.handle)
+            {
+                CloseHandle(pit->guard.handle);
+            }
+            pit = pending.erase(pit);
+        }
+
+        // IOCP fast wake: consume one completion (50ms cap) so a fresh exit
+        // notification short-circuits the wait; the poll below is still the
+        // authoritative liveness source.
+        if (m_ioPort)
+        {
+            DWORD code = 0;
+            ULONG_PTR key = 0;
+            LPOVERLAPPED ov = nullptr;
+            GetQueuedCompletionStatus(m_ioPort, &code, &key, &ov, 50);
+            (void)code;
+            (void)key;
+            (void)ov;
+        }
+        else
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        std::vector<GuardInfo> deadGuards;
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             for (auto it = m_guards.begin(); it != m_guards.end();)
             {
                 if (isGuardAlive(it->second))
                 {
+                    if (it->second.hangTimeoutMs > 0 && isGuardHung(it->second))
+                    {
+                        Logger::warning("PGS: guard hung (unresponsive GUI), pid=" +
+                                        std::to_string(it->second.pid) +
+                                        ", hang-timeout=" + std::to_string(it->second.hangTimeoutMs) + "ms");
+                        terminateGuardFamily(it->second.guardId);
+                        deadGuards.push_back(it->second);
+                        it = m_guards.erase(it);
+                        continue;
+                    }
                     ++it;
                     continue;
                 }
@@ -832,10 +1077,8 @@ void PGS::monitorLoop()
             }
         }
 
-        // Process restart decisions outside the main guard map lock.
-        //
-        // This keeps the lock hold time short and avoids blocking register/list
-        // requests while we are creating processes or waiting on system APIs.
+        // Process restart decisions outside the main guard map lock so creating
+        // processes / waiting on system APIs cannot block register/list/get.
         for (const auto &guard : deadGuards)
         {
             if (guard.intentional)
@@ -849,6 +1092,7 @@ void PGS::monitorLoop()
                     m_policyByGuardId.erase(guard.guardId);
                     m_persistedGuards.erase(guard.guardId);
                 }
+                closeGuardJob(guard.guardId);
                 persistState();
                 Logger::warning("PGS: guard exited intentionally, pid=" + std::to_string(guard.pid));
                 continue;
@@ -857,6 +1101,8 @@ void PGS::monitorLoop()
             bool shouldRestart = true;
             int currentRestarts = 0;
             int maxRestarts = guard.maxRestarts;
+            const int windowSec = guard.restartWindowSec;
+            const bool windowed = (windowSec > 0);
             {
                 std::lock_guard<std::mutex> lock(m_guardsMutex);
                 auto &policy = m_policyByGuardId[guard.guardId];
@@ -864,22 +1110,26 @@ void PGS::monitorLoop()
                 {
                     policy.maxRestarts = guard.maxRestarts;
                 }
-                if (policy.maxRestarts >= 0 && policy.restartCount >= policy.maxRestarts)
+                if (windowed)
                 {
-                    shouldRestart = false;
+                    const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    policy.recentRestartMs = util::pruneRestartWindow(policy.recentRestartMs, nowMs, windowSec);
+                    currentRestarts = static_cast<int>(policy.recentRestartMs.size());
                 }
                 else
                 {
-                    ++policy.restartCount;
+                    currentRestarts = policy.restartCount;
                 }
-                currentRestarts = policy.restartCount;
                 maxRestarts = policy.maxRestarts;
+                shouldRestart = !(policy.maxRestarts >= 0 && currentRestarts >= policy.maxRestarts);
             }
 
             if (!shouldRestart)
             {
                 Logger::warning("PGS: guard restart limit reached, path=" + guard.path +
-                                ", max=" + maxRestartsLabel(maxRestarts));
+                                ", max=" + maxRestartsLabel(maxRestarts) +
+                                (windowed ? " (sliding window)" : ""));
                 if (guard.handle)
                 {
                     CloseHandle(guard.handle);
@@ -893,17 +1143,61 @@ void PGS::monitorLoop()
                         persisted->second.lastKnownPid = 0;
                     }
                 }
+                closeGuardJob(guard.guardId);
                 persistState();
                 continue;
             }
 
-            Logger::warning("PGS: guard died unexpectedly, pid=" + std::to_string(guard.pid));
+            // Terminate the whole family (orphan/child processes) before
+            // relaunching so a crash-looping parent cannot leave ghosts behind.
+            terminateGuardFamily(guard.guardId);
+
+            const int restartIndex = currentRestarts + 1;
+            int delayMs = guard.restartDelayMs;
+            if (guard.backoff)
+            {
+                delayMs = util::computeBackoffDelay(guard.restartDelayMs, restartIndex);
+            }
+
+            // Record the restart now; if relaunch fails below, policy is retired
+            // and the recorded timestamp/count is effectively discarded.
+            {
+                std::lock_guard<std::mutex> lock(m_guardsMutex);
+                auto &policy = m_policyByGuardId[guard.guardId];
+                if (windowed)
+                {
+                    const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    policy.recentRestartMs.push_back(nowMs);
+                    policy.recentRestartMs = util::pruneRestartWindow(policy.recentRestartMs, nowMs, windowSec);
+                }
+                else
+                {
+                    ++policy.restartCount;
+                }
+                currentRestarts = windowed ? static_cast<int>(policy.recentRestartMs.size()) : policy.restartCount;
+            }
+
+            Logger::warning("PGS: guard died unexpectedly, pid=" + std::to_string(guard.pid) +
+                            (guard.appKind == AppKind::WinApp ? " (winapp)" : ""));
             Logger::warning("PGS: restart count " + std::to_string(currentRestarts) + "/" +
                             maxRestartsLabel(maxRestarts) +
-                            ", path=" + guard.path);
+                            ", path=" + guard.path +
+                            ", app-kind=" + (guard.appKind == AppKind::WinApp ? "winapp" : "win32") +
+                            (delayMs > 0 ? ", delay=" + std::to_string(delayMs) + "ms" : ""));
+
+            if (delayMs > 0)
+            {
+                // Defer the relaunch so backoff/delay cannot stall monitoring of
+                // other guards. The dead pid handle is kept in the pending copy
+                // and closed when the deferred relaunch fires.
+                const auto readyAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+                pending.push_back({guard, restartIndex, readyAt});
+                continue;
+            }
 
             GuardInfo newGuard;
-            if (restartGuard(guard, currentRestarts, newGuard))
+            if (restartGuard(guard, restartIndex, newGuard))
             {
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
@@ -913,6 +1207,7 @@ void PGS::monitorLoop()
                         CloseHandle(existingNew->second.handle);
                     }
                     m_guards[newGuard.pid] = newGuard;
+                    assignGuardToJob(m_guards[newGuard.pid]);
                     auto &persisted = m_persistedGuards[newGuard.guardId];
                     persisted.guardId = newGuard.guardId;
                     persisted.lastKnownPid = newGuard.pid;
@@ -923,14 +1218,15 @@ void PGS::monitorLoop()
                     persisted.fileHash = newGuard.fileHash;
                     persisted.intentional = false;
                     persisted.hashVerified = newGuard.hashVerified;
+                    persisted.appKind = newGuard.appKind;
+                    persisted.aumid = newGuard.aumid;
+                    persisted.restartWindowSec = newGuard.restartWindowSec;
+                    persisted.restartDelayMs = newGuard.restartDelayMs;
+                    persisted.backoff = newGuard.backoff;
+                    persisted.hangTimeoutMs = newGuard.hangTimeoutMs;
+                    persisted.killOnExit = newGuard.killOnExit;
                 }
                 persistState();
-                // Note (TOCTOU): by this point the dead guard was already
-                // erased from m_guards, so a concurrent "unregister <oldPid>"
-                // would have returned "pid not found". The guard is re-added
-                // under its new pid per the restart policy. To permanently stop
-                // a guard that keeps dying, use "intentional" or unregister the
-                // new pid after it restarts.
                 Logger::warning("PGS: auto-attached restarted guard pid=" + std::to_string(newGuard.pid));
             }
             else
@@ -952,8 +1248,6 @@ void PGS::monitorLoop()
                 CloseHandle(guard.handle);
             }
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(kMonitorIntervalMs));
     }
 }
 
@@ -986,6 +1280,15 @@ bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGu
             return false;
         }
     }
+    // v3: WindowsApps (UWP/Store) cannot be (re)launched with CreateProcessW*
+    // — they must be activated through their AUMID. Route the whole restart to
+    // restartAppGuard (it impersonates the user session and shell-activates the
+    // app, returning the new pid/handle).
+    if (info.appKind == AppKind::WinApp && !info.aumid.empty())
+    {
+        return restartAppGuard(info, restartIndex, newGuard);
+    }
+
     // Restart tries to preserve user experience first. We prefer re-launching
     // inside the original session so GUI apps come back on the right desktop.
     // If that fails, we still fall back to a normal CreateProcessW restart so
@@ -1050,7 +1353,15 @@ bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGu
         pi.hProcess,
         false,
         info.hashVerified,
-        info.guardId};
+        info.guardId,
+        info.appKind,
+        info.aumid,
+        info.restartWindowSec,
+        info.restartDelayMs,
+        info.backoff,
+        info.hangTimeoutMs,
+        info.killOnExit,
+        nullptr};
 
     Logger::warning("PGS: restart launched in fallback session, pid=" + std::to_string(pi.dwProcessId) +
                     ", session=" + std::to_string(targetSession));
@@ -1163,7 +1474,15 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
         pi.hProcess,
         false,
         info.hashVerified,
-        info.guardId};
+        info.guardId,
+        info.appKind,
+        info.aumid,
+        info.restartWindowSec,
+        info.restartDelayMs,
+        info.backoff,
+        info.hangTimeoutMs,
+        info.killOnExit,
+        nullptr};
 
     Logger::warning("PGS: restart launched in user session, pid=" + std::to_string(pi.dwProcessId) +
                     ", session=" + std::to_string(targetSessionId));
@@ -1291,7 +1610,7 @@ bool PGS::createListenSocket()
 
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(kServerPort);
+    serverAddr.sin_port = htons(m_serverPort);
     inet_pton(AF_INET, kServerIp, &serverAddr.sin_addr);
 
     if (bind(m_listenSocket, reinterpret_cast<sockaddr *>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
@@ -1325,16 +1644,35 @@ void PGS::closeListenSocket()
 
 void PGS::cleanupGuards()
 {
-    std::lock_guard<std::mutex> lock(m_guardsMutex);
-    for (auto &entry : m_guards)
     {
-        if (entry.second.handle)
+        std::lock_guard<std::mutex> lock(m_guardsMutex);
+        for (auto &entry : m_guards)
         {
-            CloseHandle(entry.second.handle);
+            if (entry.second.handle)
+            {
+                CloseHandle(entry.second.handle);
+            }
         }
+        m_guards.clear();
+        m_policyByGuardId.clear();
     }
-    m_guards.clear();
-    m_policyByGuardId.clear();
+    // v3: release all per-guard Job Objects and the shared IOCP.
+    {
+        std::lock_guard<std::mutex> lock(m_jobMutex);
+        for (auto &kv : m_jobs)
+        {
+            if (kv.second)
+            {
+                CloseHandle(kv.second);
+            }
+        }
+        m_jobs.clear();
+    }
+    if (m_ioPort)
+    {
+        CloseHandle(m_ioPort);
+        m_ioPort = nullptr;
+    }
 }
 
 // Resolve the "modules" directory beside the running pgs_service.exe. Used
@@ -1438,4 +1776,391 @@ bool PGS::writeInitialTokenFile(const std::string &stateDir, const std::string &
 //   module load <base64-path>
 //   module unload <name>
 //   module call <name> <kv-request>   (response forwarded verbatim)
+// ---- v3 Job Object / cascade / WindowsApps helpers ---------------------------
+
+bool PGS::createGuardJob(std::uint64_t guardId, bool killOnExit, HANDLE &outJob)
+{
+    // A named job Global\PGS-Job-<guardId> groups one guarded process and all
+    // of its descendants. Breakaway is NOT enabled, so child/grandchild
+    // processes stay in the job and TerminateJobObject can clear the whole
+    // family on restart. The "Global\" namespace needs SeCreateGlobalPrivilege
+    // (LocalSystem/Administrators), which is why cascade requires LocalSystem.
+    outJob = nullptr;
+    const std::wstring name = utf8ToWide(std::string(kJobNamePrefix) + std::to_string(guardId));
+    HANDLE job = CreateJobObjectW(nullptr, name.c_str());
+    if (!job)
+    {
+        Logger::warning("PGS: CreateJobObjectW failed guard-id=" + std::to_string(guardId) +
+                        ", error=" + std::to_string(GetLastError()));
+        return false;
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli{};
+    eli.BasicLimitInformation.LimitFlags = killOnExit ? JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE : 0;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &eli, sizeof(eli)))
+    {
+        Logger::warning("PGS: SetInformationJobObject(limit) failed guard-id=" + std::to_string(guardId) +
+                        ", error=" + std::to_string(GetLastError()));
+    }
+    if (m_ioPort)
+    {
+        JOBOBJECT_ASSOCIATE_COMPLETION_PORT acp{};
+        acp.CompletionPort = m_ioPort;
+        acp.CompletionKey = reinterpret_cast<PVOID>(static_cast<uintptr_t>(guardId));
+        if (!SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &acp, sizeof(acp)))
+        {
+            Logger::warning("PGS: job completion-port bind failed guard-id=" + std::to_string(guardId) +
+                            ", error=" + std::to_string(GetLastError()));
+        }
+    }
+    outJob = job;
+    return true;
+}
+
+bool PGS::attachGuardJob(std::uint64_t guardId, HANDLE &outJob)
+{
+    // Reopen a survivor job (the process still running after a PGS crash) so we
+    // resume observing it. Returns false if the named job is gone (e.g. the
+    // process was never in a job, or the kernel object was already released).
+    outJob = nullptr;
+    const std::wstring name = utf8ToWide(std::string(kJobNamePrefix) + std::to_string(guardId));
+    HANDLE job = OpenJobObjectW(JOB_OBJECT_ALL_ACCESS, FALSE, name.c_str());
+    if (!job)
+    {
+        return false;
+    }
+    outJob = job;
+    return true;
+}
+
+bool PGS::assignGuardToJob(GuardInfo &guard)
+{
+    // Reuse an existing job for this guardId, else reopen a survivor job, else
+    // create a fresh one; then assign the live process into it. On any failure
+    // we leave guard.jobHandle null - poll-based exit detection still works, we
+    // just lose cascade observe/terminate for this guard.
+    if (!guard.handle || guard.guardId == 0)
+    {
+        return false;
+    }
+    HANDLE job = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_jobMutex);
+        auto it = m_jobs.find(guard.guardId);
+        if (it != m_jobs.end())
+        {
+            job = it->second;
+        }
+    }
+    if (!job)
+    {
+        HANDLE reopened = nullptr;
+        if (attachGuardJob(guard.guardId, reopened) && reopened)
+        {
+            job = reopened;
+        }
+        else
+        {
+            if (reopened)
+            {
+                CloseHandle(reopened);
+                reopened = nullptr;
+            }
+            if (!createGuardJob(guard.guardId, guard.killOnExit, job))
+            {
+                return false;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_jobMutex);
+            m_jobs[guard.guardId] = job;
+        }
+    }
+    if (!AssignProcessToJobObject(job, guard.handle))
+    {
+        // Common cause: the process is already in an incompatible job, or a
+        // permission shortfall. Guarding continues via polling.
+        Logger::warning("PGS: AssignProcessToJobObject failed guard-id=" + std::to_string(guard.guardId) +
+                        ", pid=" + std::to_string(guard.pid) +
+                        ", error=" + std::to_string(GetLastError()));
+        return false;
+    }
+    guard.jobHandle = job;
+    return true;
+}
+
+void PGS::terminateGuardFamily(std::uint64_t guardId)
+{
+    // Kill every process in this guard's job (the guarded process plus all
+    // descendant/orphan processes still attached) so a relaunch starts clean.
+    std::lock_guard<std::mutex> lock(m_jobMutex);
+    const auto it = m_jobs.find(guardId);
+    if (it == m_jobs.end() || !it->second)
+    {
+        return;
+    }
+    if (!TerminateJobObject(it->second, 1))
+    {
+        Logger::warning("PGS: TerminateJobObject failed guard-id=" + std::to_string(guardId) +
+                        ", error=" + std::to_string(GetLastError()));
+    }
+}
+
+void PGS::closeGuardJob(std::uint64_t guardId)
+{
+    std::lock_guard<std::mutex> lock(m_jobMutex);
+    const auto it = m_jobs.find(guardId);
+    if (it != m_jobs.end())
+    {
+        if (it->second)
+        {
+            CloseHandle(it->second);
+        }
+        m_jobs.erase(it);
+    }
+}
+
+bool PGS::isGuardHung(const GuardInfo &info) const
+{
+    // Probe each visible top-level window owned by the guard's pid with
+    // SendMessageTimeout(WM_NULL); any timeout >= hangTimeoutMs flags the
+    // guard as hung. Non-GUI guards have no such window and report false, so
+    // this never false-triggers on background workers. Reliable mainly when
+    // PGS runs in the interactive session (a Session 0 service can see
+    // cross-session ACCESS_DENIED instead of a clean timeout).
+    if (info.hangTimeoutMs <= 0 || !info.handle)
+    {
+        return false;
+    }
+    struct Ctx
+    {
+        DWORD pid;
+        DWORD timeoutMs;
+        bool hung;
+    };
+    Ctx ctx{info.pid, static_cast<DWORD>(info.hangTimeoutMs), false};
+    auto enumProc = [](HWND hwnd, LPARAM lp) -> BOOL
+    {
+        auto *c = reinterpret_cast<Ctx *>(lp);
+        DWORD wpid = 0;
+        GetWindowThreadProcessId(hwnd, &wpid);
+        if (wpid != c->pid)
+        {
+            return TRUE;
+        }
+        if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr)
+        {
+            return TRUE;
+        }
+        DWORD_PTR res = 0;
+        const LRESULT r = SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, c->timeoutMs, &res);
+        if (r == 0)
+        {
+            const DWORD err = GetLastError();
+            if (err == ERROR_TIMEOUT || err == ERROR_ACCESS_DENIED)
+            {
+                c->hung = true;
+                return FALSE; // stop enumerating; we have our answer
+            }
+        }
+        return TRUE;
+    };
+    EnumWindows(enumProc, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.hung;
+}
+
+bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard)
+{
+    // Activate a WindowsApps (UWP/Store) guard via its AUMID. The primary path is
+    // IApplicationActivationManager::ActivateApplication (the documented Start-menu
+    // activation entry), which returns the real packaged app pid so we can keep a
+    // handle for liveness watching. We impersonate the original user token so a
+    // Session 0 service lands the app in the interactive session. ShellExecuteExW
+    // with "shell:AppsFolder\<AUMID>" is the fallback when COM activation is
+    // unavailable; the broker there rarely yields a usable hProcess.
+    if (info.aumid.empty())
+    {
+        Logger::error("PGS: winapp restart refused, missing AUMID, path=" + info.path);
+        return false;
+    }
+
+    HANDLE userToken = nullptr;
+    DWORD targetSessionId = info.sessionId;
+    // When PGS itself runs inside the target session (console `run` mode under an
+    // interactive admin), it already holds that session's user token and we can
+    // clone it directly -- no SE_TCB_NAME required (that privilege is granted
+    // only to LocalSystem, which an elevated admin token does NOT carry, so
+    // WTSQueryUserToken would always fail here). WTSQueryUserToken remains the
+    // path for the Session-0 service case below.
+    DWORD mySession = 0xFFFFFFFF;
+    ProcessIdToSessionId(GetCurrentProcessId(), &mySession);
+    if (mySession != 0xFFFFFFFF && mySession == targetSessionId)
+    {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &userToken);
+    }
+    if (!userToken && !queryUserTokenForSession(targetSessionId, userToken))
+    {
+        const DWORD activeSession = WTSGetActiveConsoleSessionId();
+        if (mySession != 0xFFFFFFFF && mySession == activeSession)
+        {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &userToken);
+        }
+        if (!userToken && !queryUserTokenForSession(activeSession, userToken))
+        {
+            Logger::error("PGS: winapp restart failed, no user token for any session, aumid=" + info.aumid);
+            return false;
+        }
+        targetSessionId = activeSession;
+    }
+    HANDLE primaryToken = nullptr;
+    if (!DuplicateTokenEx(userToken, TOKEN_ALL_ACCESS, nullptr, SecurityImpersonation, TokenImpersonation, &primaryToken))
+    {
+        CloseHandle(userToken);
+        Logger::error("PGS: winapp restart failed, DuplicateTokenEx error=" + std::to_string(GetLastError()));
+        return false;
+    }
+    CloseHandle(userToken);
+    // Impersonation-token form: ActivateApplication runs under the thread token;
+    // we do NOT set TokenSessionId (that is a primary-token concern for
+    // CreateProcessAsUser, which this winapp path never uses).
+
+    std::string argsUtf8 = info.restartArgs;
+    if (!argsUtf8.empty())
+    {
+        argsUtf8 = replaceAll(argsUtf8, kRestartIndexToken, std::to_string(restartIndex));
+    }
+    const std::wstring aumidW = utf8ToWide(info.aumid);
+    const std::wstring argsW = utf8ToWide(argsUtf8);
+
+    bool ok = false;
+    DWORD activatedPid = 0;
+    HANDLE procHandle = nullptr;
+
+    if (!SetThreadToken(nullptr, primaryToken))
+    {
+        CloseHandle(primaryToken);
+        Logger::error("PGS: winapp restart failed, SetThreadToken error=" + std::to_string(GetLastError()));
+        return false;
+    }
+
+    HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool comInited = (SUCCEEDED(comInit) || comInit == RPC_E_CHANGED_MODE);
+    if (comInited)
+    {
+        IApplicationActivationManager *act = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_ApplicationActivationManager, nullptr,
+                                      CLSCTX_LOCAL_SERVER | CLSCTX_NO_FAILURE_LOG,
+                                      IID_PPV_ARGS(&act));
+        if (SUCCEEDED(hr) && act)
+        {
+            hr = act->ActivateApplication(aumidW.c_str(),
+                                          (argsW.empty() ? L"" : argsW.c_str()),
+                                          AO_NONE, &activatedPid);
+            if (SUCCEEDED(hr) && activatedPid != 0)
+            {
+                procHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                                          FALSE, activatedPid);
+                ok = (procHandle != nullptr);
+                if (!ok)
+                {
+                    Logger::warning("PGS: winapp ActivateApplication ok pid=" + std::to_string(activatedPid) +
+                                    " but OpenProcess failed error=" + std::to_string(GetLastError()) +
+                                    ", aumid=" + info.aumid);
+                    activatedPid = 0;
+                }
+            }
+            else
+            {
+                Logger::warning("PGS: ActivateApplication hr=0x" +
+                                std::to_string(static_cast<unsigned long>(hr)) +
+                                " pid=" + std::to_string(activatedPid) +
+                                ", aumid=" + info.aumid);
+            }
+            act->Release();
+        }
+        else
+        {
+            Logger::warning("PGS: CoCreateInstance(ApplicationActivationManager) hr=0x" +
+                            std::to_string(static_cast<unsigned long>(hr)) +
+                            ", falling back to ShellExecute, aumid=" + info.aumid);
+        }
+        if (comInit == S_OK || comInit == S_FALSE)
+        {
+            CoUninitialize();
+        }
+    }
+
+    // Fallback: ShellExecuteExW("shell:AppsFolder\<AUMID>"). Broker often does
+    // not hand back hProcess, so this is best-effort.
+    if (!ok)
+    {
+        std::wstring file = L"shell:AppsFolder\\" + aumidW;
+        std::vector<wchar_t> paramsBuf(argsW.begin(), argsW.end());
+        paramsBuf.push_back(L'\0');
+        SHELLEXECUTEINFOW sei{};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+        sei.lpFile = file.c_str();
+        sei.lpParameters = (argsW.empty() ? nullptr : paramsBuf.data());
+        sei.nShow = SW_SHOWNORMAL;
+        ok = (ShellExecuteExW(&sei) == TRUE);
+        if (ok)
+        {
+            procHandle = sei.hProcess;
+            activatedPid = procHandle ? GetProcessId(procHandle) : 0;
+        }
+    }
+
+    SetThreadToken(nullptr, nullptr);
+    CloseHandle(primaryToken);
+
+    if (!ok || !procHandle || activatedPid == 0)
+    {
+        Logger::error("PGS: winapp restart failed, aumid=" + info.aumid +
+                      ", error=" + std::to_string(GetLastError()));
+        if (procHandle)
+        {
+            CloseHandle(procHandle);
+        }
+        return false;
+    }
+
+    DWORD sessionId = 0xFFFFFFFF;
+    ProcessIdToSessionId(activatedPid, &sessionId);
+    newGuard = GuardInfo{
+        activatedPid,
+        sessionId,
+        info.path,
+        info.maxRestarts,
+        info.restartArgs,
+        info.fileHash,
+        procHandle,
+        false,
+        info.hashVerified,
+        info.guardId,
+        AppKind::WinApp,
+        info.aumid,
+        info.restartWindowSec,
+        info.restartDelayMs,
+        info.backoff,
+        info.hangTimeoutMs,
+        info.killOnExit,
+        nullptr};
+    Logger::warning("PGS: winapp restart activated pid=" + std::to_string(activatedPid) +
+                    ", aumid=" + info.aumid);
+    return true;
+}
+
+int PGS::recordRestartAndEffectiveCount(std::uint64_t /*guardId*/, RestartPolicyState &policy, int windowSec)
+{
+    const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    if (windowSec > 0)
+    {
+        policy.recentRestartMs = util::pruneRestartWindow(policy.recentRestartMs, nowMs, windowSec);
+        policy.recentRestartMs.push_back(nowMs);
+        return static_cast<int>(policy.recentRestartMs.size());
+    }
+    ++policy.restartCount;
+    return policy.restartCount;
+}
 } // namespace ProcessGuard

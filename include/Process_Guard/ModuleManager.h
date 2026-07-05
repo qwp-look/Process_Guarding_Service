@@ -95,6 +95,12 @@ namespace ProcessGuard
         bool invoke(const std::string &name, const std::string &request,
                     std::string &response, std::string &err);
 
+        // v3 security: permissive mode (default false) bypasses the allowlist so
+        // the legacy "load any DLL" behaviour is available for development. The
+        // operator opt-in flag lives on PGS (m_modulesPermissive) and is pushed
+        // here before loadFromDirectory().
+        void setPermissive(bool v) { m_permissive = v; }
+
     private:
         // Resolved function-pointer types and runtime data for one loaded DLL.
         struct Entry
@@ -118,6 +124,22 @@ namespace ProcessGuard
         bool loadLocked(const std::string &path, std::string &err);
 
         static std::string lower(const std::string &s); // ASCII lowercase for name keys
+        // v3: module allowlist (one entry per allowed module name). Loaded from
+        // <modules-dir>\modules.allow. Empty + non-permissive => fail-closed.
+        struct AllowEntry
+        {
+            std::string name;          // module key (folder name, ASCII lower)
+            std::string sha256;        // optional pinned file hash (hex); empty = any
+            bool requireSigned = false; // require a valid Authenticode signature
+        };
+        std::vector<AllowEntry> m_allowlist;
+        bool m_allowlistLoaded = false;
+        bool m_permissive = false;
+        void loadAllowlist(const std::string &dir);
+        const AllowEntry *findAllowEntry(const std::string &moduleKey) const;
+        static std::string moduleKeyFromPath(const std::string &path);
+        static bool verifySignature(const std::wstring &path);
+
         // Probe a candidate DLL for an export via an image-resource map (no DllMain).
         static bool hasExportByName(const std::wstring &path, const char *exportName);
     };

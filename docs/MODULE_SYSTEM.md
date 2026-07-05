@@ -342,3 +342,50 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 > 约定提醒：因「文件夹名 = 模块名」，新增模块时务必让目录名与 `PG_GetName()` 返回值一致，否则 Qt 子页面虽能建立，但 `module call --name <文件夹>` 会因名字不匹配而失败。
 
 `module.html` 由各模块自行提供，应放在 `modules/<模块名>/module.html`，构建脚本将其与 `*.dll`、`Sirius.sys` 等一并拷入 `build/modules/<模块名>/` 与 `release/modules/<模块名>/`。
+## 14. 模块白名单与 Authenticode 签名（v3）
+
+> v3 起模块加载默认 **fail-closed**：必须命中白名单、（当要求签名时）通过 Authenticode 校验，否则一律拒绝加载。本节为 v3 校验机制的权威说明。
+
+### 14.1 校验链
+
+`ModuleManager::load` 顺序：
+
+1. 规范化待加载 DLL 的绝对路径，确认其位于 `<exe>\modules\` 之内（`isPathInsideModulesDir`，拒绝逃逸模块目录的绝对路径）。
+2. **白名单命中**：在 `modules.allow` 中按模块名（大小写不敏感，与 `PG_GetName` 比对）查找条目。
+3. （条目要求签名时）**Authenticode 校验**：`WinVerifyTrust` 验证文件签名链。
+4. （条目给出 sha256 时）**哈希校验**：BCrypt(SHA-256) 计算文件哈希与条目比对。
+5. 全过才 `LoadLibrary`；任何一步失败记录明确原因并跳过。
+
+错误串扩容：`"module not in allowlist"` / `"signature verification failed"` / `"hash mismatch"` / `"module path outside modules dir"`。
+
+### 14.2 白名单文件格式
+
+路径：`<pgs_service.exe 目录>\modules\modules.allow`。逐行：
+
+```
+# 注释行、空行忽略；# 必须在行首
+<name>[|<sha256Hex>][|signed]]
+```
+
+- `<name>`：模块 `PG_GetName` 返回值，大小写不敏感。
+- 可选 `|<sha256Hex>`：固定该哈希；缺省则不校验哈希。
+- 可选 `|signed`：要求 Authenticode 签名有效；缺省则不强制签名。
+
+### 14.3 fail-closed 与 `--allow-all-modules`
+
+- **默认 fail-closed**：`modules.allow` 文件缺失（或无可命中条目）→ 拒绝加载任何模块并日志告警。理由：模块可执行任意代码进入 PGS 进程空间，未显式授权即不该加载。
+- **逃生阀 `--allow-all-modules`**：`run`/`install` flag，持久化于归档 `MODULES_PERMISSIVE\t1`，开启旧宽松行为「白名单缺失仍允许加载」用于开发调试。文档明确警告：**生产环境禁用**，等价于关闭模块边界。
+
+### 14.4 目录 ACL 加固
+
+模块目录 `<exe>\modules\` 经 `secureCreateDirectory` 设置 SYSTEM + Administrators 专有 ACL，普通用户不可写入，避免「先植入恶意 DLL 再等加载」的提权路径。状态目录、归档/临时目录同权限制。
+
+### 14.5 排错
+
+| 症状 | 原因 | 处置 |
+|------|------|------|
+| `module not in allowlist` | DLL 名不在 `modules.allow` | 添加条目或确认 `PG_GetName` 拼写 |
+| `signature verification failed` | 条目要求 `signed` 但签名无效/缺失 | 用有效 Authenticode 证书重签模块，或条目去掉 `signed`（仅开发） |
+| `hash mismatch` | 文件被改 | 重新计算 sha256 更新条目，或恢复原始文件 |
+| `module path outside modules dir` | 指定了 modules 外的绝对路径 | 仅加载 `modules\` 下的 DLL |
+| 服务启动加载全部失败并告警 | `modules.allow` 缺失（fail-closed） | 创建白名单并列举所需模块；或临时 `--allow-all-modules`（仅开发） |

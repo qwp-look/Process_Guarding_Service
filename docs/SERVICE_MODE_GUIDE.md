@@ -368,3 +368,33 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 - 若不需要 PPL，可从构建产物中移除 `modules/ppl` 目录，使即便误设 `PGS_ENABLE_PPL=1` 也无模块可加载。
 - 考虑以自定义低权限服务账户运行 `pgs_service`（需评估守护目标进程所需的访问权），以缩小 LocalSystem 特权面。
+
+## 8. v3 加固补充（LocalSystem 取舍 / 服务账号 / 端口 / token 风险）
+
+> 本节为 v3 引入的服务身份与端口相关变更，遇与上文不一致处以本节为准。
+
+### 8.1 为什么默认仍是 LocalSystem
+
+PGS 的核心能力之一是**跨会话重启守护对象**：用户在 Session 1/2 登录，PGS 需在目标会话内 `CreateProcessAsUserW`/`ActivateApplication` 拉起进程。这要求服务进程具备 `SE_TCB_NAME` 与对其它会话 token 的访问权，**LocalSystem 天然满足**，是跨会话守护的最稳路径。
+
+### 8.2 `--service-account` / `--service-password`（可选低权账号）
+
+`install` 新增可选 `--service-account <name> --service-password <pw>`，透传 `CreateServiceA` 的 `lpServiceStartName`/`lpPassword`，默认仍 LocalSystem。
+
+**显式警告**：换用低权服务账号后——
+
+- **丧失跨会话 `restartGuardInSession` 能力**：低权账号通常无 `SE_TCB_NAME`，无法 impersonate 目标会话 token，重启将在 Session 0 起控制台进程，GUI 守护对象可能拉不起来或拉到错误会话。
+- **WindowsApps 激活受限**：`ActivateApplication` 依赖会话 token impersonation，低权账号下回退到 `ShellExecuteW` 也可能失败。
+- 仅在你**明确知道代价**且守护对象本身不需要跨会话 GUI 时才考虑，并自负由此导致的守护失败。
+
+### 8.3 `--port <port>` 配置
+
+`run`/`install` 新增 `--port`；`install` 写入服务 binPath `--service --port <p>`，`PGS::initialize` 接受外部端口并优先于内置默认 `kServerPort`(12345)，归档 `SERVER_PORT` 行在服务恢复时还原端口。`pgs_bless`/Qt/Web 客户端需用相同端口连接。
+
+### 8.4 Token 继承风险与后续演进
+
+本轮 token 仍经环境变量 `PGS_AUTH_TOKEN` 传递：
+
+- 环境变量可被子进程继承，存在**通过同会话子进程窃取 token** 的风险面。
+- 本轮**不**重设计为 named-pipe/Kerberos 方案，作为独立跟踪项后续推进；当前缓解：服务专有 DACL 限制可读、`pgs_initial_token.txt` 已限权、token 仅存哈希不存明文。
+- 部署于多用户/不可信本机环境时，请额外评估此风险面或等待 named-pipe 方案落地。
