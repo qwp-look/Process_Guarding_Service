@@ -2012,14 +2012,16 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
         targetSessionId = activeSession;
     }
     HANDLE primaryToken = nullptr;
-    if (!DuplicateTokenEx(userToken, TOKEN_ALL_ACCESS, nullptr, SecurityImpersonation, TokenPrimary, &primaryToken))
+    if (!DuplicateTokenEx(userToken, TOKEN_ALL_ACCESS, nullptr, SecurityImpersonation, TokenImpersonation, &primaryToken))
     {
         CloseHandle(userToken);
         Logger::error("PGS: winapp restart failed, DuplicateTokenEx error=" + std::to_string(GetLastError()));
         return false;
     }
     CloseHandle(userToken);
-    SetTokenInformation(primaryToken, TokenSessionId, &targetSessionId, sizeof(targetSessionId));
+    // Impersonation-token form: ActivateApplication runs under the thread token;
+    // we do NOT set TokenSessionId (that is a primary-token concern for
+    // CreateProcessAsUser, which this winapp path never uses).
 
     std::string argsUtf8 = info.restartArgs;
     if (!argsUtf8.empty())
