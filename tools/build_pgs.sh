@@ -1,46 +1,50 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
 export PATH="/mingw64/bin:/usr/bin"
+
+# v3: NTDDI_VERSION >= Win8 enables MinGW's IApplicationActivationManager
+# (used by restartAppGuard for WindowsApps activation), no WinRT headers needed.
+CXXFLAGS="-std=c++17 -Wall -Wextra -O2 -Iinclude -DNTDDI_VERSION=0x06020000"
 mkdir -p build
 
 # Keep this script close to the manual build instructions in README so local
 # debugging and scripted verification use the same MinGW64 toolchain path.
 
 echo "[1/7] Compiling logger..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/common/PGLogger.cpp -o build/PGLogger.o
+g++ $CXXFLAGS -c src/common/PGLogger.cpp -o build/PGLogger.o
 
 echo "[2/7] Compiling PGS core..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/PGS.cpp -o build/PGS.o
+g++ $CXXFLAGS -c src/service/PGS.cpp -o build/PGS.o
 # Module system: ModuleManager is linked into pgs_service.exe.
 echo "[2.5/9] Compiling module manager..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/modules/ModuleManager.cpp -o build/ModuleManager.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/PGSProtocol.cpp -o build/PGSProtocol.o
+g++ $CXXFLAGS -c src/modules/ModuleManager.cpp -o build/ModuleManager.o
+g++ $CXXFLAGS -c src/service/PGSProtocol.cpp -o build/PGSProtocol.o
 
 echo "[3/7] Compiling service host..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/pgs_service.cpp -o build/pgs_service.o
+g++ $CXXFLAGS -c src/service/pgs_service.cpp -o build/pgs_service.o
 
 echo "[4/7] Linking pgs_service.exe..."
 g++ -std=c++17 -Wall -Wextra -O2 \
   build/PGLogger.o build/PGS.o build/PGSProtocol.o build/ModuleManager.o build/pgs_service.o \
   -o build/pgs_service.exe \
-  -lws2_32 -ladvapi32 -lwtsapi32 -luserenv -lbcrypt
+  -lws2_32 -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
 
 echo "[5/7] Building guard_example.exe..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/guard_example.cpp -o build/guard_example.exe -lws2_32 -ladvapi32 -lbcrypt
+g++ $CXXFLAGS examples/guard_example.cpp -o build/guard_example.exe -lws2_32 -ladvapi32 -lbcrypt
 
 echo "[6/7] Building quick_start.exe..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/quick_start.cpp -o build/quick_start.exe -lws2_32 -ladvapi32 -lbcrypt
+g++ $CXXFLAGS examples/quick_start.cpp -o build/quick_start.exe -lws2_32 -ladvapi32 -lbcrypt
 
 echo "[7/8] Building smoke_worker.exe..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/smoke_worker.cpp -o build/smoke_worker.exe -lws2_32
+g++ $CXXFLAGS examples/smoke_worker.cpp -o build/smoke_worker.exe -lws2_32
 
 echo "[8/8] Building pgs_bless.exe..."
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/common/PGSClient.cpp -o build/PGSClient.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude tools/pgs_bless.cpp build/PGSClient.o -o build/pgs_bless.exe -lws2_32 -ladvapi32 -lbcrypt
+g++ $CXXFLAGS -c src/common/PGSClient.cpp -o build/PGSClient.o
+g++ $CXXFLAGS tools/pgs_bless.cpp build/PGSClient.o -o build/pgs_bless.exe -lws2_32 -ladvapi32 -lbcrypt
 
 # PPL module: built as a separate shared DLL. Per-folder layout
 # build/modules/<name>/<name>.dll + module.html + assets. The folder name MUST
