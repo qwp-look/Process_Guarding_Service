@@ -46,6 +46,39 @@ constexpr int kLegacyStateFileVersion = 2;
 constexpr const char *kJobNamePrefix = "Global\\PGS-Job-";
 constexpr const char *kModulesAllowlistFile = "modules.allow";
 
+// Enable a named privilege on the current process token (best-effort: ok if the
+// privilege is absent, only fail if it cannot be enabled when present). Returns
+// true if the privilege is enabled afterwards.
+#ifndef SE_TCB_NAME_W
+#define SE_TCB_NAME_W L"SeTcbPrivilege"
+#endif
+bool enableProcessPrivilege(LPCWSTR privName)
+{
+    HANDLE tok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok) || !tok)
+    {
+        return false;
+    }
+    LUID luid{};
+    if (!LookupPrivilegeValueW(nullptr, privName, &luid))
+    {
+        CloseHandle(tok);
+        return false;
+    }
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    BOOL ok = AdjustTokenPrivileges(tok, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+    const DWORD err = GetLastError();
+    CloseHandle(tok);
+    return ok && err == ERROR_SUCCESS;
+}
+
+// Obtain the user token for a WTS session. WTSQueryUserToken requires the
+// SE_TCB_NAME privilege, which LocalSystem holds natively but an elevated
+// admin process holds disabled-by-default. We therefore enable SE_TCB on the
+// current token (no-op when already enabled) and retry once on first failure.
 bool queryUserTokenForSession(DWORD sessionId, HANDLE &userToken)
 {
     userToken = nullptr;
@@ -53,6 +86,13 @@ bool queryUserTokenForSession(DWORD sessionId, HANDLE &userToken)
     {
         return false;
     }
+    if (WTSQueryUserToken(sessionId, &userToken))
+    {
+        return true;
+    }
+    // Retry after enabling SE_TCB_NAME (covers elevated-admin `run` mode; the
+    // privilege exists in the token but starts disabled).
+    enableProcessPrivilege(SE_TCB_NAME_W);
     return WTSQueryUserToken(sessionId, &userToken) == TRUE;
 }
 } // namespace
