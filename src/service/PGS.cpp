@@ -1985,10 +1985,26 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
 
     HANDLE userToken = nullptr;
     DWORD targetSessionId = info.sessionId;
-    if (!queryUserTokenForSession(targetSessionId, userToken))
+    // When PGS itself runs inside the target session (console `run` mode under an
+    // interactive admin), it already holds that session's user token and we can
+    // clone it directly -- no SE_TCB_NAME required (that privilege is granted
+    // only to LocalSystem, which an elevated admin token does NOT carry, so
+    // WTSQueryUserToken would always fail here). WTSQueryUserToken remains the
+    // path for the Session-0 service case below.
+    DWORD mySession = 0xFFFFFFFF;
+    ProcessIdToSessionId(GetCurrentProcessId(), &mySession);
+    if (mySession != 0xFFFFFFFF && mySession == targetSessionId)
+    {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &userToken);
+    }
+    if (!userToken && !queryUserTokenForSession(targetSessionId, userToken))
     {
         const DWORD activeSession = WTSGetActiveConsoleSessionId();
-        if (!queryUserTokenForSession(activeSession, userToken))
+        if (mySession != 0xFFFFFFFF && mySession == activeSession)
+        {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &userToken);
+        }
+        if (!userToken && !queryUserTokenForSession(activeSession, userToken))
         {
             Logger::error("PGS: winapp restart failed, no user token for any session, aumid=" + info.aumid);
             return false;
