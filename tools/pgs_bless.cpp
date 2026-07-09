@@ -610,6 +610,13 @@ void showUsage(const char *exe)
         << "  " << exe << " ppl set --pid <pid> --signer <None|Authenticode|CodeGen|Antimalware|Lsa|Windows|WinTcb|WinSystem>\n"
         << "  " << exe << " ppl get --pid <pid>\n"
         << "  " << exe << " ppl clear --pid <pid>\n"
+        << "  " << exe << " schedule add --cron <m h dom mon dow> --action <wire-command>\n"
+        << "  " << exe << " schedule add --once <YYYY-MM-DDTHH:MM:SS> --action <wire-command>\n"
+        << "  " << exe << " schedule add --interval <seconds> [--count N] --action <wire-command>\n"
+        << "  " << exe << " schedule list\n"
+        << "  " << exe << " schedule remove --id <id>\n"
+        << "  " << exe << " schedule enable --id <id>\n"
+        << "  " << exe << " schedule disable --id <id>\n"
         << "\nCommon options:\n"
         << "  --host <ip>          default 127.0.0.1\n"
         << "  --port <port>        default 12345\n"
@@ -719,6 +726,19 @@ int main()
     bool hasRequest = false;
     std::string signerText;
     bool hasSigner = false;
+    // schedule subcommand
+    std::string schedCron;
+    bool hasSchedCron = false;
+    std::string schedOnce;
+    bool hasSchedOnce = false;
+    std::string schedInterval;
+    bool hasSchedInterval = false;
+    std::string schedAction;
+    bool hasSchedAction = false;
+    std::string schedCount;
+    bool hasSchedCount = false;
+    std::string schedId;
+    bool hasSchedId = false;
     // v3 advanced guard policy (all default to legacy behaviour).
     int restartWindowSec = 0;
     int restartDelayMs = 0;
@@ -739,7 +759,7 @@ int main()
         command = argsUtf8[1];
         argIndex = 2;
         // Peel off the subcommand token for module/ppl so argIndex skips it.
-        if (command == "module" || command == "ppl")
+        if (command == "module" || command == "ppl" || command == "schedule")
         {
             subCommand = (argsUtf8.size() > 2) ? argsUtf8[2] : std::string();
             argIndex = 3;
@@ -874,6 +894,43 @@ int main()
         {
             signerText = needValue("--signer");
             hasSigner = true;
+            continue;
+        }
+        // schedule flags
+        if (arg == "--cron")
+        {
+            schedCron = needValue("--cron");
+            hasSchedCron = true;
+            continue;
+        }
+        if (arg == "--once")
+        {
+            schedOnce = needValue("--once");
+            hasSchedOnce = true;
+            continue;
+        }
+        if (arg == "--interval")
+        {
+            schedInterval = needValue("--interval");
+            hasSchedInterval = true;
+            continue;
+        }
+        if (arg == "--action")
+        {
+            schedAction = needValue("--action");
+            hasSchedAction = true;
+            continue;
+        }
+        if (arg == "--count")
+        {
+            schedCount = needValue("--count");
+            hasSchedCount = true;
+            continue;
+        }
+        if (arg == "--id")
+        {
+            schedId = needValue("--id");
+            hasSchedId = true;
             continue;
         }
 
@@ -1281,6 +1338,61 @@ int main()
         }
         // module subcommands are dispatched above; skip the common send below
         // by falling through with wireCommand set.
+    }
+    // schedule <add|list|remove|enable|disable>. Routes to the "sched" module
+    // via "module call sched op=...". The schedule action is a PGS wire
+    // command restricted to guard-management verbs by the module allowlist.
+    else if (command == "schedule")
+    {
+        const std::string sub = subCommand;
+        std::string req;
+        if (sub == "add")
+        {
+            if (!hasSchedAction)
+            {
+                std::cerr << "schedule add requires --action\n";
+                WSACleanup();
+                return 1;
+            }
+            std::string type;
+            std::string expr;
+            if (hasSchedCron) { type = "cron"; expr = schedCron; }
+            else if (hasSchedOnce) { type = "once"; expr = schedOnce; }
+            else if (hasSchedInterval) { type = "interval"; expr = schedInterval; }
+            else
+            {
+                std::cerr << "schedule add requires one of --cron/--once/--interval\n";
+                WSACleanup();
+                return 1;
+            }
+            // Build the module-call request KV. The action is a free-form
+            // wire command; the module rejects any verb outside its
+            // allowlist, so passing it as a single KV value is safe.
+            req = "op=add;type=" + type + ";expr=" + expr + ";action=" + schedAction;
+            if (hasSchedCount) req += ";count=" + schedCount;
+            wireCommand = "module call sched " + req;
+        }
+        else if (sub == "list")
+        {
+            wireCommand = "module call sched op=list";
+        }
+        else if (sub == "remove")
+        {
+            if (!hasSchedId) { std::cerr << "schedule remove requires --id\n"; WSACleanup(); return 1; }
+            wireCommand = "module call sched op=remove;id=" + schedId;
+        }
+        else if (sub == "enable" || sub == "disable")
+        {
+            if (!hasSchedId) { std::cerr << "schedule " << sub << " requires --id\n"; WSACleanup(); return 1; }
+            wireCommand = "module call sched op=" + sub + ";id=" + schedId;
+        }
+        else
+        {
+            std::cerr << "Unknown schedule subcommand: " << sub << "\n";
+            WSACleanup();
+            return 1;
+        }
+        // schedule subcommands are dispatched above; fall through with wireCommand set.
     }
     // ppl <set|get|clear>. Convenience wrapper around the ppl module; PGS turns
     // these into "op=..." module calls internally.

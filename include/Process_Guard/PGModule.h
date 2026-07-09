@@ -43,7 +43,7 @@
 /* ABI version. Increment on incompatible changes to this header or the
  * expected behaviour of the functions below. Modules report the version they
  * were built against via PG_GetAbiVersion so PGS can reject mismatches. */
-#define PG_MODULE_ABI_VERSION 1
+#define PG_MODULE_ABI_VERSION 2
 
 /* Export macro. Modules define PG_MODULE_EXPORTS when compiling so the
  * functions are dllexport'd. PGS does NOT define it (it only resolves the
@@ -58,6 +58,40 @@
 #else
 #define PG_MODULE_API
 #endif
+
+/* ABI v2: services struct passed to PG_Init via the `reserved` argument.
+ *
+ * A module built against ABI v1 ignores `reserved` (it was NULL). A module
+ * built against ABI v2 casts `reserved` to PGS_Services* and may use the
+ * callbacks to call back into PGS - this is what enables stateful modules
+ * such as the scheduler (modules/sched/), which needs to trigger guard
+ * operations on its own background thread.
+ *
+ * Forward compatibility: PGS sets `size` to sizeof(PGS_Services) at build
+ * time. A module compiled against an older (smaller) layout must not read
+ * fields beyond the size it knows; a module compiled against a newer layout
+ * sees a possibly-smaller `size` and treats trailing fields as unavailable.
+ */
+struct PGS_Services
+{
+    /* Size of this struct in bytes. Set by PGS; modules consult this before
+     * touching any field added after their compile-time layout. */
+    unsigned int size;
+    /* Opaque PGS instance pointer, passed back as the first argument of every
+     * callback so the PGS-side thunk can route to the right core. */
+    void *context;
+    /* Execute one PGS line-protocol command (same semantics as a TCP client
+     * request minus the auth envelope, e.g. "bless 1234|-1" or "list").
+     * On success returns 0 and writes a NUL-terminated response ("OK ..." or
+     * "ERR ...") into `response`. On transport failure returns non-zero.
+     * Thread-safe; may be called from any thread, including a module's own
+     * background thread. Re-entrancy from within PG_Invoke is allowed but
+     * modules should avoid nesting module load/unload (write-locked). */
+    int (*call)(void *context, const char *request, char *response, size_t response_size);
+    /* Wall-clock epoch milliseconds (GetSystemTimeAsFileTime based). Provided
+     * so schedule arithmetic is consistent and mockable. */
+    long long (*now_ms)(void *context);
+};
 
 #ifdef __cplusplus
 extern "C" {
@@ -80,8 +114,10 @@ PG_MODULE_API unsigned int PG_GetAbiVersion(void);
  * Called once right after the DLL is loaded, before any PG_Invoke.
  * Return 0 on success. Any non-zero return causes PGS to call PG_Shutdown
  * (if present), FreeLibrary the module, and report a load failure.
- * `reserved` is currently NULL and reserved for future context (e.g. a
- * pointer to a PGS-provided services struct).
+ * `reserved` is NULL for ABI v1 modules. For ABI v2 modules PGS passes a
+ * pointer to a PGS_Services struct so the module can call back into PGS
+ * (e.g. the scheduler triggering bless/unbless). A v2 module MUST check
+ * `reserved != NULL` before dereferencing it.
  *
  * Avoid heavy/possibly-failing initialisation here (opening drivers, network,
  * etc.). Defer it to first PG_Invoke so a missing runtime prerequisite

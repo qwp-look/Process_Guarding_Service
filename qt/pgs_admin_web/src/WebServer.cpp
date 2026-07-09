@@ -17,6 +17,16 @@
 #include <QUrlQuery>
 #include <QRandomGenerator>
 #include <QCryptographicHash>
+#include <QSslServer>
+#include <QSslKey>
+#include <QSslCertificate>
+#include <QSslConfiguration>
+#include <QFile>
+#include <QTextStream>
+#include <QDateTime>
+#include <QHash>
+#include <QMessageAuthenticationCode>
+#include <cstring>
 #include "Process_Guard/PGSClient.h"
 
 namespace
@@ -146,6 +156,24 @@ setInterval(refreshGuards,2000);refreshAll();
 }
 } // namespace
 
+
+// Minimum RBAC role required for a route path.
+int WebServer::roleRequired(const QString &route)
+{
+    // admin-only: token rotation + service lifecycle
+    if (route == "/api/token" || route.startsWith("/api/service/install") ||
+        route.startsWith("/api/service/uninstall") ||
+        route.startsWith("/api/service/start") ||
+        route.startsWith("/api/service/stop"))
+        return static_cast<int>(Role::Admin);
+    // operator: guard mutations
+    if (route.startsWith("/api/bless") || route == "/api/policy" ||
+        route == "/api/unbless" || route == "/api/intentional")
+        return static_cast<int>(Role::Operator);
+    // everything else (health/ping/guards/guard/service/status/cluster) = viewer
+    return static_cast<int>(Role::Viewer);
+}
+
 WebServer::WebServer(Options options, QObject *parent)
     : QObject(parent), m_options(std::move(options)), m_server(new QHttpServer(this))
 {
@@ -249,6 +277,102 @@ QString WebServer::listenUrl() const
 {
     return QStringLiteral("http://%1:%2").arg(m_options.bindAddress).arg(m_options.httpPort);
 }
+
+// HMAC-SHA256 over the password using a per-user salt. Stored as hex so the
+// users file never holds plaintext passwords.
+QByteArray WebServer::saltHash(const QByteArray &salt, const QByteArray &password)
+{
+    return QMessageAuthenticationCode::hash(password, salt, QCryptographicHash::Sha256).toHex();
+}
+
+// Load the RBAC user store. File format, one user per line:
+//   user;role;saltHex;hashHex
+// role in {viewer, operator, admin}. Blank lines and # comments are skipped.
+bool WebServer::loadUsers()
+{
+    QFile f(m_options.usersFile);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        return false;
+    }
+    m_users.clear();
+    while (!f.atEnd())
+    {
+        const QByteArray line = f.readLine().trimmed();
+        if (line.isEmpty() || line.startsWith('#'))
+            continue;
+        const QList<QByteArray> parts = line.split(';');
+        if (parts.size() != 4)
+            continue;
+        const QString user = QString::fromUtf8(parts[0]);
+        const QString role = QString::fromUtf8(parts[1]).toLower();
+        if (role != "viewer" && role != "operator" && role != "admin")
+            continue;
+        UserRec rec;
+        rec.role = role;
+        rec.saltHash = QByteArray::fromHex(parts[2]) + ':' + parts[3];
+        m_users.insert(user, rec);
+    }
+    return !m_users.isEmpty();
+}
+
+// HTTP Basic auth: validate user+password and check the role meets the minimum.
+bool WebServer::authenticateAndAuthorize(const QHttpServerRequest &request, int requiredRole, QString &outUser)
+{
+    // Expect "Authorization: Basic <base64(user:pass)>".
+    const QByteArray auth = request.value("Authorization");
+    const QByteArray prefix = "Basic ";
+    if (!auth.startsWith(prefix))
+        return false;
+    const QByteArray decoded = QByteArray::fromBase64(auth.mid(prefix.size()));
+    const int colon = decoded.indexOf(':');
+    if (colon < 0)
+        return false;
+    const QString user = QString::fromUtf8(decoded.left(colon));
+    const QByteArray password = decoded.mid(colon + 1);
+    auto it = m_users.constFind(user);
+    if (it == m_users.constEnd())
+        return false;
+    const UserRec &rec = it.value();
+    const int colon2 = rec.saltHash.indexOf(':');
+    if (colon2 < 0)
+        return false;
+    const QByteArray salt = rec.saltHash.left(colon2);
+    const QByteArray storedHash = rec.saltHash.mid(colon2 + 1);
+    const QByteArray computed = saltHash(salt, password);
+    // Constant-time compare.
+    if (computed.size() != storedHash.size() || std::memcmp(computed.constData(), storedHash.constData(), computed.size()) != 0)
+        return false;
+    int roleVal = (rec.role == "admin") ? static_cast<int>(Role::Admin)
+                 : (rec.role == "operator") ? static_cast<int>(Role::Operator)
+                 : static_cast<int>(Role::Viewer);
+    outUser = user;
+    return roleVal >= requiredRole;
+}
+
+void WebServer::audit(const QString &user, const QString &action, const QString &sourceIp)
+{
+    if (m_options.auditLogPath.isEmpty())
+        return;
+    if (!m_auditFile)
+    {
+        m_auditFile = new QFile(m_options.auditLogPath, this);
+        // Best-effort open; if it fails we silently skip audit records.
+        m_auditFile->open(QIODevice::Append | QIODevice::Text);
+    }
+    if (m_auditFile && m_auditFile->isOpen())
+    {
+        QTextStream ts(m_auditFile);
+        ts << QDateTime::currentDateTime().toString(Qt::ISODate)
+           << " user=" << user
+           << " action=" << action
+           << " from=" << sourceIp
+           << "\n";
+        ts.flush();
+    }
+}
+
+// Convenience: extract the authenticated user from the request and write an
 
 QHttpServerResponse WebServer::handleHealth() const
 {

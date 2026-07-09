@@ -49,7 +49,7 @@ if errorlevel 1 ( echo ERROR: Qt web build failed & popd & exit /b 1 )
 
 echo [3/6] Assemble release tree...
 if exist "%RELEASE%" rmdir /s /q "%RELEASE%"
-mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
+mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_bless.exe"       "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_admin_qt\pgs_admin_qt.exe" "%RELEASE%\" >nul
@@ -66,6 +66,9 @@ copy /Y "%BUILD%\modules\ppl\Sirius.sys"         "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\module.html"        "%RELEASE%\modules\ppl\" >nul
 copy /Y "docs\MODULE_SYSTEM.md"       "%RELEASE%\docs\" >nul
 copy /Y "docs\TECHNICAL_ARCHITECTURE.md" "%RELEASE%\docs\" >nul
+copy /Y "docs\SCHEDULER_MODULE.md"     "%RELEASE%\docs\" >nul
+copy /Y "docs\REMOTE_GATEWAY.md"       "%RELEASE%\docs\" >nul
+copy /Y "docs\CLUSTER_DASHBOARD.md"    "%RELEASE%\docs\" >nul
 copy /Y "LICENSE"                     "%RELEASE%\" >nul
 copy /Y "LICENSE.ThirdParty.StarlightGUI.txt" "%RELEASE%\" >nul
 copy /Y "NOTICE"                      "%RELEASE%\" >nul
@@ -87,6 +90,7 @@ for %%D in (%QT_MINGW_DEPS%) do copy /Y "%MINGW%\%%D" "%RELEASE%\%%D" >nul 2>&1
 echo [6/6] Done. Release layout:
 echo   %RELEASE%\pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe / pgs_admin_web.exe
 echo   %RELEASE%\modules\ppl\{pgs_ppl_module.dll, Sirius.sys, module.html}
+echo   %RELEASE%\modules\sched\{pgs_sched_module.dll, module.html}
 echo   Qt6 + MinGW runtime DLLs (self-contained)
 
 popd

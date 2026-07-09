@@ -179,7 +179,10 @@ namespace ProcessGuard
         // Run the module's one-time init. A non-zero return aborts the load.
         if (e.init)
         {
-            const int rc = e.init(nullptr);
+            // ABI v2: hand the services struct to v2 modules. v1 modules
+            // ignore the argument. nullptr when PGS has not set services.
+            void *initArg = m_servicesReady ? static_cast<void *>(&m_services) : nullptr;
+            const int rc = e.init(initArg);
             if (rc != 0)
             {
                 if (e.shutdown)

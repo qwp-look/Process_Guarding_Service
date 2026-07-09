@@ -46,6 +46,18 @@ echo "[8/8] Building pgs_bless.exe..."
 g++ $CXXFLAGS -c src/common/PGSClient.cpp -o build/PGSClient.o
 g++ $CXXFLAGS tools/pgs_bless.cpp build/PGSClient.o -o build/pgs_bless.exe -lws2_32 -ladvapi32 -lbcrypt
 
+# Schedule module: cron/once/interval scheduler (ABI v2).
+echo "[9a/10] Building pgs_sched_module.dll..."
+mkdir -p build/modules/sched
+g++ -std=c++17 -Wall -Wextra -O2 -shared -o build/modules/sched/pgs_sched_module.dll modules/sched/SchedCron.cpp modules/sched/pgs_sched_module.cpp -Iinclude
+cp -f /mingw64/bin/libstdc++-6.dll build/modules/sched/ 2>/dev/null || true
+cp -f /mingw64/bin/libgcc_s_seh-1.dll build/modules/sched/ 2>/dev/null || true
+cp -f /mingw64/bin/libwinpthread-1.dll build/modules/sched/ 2>/dev/null || true
+cp -f modules/sched/module.html build/modules/sched/module.html
+# Default module allowlist: approve the bundled ppl + sched modules.
+mkdir -p build/modules
+printf "ppl\nsched\n" > build/modules/modules.allow
+
 # PPL module: built as a separate shared DLL. Per-folder layout
 # build/modules/<name>/<name>.dll + module.html + assets. The folder name MUST
 # match the module PG_GetName() return value so the Qt UI and
@@ -73,6 +85,7 @@ echo "- build/guard_example.exe"
 echo "- build/quick_start.exe"
 echo "- build/smoke_worker.exe"
 echo "- build/pgs_bless.exe"
+echo "- build/modules/sched/pgs_sched_module.dll"
 echo "- build/modules/ppl/pgs_ppl_module.dll"
 echo "- build/modules/ppl/Sirius.sys"
 echo "- build/modules/ppl/module.html"

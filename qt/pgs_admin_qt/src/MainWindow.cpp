@@ -28,6 +28,11 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QStatusBar>
+#include <QSettings>
+#include <QBrush>
+#include <QColor>
+#include <QFile>
+#include <QApplication>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
@@ -36,6 +41,7 @@ MainWindow::MainWindow(QWidget *parent)
       m_tableProcess(new QProcess(this))
 {
     setupUi();
+    loadSavedPrefs();
     attachProcessHandlers();
 }
 
@@ -219,6 +225,13 @@ void MainWindow::setupUi()
     m_languageCombo->addItem("中文");
     m_languageCombo->addItem("English");
     connectionLayout->addWidget(m_languageCombo, 3, 1);
+
+    m_labelTheme = new QLabel(connectionBox);
+    connectionLayout->addWidget(m_labelTheme, 4, 0);
+    m_themeCombo = new QComboBox(connectionBox);
+    m_themeCombo->addItem("Light");
+    m_themeCombo->addItem("Dark");
+    connectionLayout->addWidget(m_themeCombo, 4, 1);
 
     m_labelNewToken = new QLabel(connectionBox);
     connectionLayout->addWidget(m_labelNewToken, 4, 0);
@@ -409,6 +422,12 @@ void MainWindow::setupUi()
 
     connect(m_languageCombo, &QComboBox::currentIndexChanged, this, [this](int) {
         applyLanguage();
+    });
+
+    connect(m_themeCombo, &QComboBox::currentIndexChanged, this, [this](int idx) {
+        applyTheme(idx);
+        QSettings settings("OpenStarlight", "PGSAdminQt");
+        settings.setValue("theme", idx);
     });
 
     connect(m_btnPing, &QPushButton::clicked, this, [this]() {
@@ -676,6 +695,43 @@ QString MainWindow::trUi(const QString &en, const QString &zh) const
     return isChineseUi() ? zh : en;
 }
 
+void MainWindow::applyTheme(int index)
+{
+    // 0 = light, 1 = dark. Apply a bundled QSS via qApp so all widgets,
+    // including ModulePage sub-tabs, restyle consistently.
+    const QString res = (index == 1) ? QStringLiteral(":/dark.qss") : QStringLiteral(":/light.qss");
+    QFile f(res);
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        static_cast<QApplication *>(QCoreApplication::instance())->setStyleSheet(QString::fromUtf8(f.readAll()));
+    }
+    else
+    {
+        static_cast<QApplication *>(QCoreApplication::instance())->setStyleSheet(QString());
+    }
+}
+
+void MainWindow::loadSavedPrefs()
+{
+    QSettings settings("OpenStarlight", "PGSAdminQt");
+    const int theme = settings.value("theme", 0).toInt();
+    const int lang = settings.value("language", 0).toInt();
+    if (m_themeCombo)
+    {
+        m_themeCombo->blockSignals(true);
+        m_themeCombo->setCurrentIndex(theme == 1 ? 1 : 0);
+        m_themeCombo->blockSignals(false);
+        applyTheme(m_themeCombo->currentIndex());
+    }
+    if (m_languageCombo)
+    {
+        m_languageCombo->blockSignals(true);
+        m_languageCombo->setCurrentIndex(lang == 1 ? 1 : 0);
+        m_languageCombo->blockSignals(false);
+        applyLanguage();
+    }
+}
+
 void MainWindow::applyLanguage()
 {
     setWindowTitle(trUi("PGS Admin (Qt)", "PGS 管理端（Qt）"));
@@ -702,6 +758,7 @@ void MainWindow::applyLanguage()
     m_labelToolPath->setText(trUi("pgs_bless path", "pgs_bless 路径"));
     m_labelToken->setText(trUi("token", "当前 token"));
     m_labelLanguage->setText(trUi("language", "语言"));
+    m_labelTheme->setText(trUi("theme", "主题"));
     m_labelNewToken->setText(trUi("new token", "新 token"));
     m_jsonCheck->setText(trUi("json output", "JSON 输出"));
     m_labelPid->setText(trUi("pid", "进程 PID"));
@@ -747,6 +804,8 @@ void MainWindow::applyLanguage()
     m_guardTable->setHorizontalHeaderLabels(isChineseUi()
                                                 ? QStringList{"PID", "路径", "哈希", "已重启", "最大重启", "存活", "会话", "哈希校验"}
                                                 : QStringList{"PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified"});
+    QSettings settings("OpenStarlight", "PGSAdminQt");
+    settings.setValue("language", isChineseUi() ? 0 : 1);
 }
 
 void MainWindow::setupModuleTab(QWidget *page)
@@ -1009,18 +1068,41 @@ void MainWindow::populateGuardTableFromJson(const QString &jsonText)
     for (int i = 0; i < arr.size(); ++i)
     {
         const QJsonObject obj = arr.at(i).toObject();
-        auto setCell = [&](int col, const QString &value) {
+        auto setCell = [&](int col, const QString &value, const QColor &color = QColor()) {
             auto *item = new QTableWidgetItem(value);
+            if (color.isValid())
+                item->setForeground(QBrush(color));
             m_guardTable->setItem(i, col, item);
+            return item;
         };
         setCell(0, obj.value("pid").toString());
         setCell(1, obj.value("path").toString());
         setCell(2, obj.value("hash").toString());
-        setCell(3, obj.value("restart_count").toString());
-        setCell(4, obj.value("max_restarts").toString());
-        setCell(5, obj.value("alive").toString());
+        // Restart count: yellow when within 1 of the limit (and limit != no/unlimited).
+        const QString restartText = obj.value("restart_count").toString();
+        const QString maxText = obj.value("max_restarts").toString();
+        QColor restartColor;
+        {
+            bool rok = false, mok = false;
+            int rc = restartText.toInt(&rok);
+            int mc = maxText.toInt(&mok);
+            if (rok && mok && mc > 0 && rc >= mc - 1)
+                restartColor = QColor(0xc8, 0x8a, 0x00); // amber
+        }
+        setCell(3, restartText, restartColor);
+        setCell(4, maxText);
+        // Alive status: green=alive, red=dead.
+        const QString aliveText = obj.value("alive").toString();
+        QColor aliveColor = (aliveText == "1" || aliveText.compare("true", Qt::CaseInsensitive) == 0)
+                                ? QColor(0x16, 0x8c, 0x2e) : QColor(0xd4, 0x3a, 0x3a);
+        setCell(5, aliveText, aliveColor);
         setCell(6, obj.value("session").toString());
-        setCell(7, obj.value("hash_verified").toString());
+        // Hash verification: orange when failed (hash_verified != 1/true).
+        const QString hashText = obj.value("hash_verified").toString();
+        QColor hashColor;
+        if (hashText != "1" && hashText.compare("true", Qt::CaseInsensitive) != 0)
+            hashColor = QColor(0xd9, 0x6a, 0x10); // orange
+        setCell(7, hashText, hashColor);
     }
     if (!m_guardTableColumnsSized || !m_lastTableRefreshWasAuto)
     {

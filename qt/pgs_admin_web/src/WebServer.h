@@ -3,11 +3,15 @@
 
 #include <QObject>
 #include <QStringList>
+#include <QHash>
+#include <QByteArray>
 
 class QHttpServer;
 class QHttpServerRequest;
 class QHttpServerResponse;
 class QTcpServer;
+class QSslCertificate;
+class QSslKey;
 
 class WebServer : public QObject
 {
@@ -27,7 +31,21 @@ public:
         QString pgsToken;
         QString blessToolPath;
         QString serviceToolPath;
+        // Remote-gateway mode (Stage C). When `remote` is true the server
+        // accepts non-loopback binds, forces TLS, and authenticates every
+        // request against an RBAC user store instead of the local-only API
+        // token. Default posture stays local + token-only.
+        bool remote = false;
+        QString tlsCertPath;
+        QString tlsKeyPath;
+        bool tlsAutocert = false; // generate a self-signed cert on first run
+        QString usersFile;        // RBAC users file (user;role;salthash)
+        QString auditLogPath;     // append-only audit log for mutating ops
     };
+
+    // RBAC roles. viewer = read-only; operator = + guard ops; admin = all.
+    enum class Role { Viewer = 0, Operator = 1, Admin = 2 };
+    static int roleRequired(const QString &route);
 
     explicit WebServer(Options options, QObject *parent = nullptr);
     bool start();
@@ -45,6 +63,7 @@ private:
     };
 
     QHttpServerResponse handleHealth() const;
+    QHttpServerResponse handleClusterHealth();
     QHttpServerResponse handlePing();
     QHttpServerResponse handleGuards();
     QHttpServerResponse handleGuard(const QHttpServerRequest &request);
@@ -78,6 +97,20 @@ private:
     QString m_apiToken;
     QHttpServer *m_server = nullptr;
     QTcpServer *m_tcpServer = nullptr;
+    class QSslServer *m_sslServer = nullptr;
+    QSslCertificate *m_sslCert = nullptr;
+    QSslKey *m_sslKey = nullptr;
+    // RBAC: user -> (role, salt-hash). Loaded from usersFile.
+    struct UserRec { QString role; QByteArray saltHash; };
+    QHash<QString, UserRec> m_users;
+    // Audit log stream (opened lazily).
+    class QFile *m_auditFile = nullptr;
+    bool loadUsers();
+    void audit(const QString &user, const QString &action, const QString &sourceIp);
+    void auditUser(const QHttpServerRequest &request, const QString &action);
+    bool authenticateAndAuthorize(const QHttpServerRequest &request, int requiredRole, QString &outUser);
+    bool setupTls();
+    static QByteArray saltHash(const QByteArray &salt, const QByteArray &password);
 };
 
 #endif // WEB_SERVER_H

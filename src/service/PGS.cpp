@@ -199,6 +199,17 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     // v3: gate the allowlist. m_modulesPermissive was restored from the archive
     // above (MODULES_PERMISSIVE) or left false; push it to the registry so the
     // permissive escape hatch applies during this loadFromDirectory() scan.
+    // ABI v2: hand modules a services struct so stateful modules (scheduler)
+    // can call back into PGS. Built before loadFromDirectory() so every
+    // module's PG_Init receives it.
+    {
+        PGS_Services svc{};
+        svc.size = static_cast<unsigned int>(sizeof(PGS_Services));
+        svc.context = this;
+        svc.call = &PGS::callThunk;
+        svc.now_ms = &PGS::nowMsThunk;
+        m_modules.setServices(svc);
+    }
     m_modules.setPermissive(m_modulesPermissive);
     {
         // PPL module loading is opt-in: it pulls in the Sirius kernel driver
@@ -1678,6 +1689,41 @@ void PGS::cleanupGuards()
 // Resolve the "modules" directory beside the running pgs_service.exe. Used
 // as the plugin scan root. Falls back to a relative "modules" if the exe
 // path cannot be determined (should not happen in practice).
+// ABI v2 callbacks exposed to modules via PGS_Services.
+int PGS::callThunk(void *context, const char *request, char *response, size_t responseSize)
+{
+    PGS *self = static_cast<PGS *>(context);
+    if (!self || !response || responseSize == 0)
+    {
+        return 1;
+    }
+    // processMessage is the same entry point the TCP worker pool uses, so a
+    // module call-back sees identical semantics to a real client (auth envelope
+    // already stripped by the caller; PGS_Call sends raw wire commands).
+    std::string resp = self->processMessage(request ? request : "");
+    size_t n = resp.size();
+    if (n >= responseSize)
+    {
+        n = responseSize - 1;
+    }
+    memcpy(response, resp.c_str(), n);
+    response[n] = '\0';
+    // processMessage always returns an "OK ..."/"ERR ..." string; the rc here
+    // signals transport success, not command success (mirrors PGSClient).
+    return 0;
+}
+
+long long PGS::nowMsThunk(void * /*context*/)
+{
+    // Epoch milliseconds from GetSystemTimeAsFileTime (1601-based 100ns ticks).
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return static_cast<long long>((u.QuadPart - 116444736000000000ULL) / 10000ULL);
+}
+
 std::string PGS::moduleDirectoryOfSelf()
 {
     // Resolve the directory of the running executable (pgs_service.exe) and

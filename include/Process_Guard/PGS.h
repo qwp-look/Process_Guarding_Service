@@ -246,6 +246,11 @@ namespace ProcessGuard
         std::string handlePplCommand(const std::string &args);
         // Resolve <pgs_service.exe dir>\modules for the plugin scan.
         static std::string moduleDirectoryOfSelf();
+        // ABI v2 thunks: let modules call back into PGS via PGS_Services.
+        // callThunk routes a line-protocol command to processMessage;
+        // nowMsThunk returns epoch millis for schedule arithmetic.
+        static int callThunk(void *context, const char *request, char *response, size_t responseSize);
+        static long long nowMsThunk(void *context);
         bool isPathInsideModulesDir(const std::string &candidateUtf8) const;
         bool writeInitialTokenFile(const std::string &stateDir, const std::string &token) const;
         // v3: handleRegister also accepts the advanced guard-policy fields

@@ -11,22 +11,19 @@ set(CMAKE_AUTORCC ON)
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 
+set(PGS_ADMIN_QT_SOURCES
+    src/main.cpp
+    src/MainWindow.h
+    src/MainWindow.cpp
+    src/ModulePage.h
+    src/ModulePage.cpp
+    resources/pgs_theme.qrc
+)
+
 if (QT_VERSION_MAJOR EQUAL 6)
-    qt_add_executable(pgs_admin_qt
-        src/main.cpp
-        src/MainWindow.h
-        src/MainWindow.cpp
-        src/ModulePage.h
-        src/ModulePage.cpp
-    )
+    qt_add_executable(pgs_admin_qt ${PGS_ADMIN_QT_SOURCES})
 else()
-    add_executable(pgs_admin_qt
-        src/main.cpp
-        src/MainWindow.h
-        src/MainWindow.cpp
-        src/ModulePage.h
-        src/ModulePage.cpp
-    )
+    add_executable(pgs_admin_qt ${PGS_ADMIN_QT_SOURCES})
 endif()
 
 target_link_libraries(pgs_admin_qt PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
