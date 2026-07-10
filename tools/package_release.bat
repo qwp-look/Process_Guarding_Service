@@ -64,6 +64,9 @@ copy /Y "%MINGW%\libwinpthread-1.dll" "%RELEASE%\examples\" >nul
 copy /Y "%BUILD%\modules\ppl\pgs_ppl_module.dll" "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\Sirius.sys"         "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\module.html"        "%RELEASE%\modules\ppl\" >nul
+copy /Y "%BUILD%\modules\sched\pgs_sched_module.dll" "%RELEASE%\modules\sched\" >nul
+copy /Y "%BUILD%\modules\sched\module.html"          "%RELEASE%\modules\sched\" >nul
+copy /Y "%BUILD%\modules\modules.allow"        "%RELEASE%\modules\" >nul
 copy /Y "docs\MODULE_SYSTEM.md"       "%RELEASE%\docs\" >nul
 copy /Y "docs\TECHNICAL_ARCHITECTURE.md" "%RELEASE%\docs\" >nul
 copy /Y "docs\SCHEDULER_MODULE.md"     "%RELEASE%\docs\" >nul

@@ -38,11 +38,10 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 WizardStyle=modern
 UninstallDisplayIcon={app}\pgs_admin_qt.exe
-LicenseFile=LICENSE
+LicenseFile=..\LICENSE
 
 [Languages]
 Name: "en"; MessagesFile: "compiler:Default.isl"
-Name: "zh"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "installservice"; Description: "Install and start the PGS Windows service (LocalSystem)"; GroupDescription: "Service:"
@@ -57,7 +56,6 @@ Source: "..\release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 Name: "{group}\PGS Admin (Qt)"; Filename: "{app}\pgs_admin_qt.exe"
 Name: "{group}\PGS Web Console"; Filename: "{app}\pgs_admin_web.exe"
 Name: "{group}\Uninstall PGS"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\PGS Admin (Qt)"; Filename: "{app}\pgs_admin_qt.exe"; Tasks: ; Flags: unchecked
 
 [Run]
 ; --- Service install + start (optional task) ---
@@ -127,14 +125,3 @@ begin
   end;
 end;
 
-// ---- Validate release tree exists before compiling ----
-function InitializeSetup(): Boolean;
-begin
-  if not FileExists(ExpandConstant('{#SourcePath}..\release\pgs_service.exe')) then
-  begin
-    MsgBox('release\ tree not found. Run tools\package_release.bat first to build and assemble the release folder.', mbError, MB_OK);
-    Result := False;
-  end
-  else
-    Result := True;
-end;

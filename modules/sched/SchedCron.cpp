@@ -173,27 +173,18 @@ namespace pgs_sched
 
     long long nextRunMs(const CronExpr &e, long long afterMs)
     {
-        // Start one second after afterMs (>= afterMs, exclusive of the instant).
-        long long startSec = afterMs / 1000;
-            // First whole-minute boundary strictly after afterMs. If afterMs already
-            // sits on a minute boundary, the next fire is the following minute;
-            // otherwise round up to the next minute.
-            long long rem = afterMs % 60000LL;
-            if (rem == 0)
-                startSec += 60;
-            else
-                startSec += (60000LL - rem) / 1000LL;
-        std::tm t{};
-        std::time_t probe0 = static_cast<std::time_t>(startSec);
-#if defined(_WIN32)
-        if (localtime_s(&t, &probe0) != 0)
-            return -1;
-#else
-        if (!localtime_r(&probe0, &t))
-            return -1;
-#endif
-        t.tm_sec = 0;
-        std::time_t probe = std::mktime(&t);
+        // Cron is minute-granular. Round up to the start of the next whole
+        // minute that is strictly after afterMs. Dividing a millisecond
+        // timestamp into 60000-ms buckets discards the sub-minute remainder
+        // cleanly, then (+1) * 60000 lands on the following minute boundary.
+        // The previous approach divided the remainder by 1000 (truncating
+        // sub-second ms) and then set tm_sec = 0, which could push the probe
+        // BACKWARDS to the start of the current minute (a minute that may
+        // already have matched and fired), making the worker refire every
+        // poll cycle. probe is already on a minute boundary so the search loop
+        // (which advances by 60 epoch seconds) stays aligned.
+        long long probeMs = ((afterMs / 60000LL) + 1) * 60000LL;
+        std::time_t probe = static_cast<std::time_t>(probeMs / 1000);
         if (probe == static_cast<std::time_t>(-1))
             return -1;
 

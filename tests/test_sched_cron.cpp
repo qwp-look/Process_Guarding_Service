@@ -103,6 +103,20 @@ int g_failures = 0;
         long long expected = msFor(2026, 7, 9, 14, 30, 0);
         CHECK(sc::nextRunMs(e, from) == expected);
     }
+    void test_next_run_subminute_ms_offset()
+    {
+        sc::CronExpr e;
+        CHECK(sc::parseCron("* * * * *", e));
+        // afterMs sits mid-minute with a sub-second offset (14:30:30.500) —
+        // exactly what nowMs() feeds nextRunMs at runtime. The next fire must
+        // be the NEXT whole-minute boundary strictly later than afterMs, never
+        // the current minute start (which is in the past relative to afterMs).
+        long long from = msFor(2026, 7, 9, 14, 30, 30) + 500;
+        long long expected = msFor(2026, 7, 9, 14, 31, 0);
+        long long got = sc::nextRunMs(e, from);
+        CHECK(got == expected);
+        CHECK(got > from);
+    }
 
     void test_next_run_next_day()
     {
@@ -177,6 +191,7 @@ int main()
     test_next_run_basic();
     test_next_run_next_day();
     test_next_run_every_minute();
+    test_next_run_subminute_ms_offset();
     test_next_run_dow_specific();
     test_next_run_dom_and_dow_or();
     test_next_run_impossible_date();
