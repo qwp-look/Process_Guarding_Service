@@ -141,8 +141,10 @@
 当前恢复策略是：
 
 - 若归档里的 `lastKnownPid` 仍然存在且路径匹配，则重新接管
-- 若目标进程不存在，则按归档中的路径、参数、会话信息尝试拉起
+- 若目标进程不存在，则先检查该 guard 的重启预算；未超限才按归档中的路径、参数、会话信息尝试拉起
 - 若 guard 曾被标记为 `intentional` 且现在已经不在，则从归档移除
+- restore 阶段的重新拉起也计入 `restartCount` / `recentRestartMs`，不会因为服务自身重启而绕过 crash-loop 限额
+- restore 阶段达到上限或重新拉起失败时，会从归档删除该 guard，避免下一次服务启动再次复活
 
 这让“服务自己被恢复”与“它守护的进程也要跟着恢复”形成了一条完整链路。
 
@@ -190,6 +192,8 @@
 - 它不再伪装成 Qt 里的一个“查网页”页签
 - 它是独立 Web 后端 + 浏览器前端
 - HTTP 层与 `PGS` 核心职责分离
+- 本地模式只允许回环绑定，并用进程内 token + Host/Origin 校验防 DNS rebinding / CSRF
+- remote 模式 fail-closed：TLS + RBAC + audit log 必须就绪；变更类 API 还要求同源 CSRF 头
 
 ## 5. 构建、验证、烟测的区别
 
@@ -201,6 +205,7 @@
 - 生成 `pgs_service.exe`
 - 生成 `pgs_bless.exe`
 - 生成示例程序
+- 生成 sched / ppl 模块产物
 
 不覆盖：
 
@@ -213,6 +218,7 @@
 
 - 检查关键文件存在
 - 执行 `tools/build_pgs.sh`
+- 执行 `tools/run_unit_tests.sh`
 - 执行 `tools/smoke_test_pgs.sh`
 - 配置并编译 Qt 桌面端
 - 配置并编译浏览器控制端
@@ -220,9 +226,23 @@
 适合：
 
 - 本地改动后的日常回归
-- CI 里做基础构建验证
+- 本地做一轮接近 CI 的基础构建验证
 
-### 5.3 `tools/smoke_test_pgs.sh`
+### 5.3 拆分后的 unit / Qt Web 脚本
+
+可单独运行的验证入口：
+
+- `tools/test_core_units.sh`：只编译并运行 `tests/test_pgs_core.cpp`
+- `tools/test_sched_cron.sh`：只编译并运行 `tests/test_sched_cron.cpp`
+- `tools/run_unit_tests.sh`：顺序调用上面两个 unit 脚本，供本地和旧入口复用
+- `tools/build_qt_web.sh`：单独配置并构建 `pgs_admin_web` 与 `pgs_cluster_web`
+
+Windows `cmd.exe` 入口也保留了兼容脚本：`tools/test_core_units.bat`、
+`tools/test_sched_cron.bat` 和 `tools/test_pgs_core.bat`。GitHub Actions 会按
+C++ 主线构建、core unit、sched cron unit、smoke test、Qt Web 构建拆成独立步骤，
+方便定位失败阶段。
+
+### 5.4 `tools/smoke_test_pgs.sh`
 
 当前烟测覆盖：
 
@@ -240,7 +260,7 @@
 
 - 尽快发现“服务起不来/协议不通/关键命令失效”这类一眼致命的问题
 
-### 5.4 跳过烟测
+### 5.5 跳过烟测
 
 如果当前机器上已经有其它 PGS 占用默认端口，或者你只想做纯编译检查，可以：
 
@@ -267,8 +287,9 @@ PGS_SKIP_SMOKE=1 ./tools/verify_pgs.sh
 
 - 协议仍然是自定义文本协议，不是 protobuf/grpc
 - 已有磁盘归档恢复，但还不是带历史版本/事务语义的完整配置数据库
-- 还没有正式的单元测试框架接入
 - 还没有压力测试脚本
+- Web remote RBAC 用户文件仍是兼容格式的单次 HMAC-SHA256；在线登录已有限速/审计，但离线抗爆破可继续迁移到 PBKDF2/Argon2id/bcrypt
+- cluster 节点凭据不从 API 回显，但节点 registry 文件里仍是明文 `user:pass`；后续可用 DPAPI 加密
 - `bless --pid` 对任意外部进程仍无法自动百分百还原原始环境变量与工作目录
 
 ## 7.1 关于“服务自我守护”
@@ -289,8 +310,7 @@ PGS_SKIP_SMOKE=1 ./tools/verify_pgs.sh
 
 如果后面继续往上做，我建议优先级如下：
 
-1. 接入单元测试框架，优先覆盖协议解析、路径校验、命令行捕获逻辑
-2. 把当前 `pgs_admin_web` 从“复用 CLI 工具”继续演进到公共 `PGSClient` 层
-3. 若协议继续扩展，再考虑迁移到 `JSON schema` 或 `protobuf`
-4. 若需要远程管理，再考虑 TLS、认证审计、持久化策略
-5. 增加压力测试与长稳测试脚本，验证高频注册/注销和频繁异常退出场景
+1. 在管理员 VM 上跑完整 E2E：SCM install/start/stop、TLS remote gateway、cluster dashboard、PPL opt-in
+2. 增加压力测试与长稳测试脚本，验证高频注册/注销和频繁异常退出场景
+3. 为 remote users 文件迁移强 KDF（PBKDF2/Argon2id/bcrypt），为 cluster nodes 文件接 DPAPI
+4. 若协议继续扩展，再考虑迁移到 `JSON schema` 或 `protobuf`

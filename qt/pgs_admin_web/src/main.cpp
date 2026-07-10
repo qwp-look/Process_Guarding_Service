@@ -43,7 +43,7 @@ int main(int argc, char *argv[])
     QCommandLineOption tlsCertOption(QStringList{QStringLiteral("tls-cert")}, QStringLiteral("TLS certificate PEM (remote mode)"), QStringLiteral("path"));
     QCommandLineOption tlsKeyOption(QStringList{QStringLiteral("tls-key")}, QStringLiteral("TLS private key PEM (remote mode)"), QStringLiteral("path"));
     QCommandLineOption usersOption(QStringList{QStringLiteral("users-file")}, QStringLiteral("RBAC users file: user;role;saltHex;hashHex"), QStringLiteral("path"));
-    QCommandLineOption auditOption(QStringList{QStringLiteral("audit-log")}, QStringLiteral("Audit log path for mutating remote ops"), QStringLiteral("path"));
+    QCommandLineOption auditOption(QStringList{QStringLiteral("audit-log")}, QStringLiteral("Audit log path for remote API/auth events"), QStringLiteral("path"));
 
     parser.addOption(bindOption);
     parser.addOption(httpPortOption);
@@ -62,6 +62,7 @@ int main(int argc, char *argv[])
     WebServer::Options options;
     // Default posture is local-only administration. Exposing the web console to
     // wider networks should be a deliberate deployment decision, not the default.
+    options.remote = parser.isSet(remoteOption);
     options.bindAddress = parser.value(bindOption);
     if (options.remote && options.bindAddress == QStringLiteral("127.0.0.1"))
         options.bindAddress = QStringLiteral("0.0.0.0");
@@ -69,7 +70,6 @@ int main(int argc, char *argv[])
     options.pgsToken = parser.value(tokenOption);
     options.blessToolPath = parser.value(blessToolOption);
     options.serviceToolPath = parser.value(serviceToolOption);
-    options.remote = parser.isSet(remoteOption);
     options.tlsCertPath = parser.value(tlsCertOption);
     options.tlsKeyPath = parser.value(tlsKeyOption);
     options.tlsAutocert = false;

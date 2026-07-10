@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -45,6 +46,100 @@ constexpr int kLegacyStateFileVersion = 2;
 // the default service account must stay LocalSystem for full-cascade to work.
 constexpr const char *kJobNamePrefix = "Global\\PGS-Job-";
 constexpr const char *kModulesAllowlistFile = "modules.allow";
+
+bool isSha256Hex(const std::string &value)
+{
+    if (value.size() != 64)
+    {
+        return false;
+    }
+    for (unsigned char ch : value)
+    {
+        if (!std::isxdigit(ch))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool applyRestrictedDacl(const std::wstring &path, bool containerInherit)
+{
+    if (path.empty())
+    {
+        return false;
+    }
+    PSECURITY_DESCRIPTOR psd = nullptr;
+    ULONG sdSize = 0;
+    const wchar_t *sddl = containerInherit
+        ? L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        : L"D:P(A;;FA;;;SY)(A;;FA;;;BA)";
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &psd, &sdSize) || !psd)
+    {
+        return false;
+    }
+    BOOL daclPresent = FALSE;
+    BOOL daclDefaulted = FALSE;
+    PACL dacl = nullptr;
+    GetSecurityDescriptorDacl(psd, &daclPresent, &dacl, &daclDefaulted);
+    const DWORD rc = SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+                                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                           nullptr, nullptr, dacl, nullptr);
+    LocalFree(psd);
+    return rc == ERROR_SUCCESS;
+}
+
+bool secureModulesTree(const std::string &modulesDir)
+{
+    if (modulesDir.empty() || !ProcessGuard::util::secureCreateDirectory(modulesDir))
+    {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(
+        modulesDir,
+        std::filesystem::directory_options::none,
+        ec);
+    if (ec)
+    {
+        return false;
+    }
+    const std::filesystem::recursive_directory_iterator end;
+    for (; it != end;)
+    {
+        const std::filesystem::path path = it->path();
+        std::error_code typeEc;
+        if (it->is_directory(typeEc))
+        {
+            if (!ProcessGuard::util::secureCreateDirectory(path.string()))
+            {
+                return false;
+            }
+        }
+        else if (it->is_regular_file(typeEc))
+        {
+            if (!applyRestrictedDacl(ProcessGuard::util::utf8ToWide(path.string()), false))
+            {
+                return false;
+            }
+        }
+        else if (typeEc)
+        {
+            return false;
+        }
+        else
+        {
+            return false;
+        }
+        it.increment(ec);
+        if (ec)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
 // Enable a named privilege on the current process token (best-effort: ok if the
 // privilege is absent, only fail if it cannot be enabled when present). Returns
@@ -157,10 +252,19 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     }
 
     m_requireAuth = true;
-    if (!authTokenHash.empty())
+    const std::string explicitAuthHash = toLowerAscii(trim(authTokenHash));
+    if (!explicitAuthHash.empty())
     {
-        // Host supplied an explicit (already-hashed) token hash. Trust it as-is.
-        m_authTokenHash = toLowerAscii(trim(authTokenHash));
+        // Host supplied an explicit (already-hashed) token hash. Accept only
+        // SHA-256 hex so an embedding cannot accidentally disable auth with
+        // whitespace or a malformed persisted value.
+        if (!isSha256Hex(explicitAuthHash))
+        {
+            Logger::error("PGS: invalid auth token hash supplied by host");
+            WSACleanup();
+            return false;
+        }
+        m_authTokenHash = explicitAuthHash;
         Logger::warning("PGS: auth enabled (token hash provided by host)");
     }
     else
@@ -192,10 +296,16 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         }
     }
 
-    // Load plugin modules from <exe>\modules before marking the service
-    // initialised. A missing/empty directory is fine (loaded=0); failures of
-    // individual DLLs are logged inside ModuleManager and do not abort init.
+    // Prepare <exe>\modules before marking the service initialised. PPL is
+    // opt-in; when it is enabled we recursively harden the tree and refuse
+    // module loading if any existing child file/dir cannot be secured.
     m_modulesDir = moduleDirectoryOfSelf();
+    const bool modulesDirSecured = !m_modulesDir.empty() &&
+        (m_pplEnabled ? secureModulesTree(m_modulesDir) : util::secureCreateDirectory(m_modulesDir));
+    if (!modulesDirSecured)
+    {
+        Logger::warning("PGS: modules directory ACL hardening failed or directory unavailable: " + m_modulesDir);
+    }
     // v3: gate the allowlist. m_modulesPermissive was restored from the archive
     // above (MODULES_PERMISSIVE) or left false; push it to the registry so the
     // permissive escape hatch applies during this loadFromDirectory() scan.
@@ -215,7 +325,7 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         // PPL module loading is opt-in: it pulls in the Sirius kernel driver
         // (an ARK-class driver exposing far more than PPL). Only load modules
         // when the operator explicitly enables PPL via PGS_ENABLE_PPL=1.
-        if (m_pplEnabled)
+        if (m_pplEnabled && modulesDirSecured)
         {
             const int loaded = m_modules.loadFromDirectory(m_modulesDir);
             if (loaded > 0)
@@ -226,6 +336,10 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
             {
                 Logger::warning("PGS: no modules loaded from " + m_modulesDir);
             }
+        }
+        else if (m_pplEnabled)
+        {
+            Logger::error("PGS: module loading refused because modules directory is not secured");
         }
         else
         {
@@ -357,6 +471,7 @@ bool PGS::loadPersistedState()
     // full success. A malformed line mid-file must not leave a half-populated
     // archive (and a stale m_nextGuardId) behind for restorePersistedGuards().
     std::unordered_map<std::uint64_t, PersistedGuardState> parsedGuards;
+    std::unordered_map<std::uint64_t, RestartPolicyState> parsedPolicy;
 
     if (m_stateFilePath.empty())
     {
@@ -448,6 +563,36 @@ bool PGS::loadPersistedState()
                 {
                     archivedModulesPermissive = b;
                 }
+            }
+            continue;
+        }
+
+        if (fields[0] == "RESTART_COUNT")
+        {
+            std::uint64_t guardId = 0;
+            std::uint64_t count = 0;
+            if (fields.size() >= 3 &&
+                parseUnsignedLongLong(fields[1], guardId) &&
+                parseUnsignedLongLong(fields[2], count) &&
+                guardId != 0)
+            {
+                auto &policy = parsedPolicy[guardId];
+                policy.restartCount = static_cast<int>(std::min<std::uint64_t>(
+                    count, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
+            }
+            continue;
+        }
+
+        if (fields[0] == "RESTART")
+        {
+            std::uint64_t guardId = 0;
+            std::uint64_t epochMs = 0;
+            if (fields.size() >= 3 &&
+                parseUnsignedLongLong(fields[1], guardId) &&
+                parseUnsignedLongLong(fields[2], epochMs) &&
+                guardId != 0)
+            {
+                parsedPolicy[guardId].recentRestartMs.push_back(static_cast<std::int64_t>(epochMs));
             }
             continue;
         }
@@ -559,6 +704,36 @@ bool PGS::loadPersistedState()
             return false;
         }
     }
+    if (!persistedAuthHash.empty() && !isSha256Hex(persistedAuthHash))
+    {
+        Logger::warning("PGS: persisted auth hash is invalid, generating a fresh token");
+        persistedAuthHash.clear();
+    }
+
+    const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    m_policyByGuardId.clear();
+    for (const auto &entry : parsedGuards)
+    {
+        RestartPolicyState policy = RestartPolicyState{entry.second.maxRestarts, 0, {}};
+        auto pit = parsedPolicy.find(entry.first);
+        if (pit != parsedPolicy.end())
+        {
+            policy = pit->second;
+            policy.maxRestarts = entry.second.maxRestarts;
+        }
+        if (entry.second.restartWindowSec > 0)
+        {
+            policy.recentRestartMs = util::pruneRestartWindow(
+                policy.recentRestartMs, nowMs, entry.second.restartWindowSec);
+            policy.restartCount = static_cast<int>(policy.recentRestartMs.size());
+        }
+        else
+        {
+            policy.recentRestartMs.clear();
+        }
+        m_policyByGuardId[entry.first] = std::move(policy);
+    }
 
     m_persistedGuards = std::move(parsedGuards);
     m_nextGuardId = std::max<std::uint64_t>(1ull, nextGuardId);
@@ -572,11 +747,14 @@ bool PGS::loadPersistedState()
     // v3: restore the archived listen port only when the host has not
     // explicitly overridden it (here: m_serverPort still at the default). The
     // module-permissive flag gates the ModuleManager allowlist (see E).
-    if (m_serverPort == kServerPort && archivedServerPort != 0)
+    if (!m_serverPortUserSet && m_serverPort == kServerPort && archivedServerPort != 0)
     {
         m_serverPort = archivedServerPort;
     }
-    m_modulesPermissive = archivedModulesPermissive;
+    if (!m_modulesPermissiveUserSet)
+    {
+        m_modulesPermissive = archivedModulesPermissive;
+    }
 
     Logger::warning("PGS: loaded persisted archive entries=" + std::to_string(m_persistedGuards.size()) +
                     ", state-file=" + m_stateFilePath);
@@ -597,6 +775,7 @@ void PGS::persistState()
 
     std::uint64_t nextGuardId = 1;
     std::vector<PersistedGuardState> snapshot;
+    std::unordered_map<std::uint64_t, RestartPolicyState> policySnapshot;
     {
         std::lock_guard<std::mutex> guardsLock(m_guardsMutex);
         nextGuardId = m_nextGuardId.load();
@@ -605,6 +784,7 @@ void PGS::persistState()
         {
             snapshot.push_back(entry.second);
         }
+        policySnapshot = m_policyByGuardId;
     }
 
     std::sort(snapshot.begin(), snapshot.end(), [](const PersistedGuardState &a, const PersistedGuardState &b) {
@@ -655,6 +835,25 @@ void PGS::persistState()
             << (guard.backoff ? "1" : "0") << "\t"
             << guard.hangTimeoutMs << "\t"
             << (guard.killOnExit ? "1" : "0") << "\n";
+        const auto pit = policySnapshot.find(guard.guardId);
+        if (pit != policySnapshot.end())
+        {
+            if (pit->second.restartCount > 0)
+            {
+                out << "RESTART_COUNT\t" << guard.guardId << "\t" << pit->second.restartCount << "\n";
+            }
+            if (guard.restartWindowSec > 0)
+            {
+                const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                const auto recent = util::pruneRestartWindow(
+                    pit->second.recentRestartMs, nowMs, guard.restartWindowSec);
+                for (const std::int64_t t : recent)
+                {
+                    out << "RESTART\t" << guard.guardId << "\t" << t << "\n";
+                }
+            }
+        }
     }
     out.flush();
     out.close();
@@ -755,7 +954,8 @@ bool PGS::restorePersistedGuards()
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             m_guards[restored.pid] = restored;
-            m_policyByGuardId[restored.guardId] = RestartPolicyState{persisted.maxRestarts, 0, {}};
+            auto &policy = m_policyByGuardId[restored.guardId];
+            policy.maxRestarts = persisted.maxRestarts;
             auto it = m_persistedGuards.find(restored.guardId);
             if (it != m_persistedGuards.end())
             {
@@ -805,14 +1005,73 @@ bool PGS::restorePersistedGuards()
             persisted.killOnExit,
             nullptr};
 
+        bool shouldRestart = true;
+        int restartIndex = 1;
+        const bool windowed = (persisted.restartWindowSec > 0);
+        const bool restartAlreadyRecorded = (persisted.lastKnownPid == 0 && persisted.restartDelayMs > 0);
+        int currentRestarts = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_guardsMutex);
+            auto &policy = m_policyByGuardId[persisted.guardId];
+            policy.maxRestarts = persisted.maxRestarts;
+            if (windowed)
+            {
+                const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                policy.recentRestartMs = util::pruneRestartWindow(policy.recentRestartMs, nowMs, persisted.restartWindowSec);
+                policy.restartCount = static_cast<int>(policy.recentRestartMs.size());
+                currentRestarts = policy.restartCount;
+            }
+            else
+            {
+                currentRestarts = policy.restartCount;
+            }
+
+            if (restartAlreadyRecorded)
+            {
+                // A delayed/backoff restart records budget before it enters the
+                // pending queue and persists lastKnownPid=0. If PGS is stopped
+                // during that delay, restore must complete the already-counted
+                // relaunch instead of charging the budget a second time.
+                shouldRestart = !(policy.maxRestarts >= 0 && currentRestarts > policy.maxRestarts);
+                if (shouldRestart)
+                {
+                    restartIndex = currentRestarts > 0 ? currentRestarts
+                                                       : recordRestartAndEffectiveCount(persisted.guardId, policy, persisted.restartWindowSec);
+                }
+            }
+            else
+            {
+                shouldRestart = !(policy.maxRestarts >= 0 && currentRestarts >= policy.maxRestarts);
+                if (shouldRestart)
+                {
+                    restartIndex = recordRestartAndEffectiveCount(persisted.guardId, policy, persisted.restartWindowSec);
+                }
+            }
+        }
+
+        if (!shouldRestart)
+        {
+            std::lock_guard<std::mutex> lock(m_guardsMutex);
+            m_policyByGuardId.erase(persisted.guardId);
+            m_persistedGuards.erase(persisted.guardId);
+            Logger::warning("PGS: persisted guard restart limit reached during restore, guard-id=" +
+                            std::to_string(persisted.guardId) +
+                            ", max=" + maxRestartsLabel(persisted.maxRestarts) +
+                            (windowed ? " (sliding window)" : ""));
+            changed = true;
+            continue;
+        }
+
         GuardInfo restarted;
-        if (restartGuard(desired, 0, restarted))
+        if (restartGuard(desired, restartIndex, restarted))
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             m_guards[restarted.pid] = restarted;
             // v3: assign the freshly restarted process to its per-guard Job.
             assignGuardToJob(m_guards[restarted.pid]);
-            m_policyByGuardId[restarted.guardId] = RestartPolicyState{persisted.maxRestarts, 0, {}};
+            auto &policy = m_policyByGuardId[restarted.guardId];
+            policy.maxRestarts = persisted.maxRestarts;
             auto &stored = m_persistedGuards[restarted.guardId];
             stored.guardId = restarted.guardId;
             stored.lastKnownPid = restarted.pid;
@@ -838,14 +1097,11 @@ bool PGS::restorePersistedGuards()
 
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
-            auto it = m_persistedGuards.find(persisted.guardId);
-            if (it != m_persistedGuards.end())
-            {
-                it->second.lastKnownPid = 0;
-            }
+            m_policyByGuardId.erase(persisted.guardId);
+            m_persistedGuards.erase(persisted.guardId);
         }
         Logger::error("PGS: failed to restore persisted guard guard-id=" + std::to_string(persisted.guardId) +
-                      ", path=" + persisted.path);
+                      ", guard removed path=" + persisted.path);
         allRestored = false;
         changed = true;
     }
@@ -1028,13 +1284,10 @@ void PGS::monitorLoop()
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
                     m_policyByGuardId.erase(pit->guard.guardId);
-                    auto persisted = m_persistedGuards.find(pit->guard.guardId);
-                    if (persisted != m_persistedGuards.end())
-                    {
-                        persisted->second.lastKnownPid = 0;
-                    }
+                    m_persistedGuards.erase(pit->guard.guardId);
                 }
                 persistState();
+                closeGuardJob(pit->guard.guardId);
                 Logger::error("PGS: restart failed permanently, guard removed path=" + pit->guard.path);
             }
             if (pit->guard.handle)
@@ -1148,11 +1401,7 @@ void PGS::monitorLoop()
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
                     m_policyByGuardId.erase(guard.guardId);
-                    auto persisted = m_persistedGuards.find(guard.guardId);
-                    if (persisted != m_persistedGuards.end())
-                    {
-                        persisted->second.lastKnownPid = 0;
-                    }
+                    m_persistedGuards.erase(guard.guardId);
                 }
                 closeGuardJob(guard.guardId);
                 persistState();
@@ -1181,6 +1430,7 @@ void PGS::monitorLoop()
                         std::chrono::system_clock::now().time_since_epoch()).count();
                     policy.recentRestartMs.push_back(nowMs);
                     policy.recentRestartMs = util::pruneRestartWindow(policy.recentRestartMs, nowMs, windowSec);
+                    policy.restartCount = static_cast<int>(policy.recentRestartMs.size());
                 }
                 else
                 {
@@ -1200,8 +1450,21 @@ void PGS::monitorLoop()
             if (delayMs > 0)
             {
                 // Defer the relaunch so backoff/delay cannot stall monitoring of
-                // other guards. The dead pid handle is kept in the pending copy
-                // and closed when the deferred relaunch fires.
+                // other guards. Mark the archive as "pending and already
+                // counted" before persisting so an SCM/service restart during
+                // the delay resumes the same attempt without double-counting it.
+                {
+                    std::lock_guard<std::mutex> lock(m_guardsMutex);
+                    auto it = m_persistedGuards.find(guard.guardId);
+                    if (it != m_persistedGuards.end())
+                    {
+                        it->second.lastKnownPid = 0;
+                        it->second.intentional = false;
+                    }
+                }
+                persistState();
+                // The dead pid handle is kept in the pending copy and closed
+                // when the deferred relaunch fires.
                 const auto readyAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
                 pending.push_back({guard, restartIndex, readyAt});
                 continue;
@@ -1245,13 +1508,10 @@ void PGS::monitorLoop()
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
                     m_policyByGuardId.erase(guard.guardId);
-                    auto persisted = m_persistedGuards.find(guard.guardId);
-                    if (persisted != m_persistedGuards.end())
-                    {
-                        persisted->second.lastKnownPid = 0;
-                    }
+                    m_persistedGuards.erase(guard.guardId);
                 }
                 persistState();
+                closeGuardJob(guard.guardId);
                 Logger::error("PGS: restart failed permanently, guard removed pid=" + std::to_string(guard.pid));
             }
             if (guard.handle)
@@ -1616,8 +1876,14 @@ bool PGS::createListenSocket()
         return false;
     }
 
-    constexpr BOOL reuse = TRUE;
-    setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&reuse), sizeof(reuse));
+    constexpr BOOL exclusive = TRUE;
+    if (setsockopt(m_listenSocket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                   reinterpret_cast<const char *>(&exclusive), sizeof(exclusive)) == SOCKET_ERROR)
+    {
+        Logger::error("PGS: SO_EXCLUSIVEADDRUSE failed, error=" + std::to_string(WSAGetLastError()));
+        closeListenSocket();
+        return false;
+    }
 
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
@@ -2204,7 +2470,8 @@ int PGS::recordRestartAndEffectiveCount(std::uint64_t /*guardId*/, RestartPolicy
     {
         policy.recentRestartMs = util::pruneRestartWindow(policy.recentRestartMs, nowMs, windowSec);
         policy.recentRestartMs.push_back(nowMs);
-        return static_cast<int>(policy.recentRestartMs.size());
+        policy.restartCount = static_cast<int>(policy.recentRestartMs.size());
+        return policy.restartCount;
     }
     ++policy.restartCount;
     return policy.restartCount;

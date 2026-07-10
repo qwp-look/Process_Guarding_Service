@@ -22,7 +22,7 @@
 
 - `C:\msys64\mingw64\bin\g++.exe`
 - `C:\msys64\mingw64\bin\cmake.exe`
-- Qt6（`/mingw64` 下的 Qt CMake 包）
+- Qt 6.8+（`/mingw64` 下的 Qt CMake 包；MSYS2 当前 Qt 6.11 可用）
 
 附带脚本：
 
@@ -38,7 +38,7 @@
 在 `MSYS2 MinGW64` 终端执行：
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect
+cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
 mkdir -p build
 
 # 可选：固定 PATH，避免串库
@@ -84,7 +84,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/
 在 `MSYS2 MinGW64` 终端执行：
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect
+cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
 rm -rf build/pgs_admin_qt
 
 cmake -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
@@ -104,7 +104,7 @@ Qt 产物：
 
 - `build/pgs_admin_qt/pgs_admin_qt.exe`
 
-> **release 打包注意（干净机器可运行）**：`windeployqt6` 只部署 Qt 自带 DLL，但 `Qt6Core/Qt6Gui` 还传递依赖一批 MSYS2 MinGW 第三方运行库（ICU `libicu*78.dll`、`libharfbuzz-0.dll`、`libfreetype-6.dll`、`libpcre2-16-0.dll`、`libzstd.dll`、`zlib1.dll`、`libglib-2.0-0.dll` 等共约 23 个）。开发机上因 `mingw64/bin` 在 `PATH` 里能跑，但**干净机器上缺这些 DLL 会让 `pgs_admin_qt.exe` 报 `0xC0000135`（STATUS_DLL_NOT_FOUND）**。一键完整打包（构建 + windeployqt6 + 补齐这些 DLL + per-folder 模块）用：
+> **release 打包注意（干净机器可运行）**：`windeployqt6` 只部署 Qt 自带 DLL，但 `Qt6Core/Qt6Gui/Qt6Network` 还传递依赖一批 MSYS2 MinGW 第三方运行库（ICU `libicu*78.dll`、`libharfbuzz-0.dll`、`libfreetype-6.dll`、`libpcre2-16-0.dll`、`libzstd.dll`、`zlib1.dll`、`libssl-3-x64.dll`、`libcrypto-3-x64.dll` 等）。开发机上因 `mingw64/bin` 在 `PATH` 里能跑，但**干净机器上缺这些 DLL 会让 Qt 可执行报 `0xC0000135`（STATUS_DLL_NOT_FOUND）**。一键完整打包（构建 + windeployqt6 + OpenSSL TLS plugin + 补齐这些 DLL + per-folder 模块 + `pgs_admin_web.exe` / `pgs_cluster_web.exe`）用：
 >
 > ```bat
 > tools\package_release.bat
@@ -115,7 +115,7 @@ Qt 产物：
 在 `MSYS2 MinGW64` 终端执行：
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect
+cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
 rm -rf build/pgs_admin_web
 
 cmake -S qt/pgs_admin_web -B build/pgs_admin_web -G "MinGW Makefiles" \
@@ -141,6 +141,61 @@ cmake --build build/pgs_admin_web -j4
 http://127.0.0.1:18080
 ```
 
+远程 Web 管理必须显式开启 `--remote`，并配置 TLS、RBAC users 文件和 audit log：
+
+```bat
+./build/pgs_admin_web/pgs_admin_web.exe ^
+  --remote ^
+  --bind 0.0.0.0 ^
+  --http-port 18443 ^
+  --pgs-token your-secret-token ^
+  --tls-cert cert.pem ^
+  --tls-key key.pem ^
+  --users-file users.txt ^
+  --audit-log pgs_admin_audit.log
+```
+
+remote 模式下首页和 API 都走 Basic RBAC；变更类 API 还要求同源 CSRF 头。详见
+[`docs/REMOTE_GATEWAY.md`](docs/REMOTE_GATEWAY.md)。
+
+## 3.2 MSYS2 MinGW64 手动编译（集群面板）
+
+```bash
+cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
+rm -rf build/pgs_cluster_web
+
+cmake -S qt/pgs_cluster_web -B build/pgs_cluster_web -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH=/mingw64 \
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+
+cmake --build build/pgs_cluster_web -j4
+```
+
+本地运行：
+
+```bash
+./build/pgs_cluster_web/pgs_cluster_web.exe --listen-port 19090 --nodes-file pgs_cluster_nodes.txt
+```
+
+本地模式会生成本次运行 API token 并嵌入回环页面；`/api/cluster/*` 仍需 token，避免浏览器跨站写入节点注册表。
+
+非回环监听必须同时提供 HTTPS 证书和 dashboard API token：
+
+```bat
+./build/pgs_cluster_web/pgs_cluster_web.exe ^
+  --listen-address 0.0.0.0 ^
+  --listen-port 19090 ^
+  --nodes-file pgs_cluster_nodes.txt ^
+  --api-token dashboard-token ^
+  --tls-cert cert.pem ^
+  --tls-key key.pem
+```
+
+节点 URL 必须是 `https://host[:port]`，不允许 `user:pass@host`。详见
+[`docs/CLUSTER_DASHBOARD.md`](docs/CLUSTER_DASHBOARD.md)。
+节点 TLS 默认严格校验证书；私有 CA 用 `--node-ca-cert <ca.pem>`，隔离实验环境才用
+`--node-insecure-tls`。
+
 ## 4. 运行时 DLL（重要）
 
 为避免 `nanosleep64/clock_gettime64` 等入口点错误，运行时请优先使用 `/mingw64/bin` 同版本 DLL。
@@ -165,7 +220,9 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 - 服务使用说明：`docs/SERVICE_MODE_GUIDE.md`
 - 技术架构说明：`docs/TECHNICAL_ARCHITECTURE.md`
 - 鲁棒性与测试说明：`docs/ROBUSTNESS_AND_TESTING.md`
-- 网页控制端规划：`docs/WEB_CONTROL_CONSOLE_PLAN.md`
+- 远程 Web 网关：`docs/REMOTE_GATEWAY.md`
+- 集群监控面板：`docs/CLUSTER_DASHBOARD.md`
+- 模块系统与 PPL：`docs/MODULE_SYSTEM.md`
 
 ## 5.1 Token 鉴权使用（重点）
 
@@ -318,12 +375,13 @@ Qt 管理端：
 ### 7.2 浏览器控制端
 
 - `pgs_admin_web` 是独立 Web 管理进程，不把 HTTP 逻辑塞进 `PGS` 核心。
-- 浏览器访问它提供的本地页面，再由它去调用现有 `pgs_bless.exe` / `pgs_service.exe`。
+- 浏览器访问它提供的页面；后端直连 `PGSClient` 处理高频 PGS 查询，必要时仍复用
+  `pgs_bless.exe` / `pgs_service.exe`。
 - 当前版本提供：守护列表、Ping、Bless、Bless-Start、Policy、Unbless、Intentional、Token 更新、服务安装/启动/停止/卸载/状态查询。
 - 它默认面向本机运维，建议只绑定 `127.0.0.1`。
 - Web 后端已直连 `PGSClient`，把最频繁的 `ping/list/get` 轮询从 `QProcess` 中拿掉，减少进程创建和 stdout JSON 解析开销。
-- 当前第一阶段后端优先复用成熟的 CLI 工具链；后续再抽公共 `PGSClient`，避免在多个入口重复维护协议细节。
-- 详细规划与后续方向见 `docs/WEB_CONTROL_CONSOLE_PLAN.md`。
+- remote 模式强制 TLS + RBAC + audit log；变更类 API 额外要求同源 CSRF 头。
+- 详细说明见 `docs/REMOTE_GATEWAY.md`。
 
 ## 8. `pgs_bless` 参数说明（完整）
 
@@ -384,7 +442,9 @@ pgs_bless.exe ppl clear --pid <pid>
 完整说明（ABI、如何写新模块、排错、版权）见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
 ## 9. CI 与验证
 
-- GitHub Actions 已新增 MSYS2 MinGW64 构建 + smoke test。
+- GitHub Actions 使用 MSYS2 MinGW64，按阶段执行 C++ 主线构建、core unit、sched cron unit、smoke test 和 Qt Web console 构建。
+- 本地 unit test 可单独跑：`tools/test_core_units.sh`、`tools/test_sched_cron.sh`；`tools/run_unit_tests.sh` 保留为聚合入口。
+- Qt Web console 可单独跑：`tools/build_qt_web.sh`，同时构建 `pgs_admin_web` 与 `pgs_cluster_web`。
 - 本地 smoke test 的“服务重启后恢复持久化 token / 守护集”步骤需要管理员权限；在非管理员沙盒里会因为 `ProgramData\ProcessGuard` 的 ACL 受限而失败。
 - 如果你要我补完整验证，开一个管理员 VM 最稳。
 ---
@@ -397,6 +457,8 @@ pgs_bless.exe ppl clear --pid <pid>
 - **WindowsApps**：`--winapp --aumid <id>` 或自动探测 `WindowsApps\` 路径，经 AUMID 激活重启。
 - **模块安全**：`modules.allow` 白名单 + 可选 Authenticode；默认 fail-closed，
   `pgs_service run --allow-all-modules` 为开发逃生阀，见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
+- **Web/Cluster 远程暴露**：`pgs_admin_web --remote` 必须 TLS + RBAC + audit；
+  `pgs_cluster_web` 非回环监听必须 TLS + 显式 `--api-token`，节点 TLS 默认校验。
 - **端口可配**：`pgs_service run|install --port <p>`，归档 `SERVER_PORT` 自动恢复。
 - **协议**：`version` 返回 `protocol=3 min=2`；`ping`/`stats` 带 `protocol=3`；新增 `bless`/`unbless`
   作为 `register`/`unregister` 别名。文件 hash 为 **SHA-256**（旧的注释里写的 FNV-1a 是笔误）。

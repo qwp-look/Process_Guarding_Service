@@ -566,6 +566,10 @@ private:
                 }
                 out.hasToken = true;
                 out.token = argv[++i];
+                if (out.token.empty())
+                {
+                    return false;
+                }
                 continue;
             }
 

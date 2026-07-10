@@ -67,6 +67,21 @@ cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 ```
 
+`pgs_admin_web` 与 `pgs_cluster_web` 使用 Qt 6.8+ 的 `QtHttpServer` / `QHttpHeaders` /
+`QSslServer` API。MSYS2 当前 Qt 6.11 可直接构建：
+
+```bash
+cmake -S qt/pgs_admin_web -B build/pgs_admin_web -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH=/mingw64 \
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+cmake --build build/pgs_admin_web -j4
+
+cmake -S qt/pgs_cluster_web -B build/pgs_cluster_web -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH=/mingw64 \
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+cmake --build build/pgs_cluster_web -j4
+```
+
 ## 3.1 编译验证与烟测
 
 推荐优先使用：
@@ -296,11 +311,50 @@ cmake --build build/pgs_admin_web -j4
 特点：
 
 - 浏览器访问 `http://127.0.0.1:18080`
-- Web 后端复用现有 `pgs_bless.exe` / `pgs_service.exe`
+- Web 后端直连 `PGSClient` 处理高频 `ping/list/get`，必要时仍复用 `pgs_bless.exe` / `pgs_service.exe`
 - 当前提供守护列表、守护操作、token 更新、服务管理等能力
-- 当前第一阶段优先复用 CLI 工具链，后续可以继续抽公共 `PGSClient` 层
+- 默认本地模式只允许回环绑定，页面内嵌一次性 API token，API 同时校验 Host/Origin。
+- remote 模式使用 `--remote --tls-cert --tls-key --users-file --audit-log`，强制 TLS + Basic RBAC + 审计。
+  remote 页面不嵌入 PGS 管理 token；变更类 API 额外要求同源 `X-PGS-CSRF`。
 
-## 5.2 `pgs_bless` 参数详解
+远程模式示例：
+
+```bat
+./build/pgs_admin_web/pgs_admin_web.exe ^
+  --remote ^
+  --bind 0.0.0.0 ^
+  --http-port 18443 ^
+  --pgs-token your-secret-token ^
+  --tls-cert cert.pem ^
+  --tls-key key.pem ^
+  --users-file users.txt ^
+  --audit-log pgs_admin_audit.log
+```
+
+## 5.3 集群监控面板
+
+本地模式：
+
+```bash
+./build/pgs_cluster_web/pgs_cluster_web.exe --listen-port 19090 --nodes-file pgs_cluster_nodes.txt
+```
+
+非回环监听必须使用 HTTPS + dashboard API token：
+
+```bat
+./build/pgs_cluster_web/pgs_cluster_web.exe ^
+  --listen-address 0.0.0.0 ^
+  --listen-port 19090 ^
+  --nodes-file pgs_cluster_nodes.txt ^
+  --api-token dashboard-token ^
+  --tls-cert cert.pem ^
+  --tls-key key.pem
+```
+
+节点文件格式为 `name;https://host:port;user:pass`。URL 不允许嵌入 `user:pass@host`，
+API 也不会回显第三列凭据；但文件本身仍是明文，生产部署请限制 ACL。
+
+## 5.4 `pgs_bless` 参数详解
 
 通用参数：
 
@@ -361,7 +415,8 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 - **token 鉴权强制开启**：空 token 不再被接受；未配置 token 时服务自动生成随机 token 并写入受限目录下的 `pgs_initial_token.txt`（仅 SYSTEM/Administrators 可读）。token 哈希为 SHA-256，state/logs 目录以受限 ACL 创建。
 - **token 不走命令行**：Qt 管理端与 Web 控制台通过环境变量 `PGS_AUTH_TOKEN` 传 token 给 `pgs_bless`，避免被本地其他用户经进程命令行查询泄露。
 - **`module load` 路径白名单**：服务端只允许加载位于模块目录之内的 DLL，`..`/UNC/盘外绝对路径一律拒绝，避免任意 DLL 被加载进 SYSTEM 级服务进程。
-- **绑定回环**：PGS 管理端口默认绑定 `127.0.0.1`；Web 控制台默认绑定 `127.0.0.1` 并要求 `X-PGS-Token` 头 + `Host`/`Origin` 校验（防 DNS rebinding 与跨站 CSRF）。若需暴露到外网，必须额外加网络层鉴权/TLS，这属于显式部署决策。
+- **绑定回环**：PGS 管理端口默认绑定 `127.0.0.1`；Web 控制台默认绑定 `127.0.0.1` 并要求 `X-PGS-Token` 头 + `Host`/`Origin` 校验（防 DNS rebinding 与跨站 CSRF）。远程 Web 控制台必须显式 `--remote`，并配置 TLS、RBAC users 文件和 audit log。
+- **cluster 远程监听强制 TLS+token**：`pgs_cluster_web` 默认只监听回环；非回环监听必须提供 `--api-token --tls-cert --tls-key`。
 - **不要在不受信任的主机启用 PPL**：`Sirius.sys` 一旦加载常驻并暴露 `\\.\Sirius` 设备，具备 ARK 级内核能力（终止/隐藏/注入/改 token/读写内存/关 PatchGuard/关 DSE 等），任何能打开该设备的本地主体都获得完整内核级能力；用户态无法修改驱动设备 DACL。
 
 ### 进一步收敛（按需）

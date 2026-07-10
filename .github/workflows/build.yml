@@ -13,10 +13,8 @@ jobs:
       - uses: actions/checkout@v5
 
       # Cache only the compile-critical parts of the installed MinGW64
-      # toolchain (bin/lib/include + the mingw target sysroot). We exclude
-      # share/ on purpose: it is ~40k doc/man/cmake-help files that the
-      # build never reads, and actions/cache restore time scales with file
-      # count, so listing them blew the restore from ~15s to ~40s.
+      # toolchain plus Qt's runtime metadata. Qt CMake targets reference
+      # share/qt6 plugin/metatype files, so cache hits must restore it too.
       - name: Cache MinGW64 toolchain
         id: mingw-cache
         uses: actions/cache@v4
@@ -26,28 +24,41 @@ jobs:
             C:\msys64\mingw64\lib
             C:\msys64\mingw64\include
             C:\msys64\mingw64\x86_64-w64-mingw32
-          key: msys2-mingw64-installed-${{ runner.os }}-v2
+            C:\msys64\mingw64\share\qt6
+          key: msys2-mingw64-installed-${{ runner.os }}-v4
 
       - name: Install MinGW64 toolchain
         if: steps.mingw-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-httpserver mingw-w64-x86_64-qt6-websockets mingw-w64-x86_64-qt6-tools'
 
       - name: Build C++ core, CLI and examples
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && ./tools/build_pgs.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/build_pgs.sh'
 
-      - name: Run unit tests
+      - name: Run core unit tests
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && ./tools/run_unit_tests.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/test_core_units.sh'
+
+      - name: Run scheduler cron unit tests
+        shell: pwsh
+        run: |
+          $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/test_sched_cron.sh'
 
       - name: Run smoke test
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && ./tools/smoke_test_pgs.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/smoke_test_pgs.sh'
+
+      - name: Build Qt web consoles
+        shell: pwsh
+        run: |
+          $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/build_qt_web.sh'

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# MSYS2 MinGW64 entry point: build and run the pgs_core unit tests.
+# MSYS2 MinGW64 entry point kept for compatibility.
 set -euo pipefail
-export PATH="/mingw64/bin:/usr/bin:$PATH"
-hash -r
-mkdir -p build
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude tests/test_pgs_core.cpp -o build/test_pgs_core.exe -lbcrypt
-./build/test_pgs_core.exe
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+bash ./tools/run_unit_tests.sh

@@ -149,7 +149,7 @@ namespace ProcessGuard
         void setPplEnabled(bool enabled) { m_pplEnabled = enabled; }
         // Override the listen port (default kServerPort); must be set before
         // initialize()/start(). Honoured by createListenSocket().
-        void setServerPort(std::uint16_t port) { m_serverPort = port ? port : kServerPort; }
+        void setServerPort(std::uint16_t port) { m_serverPort = port ? port : kServerPort; m_serverPortUserSet = true; }
         bool isModulesPermissive() const { return m_modulesPermissive; }
         void setModulesPermissive(bool v) { m_modulesPermissive = v; m_modulesPermissiveUserSet = true; }
 
@@ -208,6 +208,7 @@ namespace ProcessGuard
         // can override via --port; loadPersistedState() may restore an archived
         // SERVER_PORT so a reinstalled service remembers its port.
         std::uint16_t m_serverPort{kServerPort};
+        bool m_serverPortUserSet{false};
 
         // Service uptime baseline for the stats command.
         std::chrono::steady_clock::time_point m_startTime{std::chrono::steady_clock::now()};

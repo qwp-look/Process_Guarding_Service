@@ -31,7 +31,10 @@ for file in \
   "qt/pgs_admin_qt/src/MainWindow.cpp" \
   "qt/pgs_admin_web/CMakeLists.txt" \
   "qt/pgs_admin_web/src/WebServer.cpp" \
+  "qt/pgs_cluster_web/CMakeLists.txt" \
+  "qt/pgs_cluster_web/src/ClusterServer.cpp" \
   "tools/build_pgs.sh" \
+  "tools/build_qt_web.sh" \
   "tools/smoke_test_pgs.sh"
 do
   if [[ -f "$file" ]]; then
@@ -43,16 +46,16 @@ do
 done
 
 echo
-./tools/build_pgs.sh
+bash ./tools/build_pgs.sh
 
 echo
-./tools/run_unit_tests.sh
+bash ./tools/run_unit_tests.sh
 
 echo
 if [[ "${PGS_SKIP_SMOKE:-0}" == "1" ]]; then
   echo "[Smoke] skipped because PGS_SKIP_SMOKE=1"
 else
-  ./tools/smoke_test_pgs.sh
+  bash ./tools/smoke_test_pgs.sh
 fi
 
 echo
@@ -66,14 +69,8 @@ echo "[Qt] Building..."
 cmake --build build/pgs_admin_qt -j4
 
 echo
-echo "[Web] Configuring..."
-rm -rf build/pgs_admin_web
-cmake -S qt/pgs_admin_web -B build/pgs_admin_web -G "MinGW Makefiles" \
-  -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
-
-echo "[Web] Building..."
-cmake --build build/pgs_admin_web -j4
+echo "[Web] Building admin + cluster consoles..."
+bash ./tools/build_qt_web.sh
 
 echo
 echo "Verification completed successfully."

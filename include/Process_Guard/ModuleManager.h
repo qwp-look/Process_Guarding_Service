@@ -70,6 +70,13 @@ namespace ProcessGuard
          */
         bool load(const std::string &path, std::string &err);
 
+        /*
+         * Ensure the module allowlist from <dir>\modules.allow has been read.
+         * Explicit module load commands use this because normal startup may
+         * skip directory scanning when PPL/module loading is not opted in.
+         */
+        void ensureAllowlistLoaded(const std::string &dir);
+
         /* Unload a module by name (case-insensitive). Calls PG_Shutdown first.
          * Returns true on success; false + err if not found. */
         bool unload(const std::string &name, std::string &err);

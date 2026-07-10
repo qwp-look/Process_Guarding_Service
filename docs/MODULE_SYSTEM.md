@@ -110,7 +110,10 @@
 
 **线程安全**：所有公开方法持 `std::mutex`。PGS 的工作线程池（4 个）会并发处理客户端请求，模块调用必须可重入——模块自身若维护共享状态需自行加锁。
 
-**生命周期**：由 `PGS` 持有成员 `ModuleManager m_modules`。`PGS::initialize()` 中扫描 `<exe>\modules` 自动加载；`PGS` 析构时 `ModuleManager` 析构会对每个模块调 `PG_Shutdown` 并 `FreeLibrary`。
+**生命周期**：由 `PGS` 持有成员 `ModuleManager m_modules`。`PGS::initialize()` 总是创建/加固
+`<exe>\modules` 根目录并配置 ABI v2 services；默认不自动扫描加载模块。只有显式启用 PPL/module
+opt-in 时才递归加固 modules tree 并扫描加载。`PGS` 析构时 `ModuleManager` 析构会对每个已加载模块调
+`PG_Shutdown` 并 `FreeLibrary`。
 
 ---
 
@@ -128,7 +131,10 @@
 - `static std::string moduleDirectoryOfSelf();` — 取 `pgs_service.exe` 所在目录 + `\modules`。
 - `handleModuleCommand(args)` / `handlePplCommand(args)` — 命令处理。
 
-**初始化**（`initialize()`）：在置 `m_initialized=true` 之前，扫描 `m_modulesDir` 加载模块，并记录日志（加载数量 / 目录）。
+**初始化**（`initialize()`）：在置 `m_initialized=true` 之前，创建/加固 `m_modulesDir`。PPL opt-in 时会
+递归加固整个 modules tree，随后扫描 `m_modulesDir` 加载允许的模块，并记录日志（加载数量 / 目录）。
+非 opt-in 启动不自动扫描，但显式 `module load` 会先读取 `modules.allow`，再按同一 allowlist/签名/哈希
+规则加载指定 DLL。
 
 **命令分发**（`processMessage`）：在 `ping` 分支前新增：
 
@@ -308,7 +314,7 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 - `Sirius.sys` 为第三方（StarlightGUI，作者 Stars）提供的内核驱动二进制，Apache-2.0 授权再分发。复用意味着 PGS 依赖该驱动的加载环境（测试签名或其签名）。长期更干净的做法是自建驱动，但工作量与维护成本显著更高。
 - 模块系统会执行任意 DLL 中的代码。仅加载可信来源的模块；模块目录的写入权限应受控。
 - **module load 路径白名单**：服务端只允许加载位于 PGS 模块目录（<pgs_service.exe 目录>/modules）之内的 DLL，..、UNC、盘外绝对路径一律拒绝。避免任意本地主体借 module load 把任意 DLL 加载进 SYSTEM 级服务进程。
-- **PPL/驱动按需启用（opt-in）**：默认启动 PGS **不会**加载 ppl 模块、也不会加载 Sirius.sys。仅当设置环境变量 PGS_ENABLE_PPL=1 或向 pgs_service 传入 --enable-ppl 时，loadFromDirectory 才加载 ppl 模块目录。降低默认引入内核驱动的风险。
+- **PPL/驱动按需启用（opt-in）**：默认启动 PGS **不会**加载 ppl 模块、也不会加载 Sirius.sys。仅当设置环境变量 PGS_ENABLE_PPL=1 或向 pgs_service 传入 --enable-ppl 时，才会扫描模块目录并加载 PPL 相关模块。降低默认引入内核驱动的风险。
 - **ppl set 可对任意进程设 PPL**：包括对 PGS 自身或任意第三方进程设 WinTcb/Antimalware。这是产品设计能力，风险由「opt-in 加载 + 强制 token 鉴权」收敛；非 opt-in 部署下该能力不可达。
 - **Sirius.sys 攻击面告警**：一旦加载，Sirius.sys 常驻并暴露设备 \\\\.\\Sirius，具备 ARK 级内核能力（终止/隐藏/挂起进程、注入 DLL、改进程 token、读写内存、关 PatchGuard、关 DSE、删回调等）。任何能打开该设备的本地主体都获得完整内核级能力。PGS 仅在「我们自己创建了该服务」时才在关闭时 STOP+DeleteService 卸载它（StarlightGUI 已加载的不动）；用户态无法修改驱动的设备 DACL，请勿在不受信任的主机上启用 PPL。
 - **鉴权前置**：所有 module/ppl 命令仍受 PGS token 鉴权保护；空 token 不再被接受（无 token 时服务自动生成随机 token 并写入受限目录下的 pgs_initial_token.txt）。
@@ -379,6 +385,14 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 ### 14.4 目录 ACL 加固
 
 模块目录 `<exe>\modules\` 经 `secureCreateDirectory` 设置 SYSTEM + Administrators 专有 ACL，普通用户不可写入，避免「先植入恶意 DLL 再等加载」的提权路径。状态目录、归档/临时目录同权限制。
+
+PPL 开启时额外递归加固整个 modules tree：
+
+- 子目录也会应用 SYSTEM + Administrators 专有 ACL。
+- 已存在的普通文件（DLL、`modules.allow`、`module.html`、`Sirius.sys` 等）会被设置为受保护 DACL。
+- 任一子项加固失败时，PPL 模块加载 fail-closed，避免在目录根 ACL 正确但既有子文件仍可被普通用户替换的状态下加载内核能力模块。
+
+非 PPL 默认启动只创建/加固根 modules 目录，不递归改写整个树；这样普通部署不会无谓改变开发目录下的文件 ACL。
 
 ### 14.5 排错
 

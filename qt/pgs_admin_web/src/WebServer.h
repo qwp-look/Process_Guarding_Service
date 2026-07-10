@@ -38,9 +38,9 @@ public:
         bool remote = false;
         QString tlsCertPath;
         QString tlsKeyPath;
-        bool tlsAutocert = false; // generate a self-signed cert on first run
-        QString usersFile;        // RBAC users file (user;role;salthash)
-        QString auditLogPath;     // append-only audit log for mutating ops
+        bool tlsAutocert = false; // reserved; remote mode currently requires explicit PEM files
+        QString usersFile;        // RBAC users file (user;role;saltHex;hashHex)
+        QString auditLogPath;     // append-only audit log for remote API/auth events
     };
 
     // RBAC roles. viewer = read-only; operator = + guard ops; admin = all.
@@ -91,6 +91,7 @@ private:
 
     static QHttpServerResponse jsonOk(const QString &message);
     static QHttpServerResponse jsonError(const QString &message, int statusCode = 400);
+    static QHttpServerResponse jsonUnauthorized();
     static QHttpServerResponse jsonCommandResult(const CommandResult &result, const QString &message = QString(), bool allowRawStdout = true);
 
     Options m_options;
@@ -100,9 +101,11 @@ private:
     class QSslServer *m_sslServer = nullptr;
     QSslCertificate *m_sslCert = nullptr;
     QSslKey *m_sslKey = nullptr;
-    // RBAC: user -> (role, salt-hash). Loaded from usersFile.
+    // RBAC: user -> (role, salt:hashHex). Loaded from usersFile.
     struct UserRec { QString role; QByteArray saltHash; };
     QHash<QString, UserRec> m_users;
+    struct LoginFailure { int count = 0; qint64 blockedUntilMs = 0; };
+    QHash<QString, LoginFailure> m_loginFailures;
     // Audit log stream (opened lazily).
     class QFile *m_auditFile = nullptr;
     bool loadUsers();
