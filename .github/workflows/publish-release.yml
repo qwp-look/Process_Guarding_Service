@@ -3,6 +3,7 @@ name: publish-release
 on:
   push:
     branches: [codex/roadmap-sched-remote-cluster]
+    tags: [Personal_Version_V3.1.0]
     paths:
       - .github/workflows/publish-release.yml
       - installer/Output/**
