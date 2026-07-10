@@ -1,0 +1,3 @@
+# PGS cluster node registry: name;baseHttpsUrl;user:pass
+node1;https://10.0.0.5:12443;admin:s3cret
+node2;https://10.0.0.6:12443;operator:pass2

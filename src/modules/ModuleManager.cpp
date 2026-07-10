@@ -179,7 +179,10 @@ namespace ProcessGuard
         // Run the module's one-time init. A non-zero return aborts the load.
         if (e.init)
         {
-            const int rc = e.init(nullptr);
+            // ABI v2: hand the services struct to v2 modules. v1 modules
+            // ignore the argument. nullptr when PGS has not set services.
+            void *initArg = m_servicesReady ? static_cast<void *>(&m_services) : nullptr;
+            const int rc = e.init(initArg);
             if (rc != 0)
             {
                 if (e.shutdown)
@@ -198,6 +201,15 @@ namespace ProcessGuard
     {
         std::unique_lock<std::shared_mutex> lock(m_mutex);
         return loadLocked(path, err);
+    }
+
+    void ModuleManager::ensureAllowlistLoaded(const std::string &dir)
+    {
+        std::unique_lock<std::shared_mutex> lock(m_mutex);
+        if (!m_allowlistLoaded)
+        {
+            loadAllowlist(dir);
+        }
     }
 
     bool ModuleManager::unload(const std::string &name, std::string &err)
@@ -230,9 +242,6 @@ namespace ProcessGuard
     // observers (module list) never see a partial set.
     int ModuleManager::loadFromDirectory(const std::string &dir)
     {
-        // v3: load (or reload) the allowlist from <dir>\modules.allow BEFORE
-        // scanning so every candidate loadLocked sees an up-to-date gate.
-        loadAllowlist(dir);
         const std::wstring wdir = util::utf8ToWide(dir);
         auto ensureSep = [](std::wstring &p) {
             if (!p.empty() && p.back() != L'\\' && p.back() != L'/')
@@ -241,6 +250,9 @@ namespace ProcessGuard
 
         int loaded = 0;
         std::unique_lock<std::shared_mutex> lock(m_mutex);
+        // v3: load (or reload) the allowlist from <dir>\modules.allow BEFORE
+        // scanning so every candidate loadLocked sees an up-to-date gate.
+        loadAllowlist(dir);
 
         // Load a DLL given by a wide path: widen->UTF-8->loadLocked (caller holds lock).
         auto loadWide = [&](const std::wstring &full) {

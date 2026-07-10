@@ -11,6 +11,7 @@ class QLineEdit;
 class QProcess;
 class QPushButton;
 class QTabWidget;
+class QSettings;
 class QTextEdit;
 class QTableWidget;
 class QTimer;
@@ -41,6 +42,8 @@ private:
     bool isChineseUi() const;
     QString trUi(const QString &en, const QString &zh) const;
     void applyLanguage();
+    void applyTheme(int index);
+    void loadSavedPrefs();
     void attachProcessHandlers();
     void setupModuleTab(QWidget *page);
     void refreshModuleTabs();
@@ -67,6 +70,8 @@ private:
     QComboBox *m_tableIntervalCombo = nullptr;
 
     QComboBox *m_languageCombo = nullptr;
+    QComboBox *m_themeCombo = nullptr;
+    QLabel *m_labelTheme = nullptr;
     QCheckBox *m_jsonCheck = nullptr;
     QTextEdit *m_blessOutput = nullptr;
     QTextEdit *m_serviceOutput = nullptr;

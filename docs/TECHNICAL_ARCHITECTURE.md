@@ -418,7 +418,9 @@ PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染�
 
 > 完整说明见 [`MODULE_SYSTEM.md`](MODULE_SYSTEM.md)，此处补架构视角。
 
-- **加载时机**：`PGS::initialize()` 在置 `m_initialized=true` 前，扫描 `<pgs_service.exe 目录>\modules\*.dll` 自动加载。单个模块失败不中断整轮扫描。
+- **加载时机**：`PGS::initialize()` 总是创建/加固 `<pgs_service.exe 目录>\modules` 根目录并设置 ABI v2 services；
+  默认不自动扫描加载模块。PPL/module opt-in 时才递归加固 modules tree 并扫描加载；显式 `module load`
+  会先读取 `modules.allow`，再按同一白名单/签名/哈希链路加载单个 DLL。
 - **调用链**：`processMessage` → `handleModuleCommand` / `handlePplCommand` → `ModuleManager::invoke` → 模块 `PG_Invoke`。`ppl` 命令是 `module call ppl` 的语法糖，PGS 内部构造 `op=...;pid=...` KV 再调 ppl 模块。
 - **线程安全**：模块 `PG_Invoke` 必须可重入（worker 池并发调用）。模块自身共享状态自行加锁。
 - **延迟初始化**：PPL 模块 `PG_Init` 不打开驱动（驱动可能尚未可加载），首次 `PG_Invoke` 才 `ensureDevice`，失败返回清晰错误而非拖垮模块加载。
@@ -429,10 +431,27 @@ PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染�
 独立进程方案，与 PGS 核心解耦：
 
 - 自己提供 HTTP 路由 + 静态页面 + 会话鉴权；浏览器只访问这个 Web 进程。
-- Web 后端调用现有 `pgs_bless.exe` / `pgs_service.exe`（第一阶段复用成熟 CLI），后续可抽公共 `PGSClient` 降低协议重复。
+- Web 后端直连 `PGSClient` 处理高频 `ping/list/get/policy/token` 等 PGS 协议请求；
+  服务生命周期等操作仍可复用 `pgs_service.exe`。
 - PGS 核心不承担 HTTP/静态托管/自身恢复，职责不堆叠。
-- 部署建议绑定 `127.0.0.1`，面向本机运维；PGS token 不暴露到前端，由 Web 后端服务端持有/转发。
-- API 对外暴露 JSON（如 `GET /api/guards`、`POST /api/guards/bless`），浏览器不直接接触底层 `OK/ERR` 文本协议。
+- 本地模式绑定回环，页面嵌入进程内 API token，API 同时校验 `Host`/`Origin`。
+- remote 模式 fail-closed：TLS + Basic RBAC + users file + audit log 缺一不可；远程页面不嵌入
+  PGS 管理 token，由 Web 后端持有/转发。
+- remote 变更类 API 要求 JSON + `X-PGS-CSRF` + 同源 `Origin`/`Referer`/`Sec-Fetch-Site`，
+  避免浏览器缓存 Basic 凭据后被跨站表单触发管理动作。
+- API 对外暴露 JSON（如 `GET /api/guards`、`POST /api/bless`），浏览器不直接接触底层 `OK/ERR` 文本协议。
+
+## 13.1 集群监控面板（pgs_cluster_web）
+
+`pgs_cluster_web` 是独立聚合器，按 5s cadence 轮询多个 remote gateway：
+
+- 节点 registry 格式为 `name;https://host:port;user:pass`；API 不回显第三列 credentials。
+- 节点 URL 必须为 HTTPS，且拒绝 `user:pass@host`、query、fragment，避免凭据从 list/summary 或前端泄漏。
+- 默认只监听 `127.0.0.1` 并生成本次运行 API token 嵌入本地页面；非回环监听必须提供显式
+  `--api-token --tls-cert --tls-key`。
+- 对节点证书默认严格校验；私有 CA 通过 `--node-ca-cert` 加入信任，`--node-insecure-tls` 才退回
+  `VerifyNone`（实验环境用）。
+- 轮询缓存用 node generation + request serial 校验，删除/重加同名节点或旧响应晚返回时不会污染新节点状态。
 
 ## 14. 运行时依赖与部署
 
@@ -479,13 +498,13 @@ release\
 运行：以管理员开终端，`pgs_service.exe run --token <你的token>`，另开终端 `pgs_bless.exe ping --token <你的token>`。
 ## 8. CI 与验证
 
-- GitHub Actions 会在 windows-latest 上用 MSYS2 MinGW64 构建 C++ 主线并跑 smoke test。
-- Qt Web 端也会单独构建，确保共享 PGSClient 没有破坏 Web 管理端。
+- GitHub Actions 会在 Windows runner 上用 MSYS2 MinGW64 构建 C++ 主线，并把 core unit、sched cron unit、smoke test 拆成独立步骤。
+- Qt Web 端通过 `tools/build_qt_web.sh` 单独构建，同时覆盖 `pgs_admin_web` 与 `pgs_cluster_web`，确保共享 PGSClient 没有破坏两个 Web 控制面。
 - 需要管理员权限才能完整验证 ProgramData 下的持久化恢复（见鲁棒性文档）。
 
 ## 7.2 CI 备注
 
-- GitHub Actions 现在走 Windows runner + MSYS2 的方式；`actions/checkout@v4` 的 Node 20 警告是 runner 侧提示，不是本项目失败原因。
+- GitHub Actions 现在走 Windows runner + MSYS2 的方式；unit / smoke / Qt Web 分步执行，失败时先看对应阶段日志。
 ## 16. v3 加固补充（Job Object / IOCP / WindowsApps / 归档 v3 / 模块白名单）
 
 > 本节为 v3 加固引入的架构变更汇总，遇与上文不一致处以本节为准。策略语义详见 [`GUARD_POLICIES.md`](GUARD_POLICIES.md)，模块细节详见 [`MODULE_SYSTEM.md`](MODULE_SYSTEM.md)，服务身份详见 [`SERVICE_MODE_GUIDE.md`](SERVICE_MODE_GUIDE.md)。
@@ -495,7 +514,8 @@ release\
 `PGDefines.h` 新增 `AppKind { Win32 = 0, WinApp = 1 }`。以下结构全部向后兼容扩展，缺省即旧语义：
 
 - **`GuardInfo`** 增：`appKind`、`aumid`（WindowsApps 的 ApplicationUserModelId）、`restartWindowSec`、`restartDelayMs`、`backoff`(bool)、`hangTimeoutMs`、`killOnExit`(bool)、`jobHandle`( HANDLE, 命名 Job)、`recentRestartMs`（向量，滑动窗口内重启时间戳）。
-- **`RestartPolicyState`** 增：`restartWindowSec`、`restartDelayMs`、`backoff`、`hangTimeoutMs`、`killOnExit`；`restartCount` 改为由 `recentRestartMs` 在窗口内裁剪后的长度得出（`window=0` 时退化为生命周期累计，完全兼容旧 `maxRestarts` 语义）。
+- **`RestartPolicyState`** 按 `guardId` 持有 `maxRestarts`、`restartCount` 与 `recentRestartMs`。
+  `window>0` 时 `restartCount` 由窗口内 `recentRestartMs` 裁剪后长度得出；`window=0` 时退化为生命周期累计，兼容旧 `maxRestarts` 语义。
 - **`PersistedGuardState`** 增：`appKind`、`aumid`、`restartWindowSec`、`restartDelayMs`、`backoff`、`hangTimeoutMs`、`killOnExit`。
 
 `fileHash` 字段注释更正：实际为 **SHA-256 hex（经 CNG/BCrypt 计算）**，而非早先文档误写的 FNV-1a。
@@ -535,8 +555,15 @@ GUARD\t<guardId>\t<lastKnownPid>\t<sessionId>\t<maxRestartsLabel>\t<pathB64>\t<r
 另新增（可选行）：
 
 - `RESTART\t<guardId>\t<epochMs>`：记录窗口内各次重启时间戳，归档前裁剪到窗口内；`loadPersistedState` 据此重建 `recentRestartMs`。
+- `RESTART_COUNT\t<guardId>\t<count>`：记录生命周期累计重启次数；窗口模式下也会写出当前计数，
+  但加载后以裁剪后的 `RESTART` 时间戳数量为准。
 - `SERVER_PORT\t<port>`：恢复监听端口；缺省 12345。
 - `MODULES_PERMISSIVE\t1`：恢复 `--allow-all-modules` 宽松开关。
+
+恢复语义：若归档 PID 仍活且路径匹配，则复接管且不消耗预算；若缺失进程需要重新拉起，则这次 restore restart
+也计入 `restartCount`/窗口。例外是 delayed/backoff restart 已经在进入 pending 队列前记账并把
+`lastKnownPid=0` 持久化；若服务在 delay 期间重启，restore 会完成这次已记账的 relaunch，不再二次扣预算。
+达到上限或 restore relaunch 失败的 guard 会从归档删除，避免服务下次启动再次复活。
 
 **迁移**：`version==2` 走保持迁移（老记录字段补默认：Win32/无 aumid/window=0=生命周期累计/delay=0/no backoff/hang=0/killOnExit=0），日志提示一次升级；`version<2` 沿用现有 v1→v2 重置 token 哈希的迁移链。旧客户端协议动词（register/unregister/...）保持不变，`bless`/`unbless`/`bless-start` 作为协议层别名加入，消除「CLI 用 bless、协议用 register」的认知分叉。
 
@@ -548,7 +575,7 @@ GUARD\t<guardId>\t<lastKnownPid>\t<sessionId>\t<maxRestartsLabel>\t<pathB64>\t<r
 
 ### 16.6 模块白名单 + Authenticode（架构视角）
 
-`ModuleManager::load` 校验链：命中白名单 → （签名要求开启时）`WinVerifyTrust` 验 Authenticode → 全过才 `LoadLibrary`。白名单文件 `<exe>\modules\modules.allow`，逐行 `name[|sha256Hex[|signed]]`。**默认 fail-closed**：白名单缺失即拒绝加载任何模块并告警；`--allow-all-modules`（持久化于 `MODULES_PERMISSIVE\t1`）开启旧宽松行为用于开发。详见 `MODULE_SYSTEM.md`。
+`ModuleManager::load` 校验链：命中白名单 → （签名要求开启时）`WinVerifyTrust` 验 Authenticode → 哈希校验 → 全过才 `LoadLibrary`。白名单文件 `<exe>\modules\modules.allow`，逐行 `name[|sha256Hex[|signed]]`。**默认 fail-closed**：白名单缺失即拒绝加载任何模块并告警；`--allow-all-modules`（持久化于 `MODULES_PERMISSIVE\t1`）开启旧宽松行为用于开发。PPL opt-in 时会递归加固 modules tree 的子目录和文件 ACL，任一失败即拒绝加载 PPL 模块。详见 `MODULE_SYSTEM.md`。
 
 ### 16.7 `--port` 与服务身份
 

@@ -527,6 +527,10 @@ std::string PGS::handleSetToken(const std::string &encodedOldToken, const std::s
 {
     const std::string oldToken = base64Decode(encodedOldToken);
     const std::string newToken = base64Decode(encodedNewToken);
+    if (oldToken.empty() || newToken.empty())
+    {
+        return "ERR token must not be empty";
+    }
     const std::string oldHash = sha256Hex(oldToken);
     const std::string newHash = sha256Hex(newToken);
 
@@ -683,6 +687,10 @@ std::string PGS::handleModuleCommand(const std::string &args)
             Logger::warning("PGS: rejected module load outside modules dir, path=" + path);
             return "ERR module load restricted to modules directory";
         }
+        // Startup may skip directory scanning unless PPL/module loading is
+        // explicitly enabled, but a direct module load must still honor the
+        // same fail-closed allowlist gate.
+        m_modules.ensureAllowlistLoaded(m_modulesDir);
         std::string err;
         if (m_modules.load(path, err))
         {

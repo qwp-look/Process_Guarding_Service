@@ -39,6 +39,11 @@ int main(int argc, char *argv[])
     QCommandLineOption tokenOption(QStringList{QStringLiteral("pgs-token")}, QStringLiteral("PGS token held by the web backend"), QStringLiteral("token"));
     QCommandLineOption blessToolOption(QStringList{QStringLiteral("bless-tool")}, QStringLiteral("Path to pgs_bless.exe"), QStringLiteral("path"));
     QCommandLineOption serviceToolOption(QStringList{QStringLiteral("service-tool")}, QStringLiteral("Path to pgs_service.exe"), QStringLiteral("path"));
+    QCommandLineOption remoteOption(QStringList{QStringLiteral("remote")}, QStringLiteral("Enable remote-gateway mode (forces TLS + RBAC, allows non-loopback bind)"));
+    QCommandLineOption tlsCertOption(QStringList{QStringLiteral("tls-cert")}, QStringLiteral("TLS certificate PEM (remote mode)"), QStringLiteral("path"));
+    QCommandLineOption tlsKeyOption(QStringList{QStringLiteral("tls-key")}, QStringLiteral("TLS private key PEM (remote mode)"), QStringLiteral("path"));
+    QCommandLineOption usersOption(QStringList{QStringLiteral("users-file")}, QStringLiteral("RBAC users file: user;role;saltHex;hashHex"), QStringLiteral("path"));
+    QCommandLineOption auditOption(QStringList{QStringLiteral("audit-log")}, QStringLiteral("Audit log path for remote API/auth events"), QStringLiteral("path"));
 
     parser.addOption(bindOption);
     parser.addOption(httpPortOption);
@@ -47,16 +52,29 @@ int main(int argc, char *argv[])
     parser.addOption(tokenOption);
     parser.addOption(blessToolOption);
     parser.addOption(serviceToolOption);
+    parser.addOption(remoteOption);
+    parser.addOption(tlsCertOption);
+    parser.addOption(tlsKeyOption);
+    parser.addOption(usersOption);
+    parser.addOption(auditOption);
     parser.process(app);
 
     WebServer::Options options;
     // Default posture is local-only administration. Exposing the web console to
     // wider networks should be a deliberate deployment decision, not the default.
+    options.remote = parser.isSet(remoteOption);
     options.bindAddress = parser.value(bindOption);
+    if (options.remote && options.bindAddress == QStringLiteral("127.0.0.1"))
+        options.bindAddress = QStringLiteral("0.0.0.0");
     options.pgsHost = parser.value(pgsHostOption);
     options.pgsToken = parser.value(tokenOption);
     options.blessToolPath = parser.value(blessToolOption);
     options.serviceToolPath = parser.value(serviceToolOption);
+    options.tlsCertPath = parser.value(tlsCertOption);
+    options.tlsKeyPath = parser.value(tlsKeyOption);
+    options.tlsAutocert = false;
+    options.usersFile = parser.value(usersOption);
+    options.auditLogPath = parser.value(auditOption);
 
     if (!parsePort(parser.value(httpPortOption), options.httpPort))
     {

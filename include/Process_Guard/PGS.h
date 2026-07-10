@@ -149,7 +149,7 @@ namespace ProcessGuard
         void setPplEnabled(bool enabled) { m_pplEnabled = enabled; }
         // Override the listen port (default kServerPort); must be set before
         // initialize()/start(). Honoured by createListenSocket().
-        void setServerPort(std::uint16_t port) { m_serverPort = port ? port : kServerPort; }
+        void setServerPort(std::uint16_t port) { m_serverPort = port ? port : kServerPort; m_serverPortUserSet = true; }
         bool isModulesPermissive() const { return m_modulesPermissive; }
         void setModulesPermissive(bool v) { m_modulesPermissive = v; m_modulesPermissiveUserSet = true; }
 
@@ -208,6 +208,7 @@ namespace ProcessGuard
         // can override via --port; loadPersistedState() may restore an archived
         // SERVER_PORT so a reinstalled service remembers its port.
         std::uint16_t m_serverPort{kServerPort};
+        bool m_serverPortUserSet{false};
 
         // Service uptime baseline for the stats command.
         std::chrono::steady_clock::time_point m_startTime{std::chrono::steady_clock::now()};
@@ -246,6 +247,11 @@ namespace ProcessGuard
         std::string handlePplCommand(const std::string &args);
         // Resolve <pgs_service.exe dir>\modules for the plugin scan.
         static std::string moduleDirectoryOfSelf();
+        // ABI v2 thunks: let modules call back into PGS via PGS_Services.
+        // callThunk routes a line-protocol command to processMessage;
+        // nowMsThunk returns epoch millis for schedule arithmetic.
+        static int callThunk(void *context, const char *request, char *response, size_t responseSize);
+        static long long nowMsThunk(void *context);
         bool isPathInsideModulesDir(const std::string &candidateUtf8) const;
         bool writeInitialTokenFile(const std::string &stateDir, const std::string &token) const;
         // v3: handleRegister also accepts the advanced guard-policy fields

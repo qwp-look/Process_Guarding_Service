@@ -93,6 +93,19 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Schedule module: cron/once/interval scheduler (ABI v2, calls back into PGS).
+echo [9a/10] Building pgs_sched_module.dll...
+if not exist "%BUILD_DIR%\modules\sched" mkdir "%BUILD_DIR%\modules\sched"
+%COMPILER% %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\sched\pgs_sched_module.dll" modules\sched\SchedCron.cpp modules\sched\pgs_sched_module.cpp -I %INCLUDE_DIR%
+if errorlevel 1 (
+    echo Failed: modules\sched\pgs_sched_module.cpp
+    exit /b 1
+)
+copy /Y "%BUILD_DIR%\libstdc++-6.dll" "%BUILD_DIR%\modules\sched\libstdc++-6.dll" >nul 2>&1
+copy /Y "%BUILD_DIR%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\sched\libgcc_s_seh-1.dll" >nul 2>&1
+copy /Y "%BUILD_DIR%\libwinpthread-1.dll" "%BUILD_DIR%\modules\sched\libwinpthread-1.dll" >nul 2>&1
+copy /Y modules\sched\module.html "%BUILD_DIR%\modules\sched\module.html" >nul
+
 REM PPL module: built as a separate DLL (-shared) into build\modules, then
 REM Sirius.sys and the MinGW runtime DLLs are copied next to it so PGS can
 REM auto-load the module and the module can load the driver at runtime.
@@ -100,6 +113,7 @@ echo [9/9] Building pgs_ppl_module.dll...
 REM v3: ship a default allowlist that permits the bundled people module. Operators
 REM add lines "name[|sha256|signed]" to <exe>\modules\modules.allow to approve more.
 echo ppl> "%BUILD_DIR%\modules\modules.allow"
+echo sched>> "%BUILD_DIR%\modules\modules.allow"
 REM Per-folder module layout: build\modules\<name>\<name>.dll + module.html + assets.
 REM The folder name MUST match the module PG_GetName() return value so the
 REM Qt UI and `module call --name <folder>` resolve correctly.
@@ -127,6 +141,7 @@ echo - %BUILD_DIR%\guard_example.exe
 echo - %BUILD_DIR%\quick_start.exe
 echo - %BUILD_DIR%\smoke_worker.exe
 echo - %BUILD_DIR%\pgs_bless.exe
+echo - %BUILD_DIR%\modules\sched\pgs_sched_module.dll
 echo - %BUILD_DIR%\modules\ppl\pgs_ppl_module.dll
 echo - %BUILD_DIR%\modules\ppl\Sirius.sys
 echo - %BUILD_DIR%\modules\ppl\module.html

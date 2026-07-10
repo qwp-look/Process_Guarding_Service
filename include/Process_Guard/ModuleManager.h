@@ -70,6 +70,13 @@ namespace ProcessGuard
          */
         bool load(const std::string &path, std::string &err);
 
+        /*
+         * Ensure the module allowlist from <dir>\modules.allow has been read.
+         * Explicit module load commands use this because normal startup may
+         * skip directory scanning when PPL/module loading is not opted in.
+         */
+        void ensureAllowlistLoaded(const std::string &dir);
+
         /* Unload a module by name (case-insensitive). Calls PG_Shutdown first.
          * Returns true on success; false + err if not found. */
         bool unload(const std::string &name, std::string &err);
@@ -100,6 +107,12 @@ namespace ProcessGuard
         // operator opt-in flag lives on PGS (m_modulesPermissive) and is pushed
         // here before loadFromDirectory().
         void setPermissive(bool v) { m_permissive = v; }
+
+        // ABI v2: services struct handed to every module's PG_Init. PGS sets
+        // this before loadFromDirectory() so modules receive callbacks. When
+        // not ready (m_servicesReady false), PG_Init receives NULL and v1
+        // modules keep working unchanged.
+        void setServices(const PGS_Services &s) { m_services = s; m_servicesReady = true; }
 
     private:
         // Resolved function-pointer types and runtime data for one loaded DLL.
@@ -135,6 +148,8 @@ namespace ProcessGuard
         std::vector<AllowEntry> m_allowlist;
         bool m_allowlistLoaded = false;
         bool m_permissive = false;
+        PGS_Services m_services{};
+        bool m_servicesReady = false;
         void loadAllowlist(const std::string &dir);
         const AllowEntry *findAllowEntry(const std::string &moduleKey) const;
         static std::string moduleKeyFromPath(const std::string &path);
