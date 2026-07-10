@@ -12,7 +12,9 @@ REM    - MSYS2 MinGW64 + Qt6 (for tools\package_release.bat)
 REM    - Inno Setup 6 at its default path (ISCC.exe)
 REM ===========================================================================
 
-set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+REM Use the 8.3 short path here. Expanding "Program Files (x86)" inside a
+REM parenthesized batch block can confuse cmd.exe because of the literal ")".
+set "ISCC=C:\Progra~2\Inno Setup 6\ISCC.exe"
 
 echo [1/3] Building + assembling release tree (tools\package_release.bat)...
 call tools\package_release.bat
