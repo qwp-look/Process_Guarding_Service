@@ -1,0 +1,129 @@
+name: publish-release
+
+on:
+  push:
+    branches: [codex/roadmap-sched-remote-cluster]
+    paths:
+      - .github/workflows/publish-release.yml
+      - installer/Output/**
+      - installer/pgs_installer.iss
+      - tools/build_installer.bat
+      - release/**
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-2025
+    env:
+      TAG_NAME: Personal_Version_V3.1.0
+      RELEASE_NAME: ProcessGuard Service 3.1.0
+      INSTALLER: installer/Output/pgs_setup_3.1.0.exe
+      RELEASE_ZIP: installer/Output/pgs_release_3.1.0.zip
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Publish GitHub release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = $env:TAG_NAME
+          $headers = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+            'User-Agent' = 'pgs-release-publisher'
+          }
+
+          foreach ($path in @($env:INSTALLER, $env:RELEASE_ZIP)) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Release asset missing: $path"
+            }
+          }
+
+          $installerHash = (Get-FileHash -LiteralPath $env:INSTALLER -Algorithm SHA256).Hash
+          $zipHash = (Get-FileHash -LiteralPath $env:RELEASE_ZIP -Algorithm SHA256).Hash
+          $body = @"
+          ProcessGuard Service 3.1.0 release.
+
+          Assets:
+          - pgs_setup_3.1.0.exe - installer, SHA256 $installerHash
+          - pgs_release_3.1.0.zip - portable release tree, SHA256 $zipHash
+
+          Includes:
+          - hardened admin web remote mode with TLS/RBAC/audit/CSRF gates
+          - hardened cluster dashboard with API token, HTTPS, node TLS verification, and safe registry handling
+          - split CI/unit scripts and refreshed self-contained release tree
+          - Qt/OpenSSL runtime closure and Inno Setup installer
+          "@
+
+          $release = $null
+          try {
+            $release = Invoke-RestMethod -Method Get `
+              -Uri "https://api.github.com/repos/$repo/releases/tags/$tag" `
+              -Headers $headers
+          } catch {
+            if ($_.Exception.Response.StatusCode.value__ -ne 404) {
+              throw
+            }
+          }
+
+          if (-not $release) {
+            $payload = @{
+              tag_name = $tag
+              name = $env:RELEASE_NAME
+              body = $body
+              draft = $false
+              prerelease = $false
+            } | ConvertTo-Json -Depth 5
+
+            $release = Invoke-RestMethod -Method Post `
+              -Uri "https://api.github.com/repos/$repo/releases" `
+              -Headers $headers `
+              -Body $payload `
+              -ContentType 'application/json'
+          } else {
+            $payload = @{
+              name = $env:RELEASE_NAME
+              body = $body
+              draft = $false
+              prerelease = $false
+            } | ConvertTo-Json -Depth 5
+
+            $release = Invoke-RestMethod -Method Patch `
+              -Uri "https://api.github.com/repos/$repo/releases/$($release.id)" `
+              -Headers $headers `
+              -Body $payload `
+              -ContentType 'application/json'
+          }
+
+          $assets = Invoke-RestMethod -Method Get `
+            -Uri "https://api.github.com/repos/$repo/releases/$($release.id)/assets" `
+            -Headers $headers
+
+          foreach ($asset in $assets) {
+            if ($asset.name -in @('pgs_setup_3.1.0.exe', 'pgs_release_3.1.0.zip')) {
+              Invoke-RestMethod -Method Delete -Uri $asset.url -Headers $headers | Out-Null
+            }
+          }
+
+          function Upload-Asset([string] $Path, [string] $ContentType) {
+            $name = [IO.Path]::GetFileName($Path)
+            $uploadUrl = $release.upload_url -replace '\{\?name,label\}$', ''
+            $uri = "$uploadUrl?name=$([uri]::EscapeDataString($name))"
+            Invoke-RestMethod -Method Post `
+              -Uri $uri `
+              -Headers $headers `
+              -InFile $Path `
+              -ContentType $ContentType | Out-Null
+          }
+
+          Upload-Asset $env:INSTALLER 'application/octet-stream'
+          Upload-Asset $env:RELEASE_ZIP 'application/zip'
+
+          "Published $($release.html_url)"
