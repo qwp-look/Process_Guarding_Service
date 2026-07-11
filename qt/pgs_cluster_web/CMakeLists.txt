@@ -14,6 +14,8 @@ set(PGS_CLUSTER_SOURCES
     src/main.cpp
     src/ClusterServer.h
     src/ClusterServer.cpp
+    ../common/SimpleHttp.h
+    ../common/SimpleHttp.cpp
 )
 
 qt_add_executable(pgs_cluster_web ${PGS_CLUSTER_SOURCES})

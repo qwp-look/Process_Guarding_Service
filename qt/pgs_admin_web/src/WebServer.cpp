@@ -1,11 +1,12 @@
 #include "WebServer.h"
 
+#include "../../common/SimpleHttp.h"
 #include <QCoreApplication>
+#include <QAbstractSocket>
 #include <QDir>
 #include <QFileInfo>
 #include <QHostAddress>
 #include <QHttpHeaders>
-#include <QHttpServer>
 #include <QHttpServerRequest>
 #include <QHttpServerResponse>
 #include <QJsonArray>
@@ -153,7 +154,7 @@ bool isUnsafeMethod(QHttpServerRequest::Method method)
            method == Method::Patch || method == Method::Delete;
 }
 
-bool isJsonRequest(const QHttpServerRequest &request)
+bool isJsonRequest(const PgsHttp::Request &request)
 {
     const QString contentType = request.value("Content-Type").trimmed().toLower();
     return contentType.startsWith(QLatin1String("application/json"));
@@ -198,7 +199,7 @@ QString auditField(QString value)
     return out;
 }
 
-QString expectedOriginFromHost(const QHttpServerRequest &request, bool https)
+QString expectedOriginFromHost(const PgsHttp::Request &request, bool https)
 {
     const QString host = request.value("Host").trimmed();
     if (host.isEmpty())
@@ -208,7 +209,7 @@ QString expectedOriginFromHost(const QHttpServerRequest &request, bool https)
     return QStringLiteral("%1://%2").arg(https ? QStringLiteral("https") : QStringLiteral("http"), host);
 }
 
-bool sameOriginBrowserHeaders(const QHttpServerRequest &request, bool https)
+bool sameOriginBrowserHeaders(const PgsHttp::Request &request, bool https)
 {
     const QString expectedOrigin = expectedOriginFromHost(request, https);
     if (expectedOrigin.isEmpty())
@@ -240,7 +241,7 @@ bool sameOriginBrowserHeaders(const QHttpServerRequest &request, bool https)
     return false;
 }
 
-bool authorizeRemoteCsrf(const QHttpServerRequest &request, const QString &csrfToken)
+bool authorizeRemoteCsrf(const PgsHttp::Request &request, const QString &csrfToken)
 {
     if (!isUnsafeMethod(request.method()))
     {
@@ -271,7 +272,7 @@ QSslKey parsePrivateKey(const QByteArray &keyData)
     return QSslKey();
 }
 
-QString sourceAddress(const QHttpServerRequest &request)
+QString sourceAddress(const PgsHttp::Request &request)
 {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
     return request.remoteAddress().toString();
@@ -390,7 +391,7 @@ int WebServer::roleRequired(const QString &route)
 }
 
 WebServer::WebServer(Options options, QObject *parent)
-    : QObject(parent), m_options(std::move(options)), m_server(new QHttpServer(this))
+    : QObject(parent), m_options(std::move(options)), m_server(new PgsHttp::Server(this))
 {
     // Generate one per-process browser secret. Local mode embeds it as the
     // X-PGS-Token API credential. Remote mode never embeds the PGS management
@@ -409,7 +410,7 @@ WebServer::WebServer(Options options, QObject *parent)
 // and Origin (when present) is the local listening origin (CSRF defense).
 // Because X-PGS-Token is a custom header, a cross-site fetch cannot set it
 // without a CORS preflight, which this server never grants.
-bool WebServer::isRequestAuthorized(const QHttpServerRequest &request) const
+bool WebServer::isRequestAuthorized(const PgsHttp::Request &request) const
 {
     const QString token = request.value("X-PGS-Token").trimmed();
     if (token.isEmpty() || token != m_apiToken)
@@ -453,6 +454,9 @@ QHttpServerResponse WebServer::handleIndexHtml() const
 bool WebServer::start()
 {
     using Method = QHttpServerRequest::Method;
+    const bool trace = !qgetenv("PGS_WEB_TRACE").isEmpty();
+    if (trace)
+        QTextStream(stderr) << "PGS web start entered\n" << Qt::flush;
     if (m_options.remote)
     {
         if (!loadUsers() || !setupTls())
@@ -474,7 +478,7 @@ bool WebServer::start()
         return false;
     }
 
-    auto authorizeApi = [this](const QHttpServerRequest &request, const QString &route, QString *outUser = nullptr) {
+    auto authorizeApi = [this](const PgsHttp::Request &request, const QString &route, QString *outUser = nullptr) {
         QString user;
         const bool authorized = m_options.remote
             ? (authenticateAndAuthorize(request, roleRequired(route), user) &&
@@ -495,31 +499,6 @@ bool WebServer::start()
         return true;
     };
 
-    // Routes are intentionally coarse-grained and JSON-oriented. The browser UI
-    // should consume stable HTTP resources, not the raw OK/ERR line protocol
-    // spoken by PGS itself.
-    m_server->route("/", Method::Get, this, [this, authorizeApi](const QHttpServerRequest &request) {
-        if (m_options.remote && !authorizeApi(request, "/"))
-            return jsonUnauthorized();
-        return handleIndexHtml();
-    });
-    m_server->route("/api/health", Method::Get, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/health")) return jsonUnauthorized(); return handleHealth(); });
-    m_server->route("/api/cluster/health", Method::Get, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/cluster/health")) return jsonUnauthorized(); return handleClusterHealth(); });
-    m_server->route("/api/ping", Method::Get, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/ping")) return jsonUnauthorized(); return handlePing(); });
-    m_server->route("/api/guards", Method::Get, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/guards")) return jsonUnauthorized(); return handleGuards(); });
-    m_server->route("/api/guard", Method::Get, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/guard")) return jsonUnauthorized(); return handleGuard(request); });
-    m_server->route("/api/bless", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/bless")) return jsonUnauthorized(); return handleBless(request); });
-    m_server->route("/api/bless-start", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/bless-start")) return jsonUnauthorized(); return handleBlessStart(request); });
-    m_server->route("/api/policy", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/policy")) return jsonUnauthorized(); return handlePolicy(request); });
-    m_server->route("/api/unbless", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/unbless")) return jsonUnauthorized(); return handleUnbless(request); });
-    m_server->route("/api/intentional", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/intentional")) return jsonUnauthorized(); return handleIntentional(request); });
-    m_server->route("/api/token", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/token")) return jsonUnauthorized(); return handleTokenUpdate(request); });
-    m_server->route("/api/service/status", Method::Get, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/service/status")) return jsonUnauthorized(); return handleServiceStatus(); });
-    m_server->route("/api/service/install", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/service/install")) return jsonUnauthorized(); return handleServiceAction("install"); });
-    m_server->route("/api/service/start", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/service/start")) return jsonUnauthorized(); return handleServiceAction("start"); });
-    m_server->route("/api/service/stop", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/service/stop")) return jsonUnauthorized(); return handleServiceAction("stop"); });
-    m_server->route("/api/service/uninstall", Method::Post, this, [this, authorizeApi](const QHttpServerRequest &request) { if (!authorizeApi(request, "/api/service/uninstall")) return jsonUnauthorized(); return handleServiceAction("uninstall"); });
-
     QTcpServer *listener = nullptr;
     if (m_options.remote)
     {
@@ -534,19 +513,130 @@ bool WebServer::start()
         listener = m_tcpServer;
     }
     const QHostAddress bindAddress = parseBindAddress(m_options.bindAddress);
+    if (trace)
+        QTextStream(stderr) << "PGS web parsed bind address " << bindAddress.toString() << "\n" << Qt::flush;
     if (bindAddress.isNull())
     {
         return false;
     }
+    if (trace && listener)
+    {
+        QObject::connect(listener, &QTcpServer::newConnection, this, []() {
+            QTextStream(stderr) << "PGS web listener newConnection\n" << Qt::flush;
+        });
+        QObject::connect(listener, &QTcpServer::acceptError, this, [](QAbstractSocket::SocketError error) {
+            QTextStream(stderr) << "PGS web listener acceptError=" << static_cast<int>(error) << "\n" << Qt::flush;
+        });
+    }
+    if (trace)
+        QTextStream(stderr) << "PGS web listen begin port=" << m_options.httpPort << "\n" << Qt::flush;
     if (!listener || !listener->listen(bindAddress, m_options.httpPort))
     {
         return false;
     }
-    if (!m_server->bind(listener))
+    if (trace)
+        QTextStream(stderr) << "PGS web listen ok\n" << Qt::flush;
+    if (trace)
+        QTextStream(stderr) << "PGS web binding routes\n" << Qt::flush;
+    if (!m_server->bind(listener, [this, authorizeApi](const PgsHttp::Request &request) {
+            using Method = QHttpServerRequest::Method;
+            const QString path = request.url().path();
+            if (path == QStringLiteral("/") && request.method() == Method::Get)
+            {
+                if (!qgetenv("PGS_WEB_TRACE").isEmpty())
+                    QTextStream(stderr) << "PGS web route / entered\n";
+                if (m_options.remote && !authorizeApi(request, "/"))
+                    return jsonUnauthorized();
+                return handleIndexHtml();
+            }
+            if (path == QStringLiteral("/api/health") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/health")) return jsonUnauthorized();
+                return handleHealth();
+            }
+            if (path == QStringLiteral("/api/cluster/health") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/cluster/health")) return jsonUnauthorized();
+                return handleClusterHealth();
+            }
+            if (path == QStringLiteral("/api/ping") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/ping")) return jsonUnauthorized();
+                return handlePing();
+            }
+            if (path == QStringLiteral("/api/guards") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/guards")) return jsonUnauthorized();
+                return handleGuards();
+            }
+            if (path == QStringLiteral("/api/guard") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/guard")) return jsonUnauthorized();
+                return handleGuard(request);
+            }
+            if (path == QStringLiteral("/api/bless") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/bless")) return jsonUnauthorized();
+                return handleBless(request);
+            }
+            if (path == QStringLiteral("/api/bless-start") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/bless-start")) return jsonUnauthorized();
+                return handleBlessStart(request);
+            }
+            if (path == QStringLiteral("/api/policy") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/policy")) return jsonUnauthorized();
+                return handlePolicy(request);
+            }
+            if (path == QStringLiteral("/api/unbless") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/unbless")) return jsonUnauthorized();
+                return handleUnbless(request);
+            }
+            if (path == QStringLiteral("/api/intentional") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/intentional")) return jsonUnauthorized();
+                return handleIntentional(request);
+            }
+            if (path == QStringLiteral("/api/token") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/token")) return jsonUnauthorized();
+                return handleTokenUpdate(request);
+            }
+            if (path == QStringLiteral("/api/service/status") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/service/status")) return jsonUnauthorized();
+                return handleServiceStatus();
+            }
+            if (path == QStringLiteral("/api/service/install") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/service/install")) return jsonUnauthorized();
+                return handleServiceAction("install");
+            }
+            if (path == QStringLiteral("/api/service/start") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/service/start")) return jsonUnauthorized();
+                return handleServiceAction("start");
+            }
+            if (path == QStringLiteral("/api/service/stop") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/service/stop")) return jsonUnauthorized();
+                return handleServiceAction("stop");
+            }
+            if (path == QStringLiteral("/api/service/uninstall") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/service/uninstall")) return jsonUnauthorized();
+                return handleServiceAction("uninstall");
+            }
+            return jsonError(QStringLiteral("not found"), 404);
+        }))
     {
         listener->close();
         return false;
     }
+    if (trace)
+        QTextStream(stderr) << "PGS web start complete\n" << Qt::flush;
     return true;
 }
 
@@ -604,7 +694,7 @@ bool WebServer::loadUsers()
 }
 
 // HTTP Basic auth: validate user+password and check the role meets the minimum.
-bool WebServer::authenticateAndAuthorize(const QHttpServerRequest &request, int requiredRole, QString &outUser)
+bool WebServer::authenticateAndAuthorize(const PgsHttp::Request &request, int requiredRole, QString &outUser)
 {
     const QString source = sourceAddress(request);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
@@ -689,7 +779,7 @@ void WebServer::audit(const QString &user, const QString &action, const QString 
     }
 }
 
-void WebServer::auditUser(const QHttpServerRequest &request, const QString &action)
+void WebServer::auditUser(const PgsHttp::Request &request, const QString &action)
 {
     QString user;
     if (m_options.remote && authenticateAndAuthorize(request, roleRequired(action), user))
@@ -795,7 +885,7 @@ QHttpServerResponse WebServer::handleGuards()
     return QHttpServerResponse(obj);
 }
 
-QHttpServerResponse WebServer::handleGuard(const QHttpServerRequest &request)
+QHttpServerResponse WebServer::handleGuard(const PgsHttp::Request &request)
 {
     const QString pid = request.query().queryItemValue("pid").trimmed();
     if (pid.isEmpty())
@@ -814,7 +904,7 @@ QHttpServerResponse WebServer::handleGuard(const QHttpServerRequest &request)
     return QHttpServerResponse(obj);
 }
 
-QHttpServerResponse WebServer::handleBless(const QHttpServerRequest &request)
+QHttpServerResponse WebServer::handleBless(const PgsHttp::Request &request)
 {
     const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
     const QString pid = bodyValue(body, "pid");
@@ -838,7 +928,7 @@ QHttpServerResponse WebServer::handleBless(const QHttpServerRequest &request)
     return jsonCommandResult(runTool(resolvedBlessToolPath(), args), "bless completed");
 }
 
-QHttpServerResponse WebServer::handleBlessStart(const QHttpServerRequest &request)
+QHttpServerResponse WebServer::handleBlessStart(const PgsHttp::Request &request)
 {
     const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
     const QString path = bodyValue(body, "path");
@@ -877,7 +967,7 @@ QHttpServerResponse WebServer::handleBlessStart(const QHttpServerRequest &reques
     return jsonCommandResult(runTool(resolvedBlessToolPath(), args), "bless-start completed");
 }
 
-QHttpServerResponse WebServer::handlePolicy(const QHttpServerRequest &request)
+QHttpServerResponse WebServer::handlePolicy(const PgsHttp::Request &request)
 {
     const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
     const QString pid = bodyValue(body, "pid");
@@ -893,7 +983,7 @@ QHttpServerResponse WebServer::handlePolicy(const QHttpServerRequest &request)
     return jsonCommandResult(runPgsDirect(wire), QStringLiteral("policy updated"));
 }
 
-QHttpServerResponse WebServer::handleUnbless(const QHttpServerRequest &request)
+QHttpServerResponse WebServer::handleUnbless(const PgsHttp::Request &request)
 {
     const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
     const QString path = bodyValue(body, "path");
@@ -914,7 +1004,7 @@ QHttpServerResponse WebServer::handleUnbless(const QHttpServerRequest &request)
     return jsonError("pid or path is required");
 }
 
-QHttpServerResponse WebServer::handleIntentional(const QHttpServerRequest &request)
+QHttpServerResponse WebServer::handleIntentional(const PgsHttp::Request &request)
 {
     const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
     const QString pid = bodyValue(body, "pid");
@@ -925,7 +1015,7 @@ QHttpServerResponse WebServer::handleIntentional(const QHttpServerRequest &reque
     return jsonCommandResult(runPgsDirect(QStringLiteral("intentional ") + pid), QStringLiteral("intentional exit marked"));
 }
 
-QHttpServerResponse WebServer::handleTokenUpdate(const QHttpServerRequest &request)
+QHttpServerResponse WebServer::handleTokenUpdate(const PgsHttp::Request &request)
 {
     const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
     const QString oldToken = bodyValue(body, "old_token");

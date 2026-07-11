@@ -6,12 +6,11 @@
 #include <QHash>
 #include <QByteArray>
 
-class QHttpServer;
-class QHttpServerRequest;
 class QHttpServerResponse;
 class QTcpServer;
 class QSslCertificate;
 class QSslKey;
+namespace PgsHttp { class Request; class Server; }
 
 class WebServer : public QObject
 {
@@ -66,18 +65,18 @@ private:
     QHttpServerResponse handleClusterHealth();
     QHttpServerResponse handlePing();
     QHttpServerResponse handleGuards();
-    QHttpServerResponse handleGuard(const QHttpServerRequest &request);
-    QHttpServerResponse handleBless(const QHttpServerRequest &request);
-    QHttpServerResponse handleBlessStart(const QHttpServerRequest &request);
-    QHttpServerResponse handlePolicy(const QHttpServerRequest &request);
-    QHttpServerResponse handleUnbless(const QHttpServerRequest &request);
-    QHttpServerResponse handleIntentional(const QHttpServerRequest &request);
-    QHttpServerResponse handleTokenUpdate(const QHttpServerRequest &request);
+    QHttpServerResponse handleGuard(const PgsHttp::Request &request);
+    QHttpServerResponse handleBless(const PgsHttp::Request &request);
+    QHttpServerResponse handleBlessStart(const PgsHttp::Request &request);
+    QHttpServerResponse handlePolicy(const PgsHttp::Request &request);
+    QHttpServerResponse handleUnbless(const PgsHttp::Request &request);
+    QHttpServerResponse handleIntentional(const PgsHttp::Request &request);
+    QHttpServerResponse handleTokenUpdate(const PgsHttp::Request &request);
     QHttpServerResponse handleServiceStatus();
     QHttpServerResponse handleServiceAction(const QString &action);
     QHttpServerResponse handleIndex() const;
     QHttpServerResponse handleIndexHtml() const;
-    bool isRequestAuthorized(const QHttpServerRequest &request) const;
+    bool isRequestAuthorized(const PgsHttp::Request &request) const;
 
     // Phase-1 implementation intentionally reuses pgs_bless/pgs_service as the
     // integration boundary. That keeps the browser console thin and lets it
@@ -96,7 +95,7 @@ private:
 
     Options m_options;
     QString m_apiToken;
-    QHttpServer *m_server = nullptr;
+    PgsHttp::Server *m_server = nullptr;
     QTcpServer *m_tcpServer = nullptr;
     class QSslServer *m_sslServer = nullptr;
     QSslCertificate *m_sslCert = nullptr;
@@ -110,8 +109,8 @@ private:
     class QFile *m_auditFile = nullptr;
     bool loadUsers();
     void audit(const QString &user, const QString &action, const QString &sourceIp);
-    void auditUser(const QHttpServerRequest &request, const QString &action);
-    bool authenticateAndAuthorize(const QHttpServerRequest &request, int requiredRole, QString &outUser);
+    void auditUser(const PgsHttp::Request &request, const QString &action);
+    bool authenticateAndAuthorize(const PgsHttp::Request &request, int requiredRole, QString &outUser);
     bool setupTls();
     static QByteArray saltHash(const QByteArray &salt, const QByteArray &password);
 };

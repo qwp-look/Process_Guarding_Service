@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QStringView>
 #include <QTextStream>
+#include <QTimer>
 
 namespace
 {
@@ -87,13 +88,27 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    if (!qgetenv("PGS_WEB_TRACE").isEmpty())
+    {
+        QTextStream(stderr) << "PGS web main parsed options\n" << Qt::flush;
+    }
     WebServer server(options);
+    if (!qgetenv("PGS_WEB_TRACE").isEmpty())
+    {
+        QTextStream(stderr) << "PGS web server constructed\n" << Qt::flush;
+    }
     if (!server.start())
     {
         QTextStream(stderr) << "Failed to listen on " << options.bindAddress << ":" << options.httpPort << "\n";
         return 1;
     }
 
-    QTextStream(stdout) << "PGS web console listening at " << server.listenUrl() << "\n";
+    if (!qgetenv("PGS_WEB_TRACE").isEmpty())
+    {
+        QTimer::singleShot(0, []() {
+            QTextStream(stderr) << "PGS web console event loop tick\n" << Qt::flush;
+        });
+    }
+    QTextStream(stdout) << "PGS web console listening at " << server.listenUrl() << "\n" << Qt::flush;
     return app.exec();
 }

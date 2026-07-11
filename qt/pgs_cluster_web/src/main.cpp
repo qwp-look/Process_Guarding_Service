@@ -15,6 +15,7 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QTextStream>
+#include <QTimer>
 
 int main(int argc, char *argv[])
 {
@@ -53,16 +54,30 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    if (!qgetenv("PGS_WEB_TRACE").isEmpty())
+    {
+        QTextStream(stderr) << "PGS cluster main parsed options\n" << Qt::flush;
+    }
     ClusterServer server(parser.value(nodesOption), parser.value(addressOption), port,
                          parser.value(apiTokenOption), parser.value(tlsCertOption),
                          parser.value(tlsKeyOption), parser.value(nodeCaCertOption),
                          parser.isSet(nodeInsecureTlsOption));
+    if (!qgetenv("PGS_WEB_TRACE").isEmpty())
+    {
+        QTextStream(stderr) << "PGS cluster server constructed\n" << Qt::flush;
+    }
     if (!server.start())
     {
         QTextStream(stderr) << "Failed to listen on " << parser.value(addressOption) << ':' << port
                             << " (invalid address, port in use, TLS error, node CA error, or non-loopback binding without explicit token+TLS)\n";
         return 1;
     }
-    QTextStream(stdout) << "PGS cluster dashboard listening at " << server.listenUrl() << "\n";
+    if (!qgetenv("PGS_WEB_TRACE").isEmpty())
+    {
+        QTimer::singleShot(0, []() {
+            QTextStream(stderr) << "PGS cluster dashboard event loop tick\n" << Qt::flush;
+        });
+    }
+    QTextStream(stdout) << "PGS cluster dashboard listening at " << server.listenUrl() << "\n" << Qt::flush;
     return app.exec();
 }

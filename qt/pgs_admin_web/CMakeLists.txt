@@ -14,6 +14,8 @@ qt_add_executable(pgs_admin_web
     src/main.cpp
     src/WebServer.h
     src/WebServer.cpp
+    ../common/SimpleHttp.h
+    ../common/SimpleHttp.cpp
     ../../src/common/PGSClient.cpp
 )
 

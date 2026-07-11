@@ -8,11 +8,10 @@
 #include <QStringList>
 #include <QTimer>
 
-class QHttpServer;
-class QHttpServerRequest;
 class QNetworkAccessManager;
 class QSslServer;
 class QTcpServer;
+namespace PgsHttp { class Request; class Server; }
 
 class ClusterServer : public QObject
 {
@@ -43,7 +42,7 @@ private:
     void saveNodes();
     void pollAll();
     void pollNode(const Node &node);
-    bool isApiAuthorized(const QHttpServerRequest &request) const;
+    bool isApiAuthorized(const PgsHttp::Request &request) const;
     bool requiresApiToken() const;
     bool setupTls();
     bool loadNodeCaCertificates();
@@ -51,8 +50,8 @@ private:
     // HTTP handlers
     class QHttpServerResponse handleDashboard() const;
     class QHttpServerResponse handleNodesList() const;
-    class QHttpServerResponse handleNodeAdd(const QHttpServerRequest &request);
-    class QHttpServerResponse handleNodeRemove(const QHttpServerRequest &request);
+    class QHttpServerResponse handleNodeAdd(const PgsHttp::Request &request);
+    class QHttpServerResponse handleNodeRemove(const PgsHttp::Request &request);
     class QHttpServerResponse handleSummary() const;
 
     QString m_nodesFile;
@@ -66,7 +65,7 @@ private:
     bool m_apiTokenGenerated = false;
     bool m_tlsEnabled = false;
     QList<QSslCertificate> m_nodeCaCertificates;
-    QHttpServer *m_server = nullptr;
+    PgsHttp::Server *m_server = nullptr;
     QNetworkAccessManager *m_nam = nullptr;
     QTcpServer *m_tcpServer = nullptr;
     QSslServer *m_sslServer = nullptr;
