@@ -59,8 +59,13 @@ jobs:
           Includes:
           - hardened admin web remote mode with TLS/RBAC/audit/CSRF gates
           - hardened cluster dashboard with API token, HTTPS, node TLS verification, and safe registry handling
-          - split CI/unit scripts and refreshed self-contained release tree
-          - Qt/OpenSSL runtime closure and Inno Setup installer
+          - lightweight Qt TCP HTTP shim for Windows VM response reliability
+          - refreshed self-contained release tree with Qt/OpenSSL runtime closure
+          - Inno Setup installer plus portable zip
+
+          Validation:
+          - unit tests and MSYS2 verify_pgs build
+          - VM release validation for portable zip, installer, service ping, web consoles, portable ping, and uninstall
           "@
 
           $release = $null
@@ -116,7 +121,7 @@ jobs:
           function Upload-Asset([string] $Path, [string] $ContentType) {
             $name = [IO.Path]::GetFileName($Path)
             $uploadUrl = $release.upload_url -replace '\{\?name,label\}$', ''
-            $uri = "$uploadUrl?name=$([uri]::EscapeDataString($name))"
+            $uri = "${uploadUrl}?name=$([uri]::EscapeDataString($name))"
             Invoke-RestMethod -Method Post `
               -Uri $uri `
               -Headers $headers `
