@@ -91,6 +91,7 @@ POST/DELETE 还要求 `Content-Type: application/json`。
 
 ## 6. 构建
 
-`qt/pgs_cluster_web/CMakeLists.txt` 已就绪，需 Qt 6.8+ Core/Network/HttpServer。`tools/build_qt_web.sh`
+`qt/pgs_cluster_web/CMakeLists.txt` 已就绪，需 Qt 6.8+ Core/Network/HttpServer；运行时 HTTP 接入由
+仓库内的轻量 QTcpServer 分发层承载，以避开 QtHttpServer 在部分 Windows VM 上只监听不响应的问题。`tools/build_qt_web.sh`
 会单独构建 `pgs_admin_web` 与 `pgs_cluster_web`；`tools/package_release.bat` 会把集群端、Qt runtime、
 OpenSSL TLS plugin 和必要的 MSYS2 MinGW DLL 一起放入 `release/`。

@@ -67,8 +67,9 @@ cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 ```
 
-`pgs_admin_web` 与 `pgs_cluster_web` 使用 Qt 6.8+ 的 `QtHttpServer` / `QHttpHeaders` /
-`QSslServer` API。MSYS2 当前 Qt 6.11 可直接构建：
+`pgs_admin_web` 与 `pgs_cluster_web` 使用 Qt 6.8+ 的 `QTcpServer` / `QHttpHeaders` /
+`QSslServer` API，并通过仓库内的轻量 HTTP/1.1 分发层承载浏览器 API；由于响应对象仍使用
+`QHttpServerResponse`/`QHttpHeaders`，构建环境仍需安装 Qt6 HttpServer 组件。MSYS2 当前 Qt 6.11 可直接构建：
 
 ```bash
 cmake -S qt/pgs_admin_web -B build/pgs_admin_web -G "MinGW Makefiles" \

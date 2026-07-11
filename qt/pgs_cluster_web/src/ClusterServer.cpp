@@ -11,11 +11,12 @@
  */
 #include "ClusterServer.h"
 
+#include "../../common/SimpleHttp.h"
+#include <QAbstractSocket>
 #include <QByteArray>
 #include <QDateTime>
 #include <QFile>
 #include <QHostAddress>
-#include <QHttpServer>
 #include <QHttpServerRequest>
 #include <QHttpServerResponse>
 #include <QJsonArray>
@@ -112,7 +113,7 @@ bool isUnsafeMethod(QHttpServerRequest::Method method)
            method == Method::Patch || method == Method::Delete;
 }
 
-bool isJsonRequest(const QHttpServerRequest &request)
+bool isJsonRequest(const PgsHttp::Request &request)
 {
     const QString contentType = request.value("Content-Type").trimmed().toLower();
     return contentType.startsWith(QLatin1String("application/json"));
@@ -181,7 +182,7 @@ ClusterServer::ClusterServer(QString nodesFile, QString listenAddress, quint16 l
     : QObject(parent), m_nodesFile(std::move(nodesFile)), m_listenAddress(std::move(listenAddress)), m_listenPort(listenPort),
       m_apiToken(std::move(apiToken)), m_tlsCertPath(std::move(tlsCertPath)), m_tlsKeyPath(std::move(tlsKeyPath)),
       m_nodeCaCertPath(std::move(nodeCaCertPath)), m_nodeInsecureTls(nodeInsecureTls),
-      m_server(new QHttpServer(this)), m_nam(new QNetworkAccessManager(this))
+      m_server(new PgsHttp::Server(this)), m_nam(new QNetworkAccessManager(this))
 {
     if (m_apiToken.isEmpty())
     {
@@ -199,7 +200,12 @@ ClusterServer::ClusterServer(QString nodesFile, QString listenAddress, quint16 l
 bool ClusterServer::start()
 {
     using Method = QHttpServerRequest::Method;
+    const bool trace = !qgetenv("PGS_WEB_TRACE").isEmpty();
+    if (trace)
+        QTextStream(stderr) << "PGS cluster start entered\n" << Qt::flush;
     const QHostAddress bindAddress = parseBindAddress(m_listenAddress);
+    if (trace)
+        QTextStream(stderr) << "PGS cluster parsed bind address " << bindAddress.toString() << "\n" << Qt::flush;
     if (bindAddress.isNull())
         return false;
     const bool remoteBind = !isLoopbackBindAddress(bindAddress);
@@ -210,32 +216,9 @@ bool ClusterServer::start()
     if (!loadNodeCaCertificates())
         return false;
 
-    m_server->route("/", Method::Get, this, [this]() { return handleDashboard(); });
-    m_server->route("/api/cluster/summary", Method::Get, this, [this](const QHttpServerRequest &req) {
-        if (!isApiAuthorized(req))
-            return jsonError(QStringLiteral("unauthorized"), 401);
-        return handleSummary();
-    });
-    m_server->route("/api/cluster/nodes", Method::Get, this, [this](const QHttpServerRequest &req) {
-        if (!isApiAuthorized(req))
-            return jsonError(QStringLiteral("unauthorized"), 401);
-        return handleNodesList();
-    });
-    m_server->route("/api/cluster/nodes", Method::Post, this, [this](const QHttpServerRequest &req) {
-        if (!isApiAuthorized(req))
-            return jsonError(QStringLiteral("unauthorized"), 401);
-        if (!isJsonRequest(req))
-            return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
-        return handleNodeAdd(req);
-    });
-    m_server->route("/api/cluster/nodes", Method::Delete, this, [this](const QHttpServerRequest &req) {
-        if (!isApiAuthorized(req))
-            return jsonError(QStringLiteral("unauthorized"), 401);
-        if (!isJsonRequest(req))
-            return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
-        return handleNodeRemove(req);
-    });
-    // QHttpServer uses QTcpServer/QSslServer + bind (same pattern as pgs_admin_web).
+    // The dashboard uses the local SimpleHttp shim over QTcpServer/QSslServer.
+    // This avoids QtHttpServer's Windows/minimal-runtime response stalls while
+    // keeping the handler layer in terms of QHttpServerResponse values.
     QTcpServer *listener = nullptr;
     if (m_tlsEnabled)
     {
@@ -246,13 +229,68 @@ bool ClusterServer::start()
         m_tcpServer = new QTcpServer(this);
         listener = m_tcpServer;
     }
+    if (trace && listener)
+    {
+        QObject::connect(listener, &QTcpServer::newConnection, this, []() {
+            QTextStream(stderr) << "PGS cluster listener newConnection\n" << Qt::flush;
+        });
+        QObject::connect(listener, &QTcpServer::acceptError, this, [](QAbstractSocket::SocketError error) {
+            QTextStream(stderr) << "PGS cluster listener acceptError=" << static_cast<int>(error) << "\n" << Qt::flush;
+        });
+    }
+    if (trace)
+        QTextStream(stderr) << "PGS cluster listen begin port=" << m_listenPort << "\n" << Qt::flush;
     if (!listener || !listener->listen(bindAddress, m_listenPort))
         return false;
-    if (!m_server->bind(listener))
+    if (trace)
+        QTextStream(stderr) << "PGS cluster listen ok\n" << Qt::flush;
+    if (trace)
+        QTextStream(stderr) << "PGS cluster binding routes\n" << Qt::flush;
+    if (!m_server->bind(listener, [this](const PgsHttp::Request &req) {
+            using Method = QHttpServerRequest::Method;
+            const QString path = req.url().path();
+            if (path == QStringLiteral("/") && req.method() == Method::Get)
+            {
+                if (!qgetenv("PGS_WEB_TRACE").isEmpty())
+                    QTextStream(stderr) << "PGS cluster route / entered\n";
+                return handleDashboard();
+            }
+            if (path == QStringLiteral("/api/cluster/summary") && req.method() == Method::Get)
+            {
+                if (!isApiAuthorized(req))
+                    return jsonError(QStringLiteral("unauthorized"), 401);
+                return handleSummary();
+            }
+            if (path == QStringLiteral("/api/cluster/nodes") && req.method() == Method::Get)
+            {
+                if (!isApiAuthorized(req))
+                    return jsonError(QStringLiteral("unauthorized"), 401);
+                return handleNodesList();
+            }
+            if (path == QStringLiteral("/api/cluster/nodes") && req.method() == Method::Post)
+            {
+                if (!isApiAuthorized(req))
+                    return jsonError(QStringLiteral("unauthorized"), 401);
+                if (!isJsonRequest(req))
+                    return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
+                return handleNodeAdd(req);
+            }
+            if (path == QStringLiteral("/api/cluster/nodes") && req.method() == Method::Delete)
+            {
+                if (!isApiAuthorized(req))
+                    return jsonError(QStringLiteral("unauthorized"), 401);
+                if (!isJsonRequest(req))
+                    return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
+                return handleNodeRemove(req);
+            }
+            return jsonError(QStringLiteral("not found"), 404);
+        }))
     {
         listener->close();
         return false;
     }
+    if (trace)
+        QTextStream(stderr) << "PGS cluster start complete\n" << Qt::flush;
     return true;
 }
 
@@ -269,7 +307,7 @@ bool ClusterServer::requiresApiToken() const
     return !m_apiToken.isEmpty();
 }
 
-bool ClusterServer::isApiAuthorized(const QHttpServerRequest &request) const
+bool ClusterServer::isApiAuthorized(const PgsHttp::Request &request) const
 {
     if (isUnsafeMethod(request.method()) && !isJsonRequest(request))
         return false;
@@ -488,7 +526,7 @@ QHttpServerResponse ClusterServer::handleNodesList() const
     return QHttpServerResponse(obj);
 }
 
-QHttpServerResponse ClusterServer::handleNodeAdd(const QHttpServerRequest &request)
+QHttpServerResponse ClusterServer::handleNodeAdd(const PgsHttp::Request &request)
 {
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
@@ -515,7 +553,7 @@ QHttpServerResponse ClusterServer::handleNodeAdd(const QHttpServerRequest &reque
     return QHttpServerResponse(QJsonObject{{"ok", true}, {"added", name}});
 }
 
-QHttpServerResponse ClusterServer::handleNodeRemove(const QHttpServerRequest &request)
+QHttpServerResponse ClusterServer::handleNodeRemove(const PgsHttp::Request &request)
 {
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())

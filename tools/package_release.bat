@@ -39,20 +39,18 @@ if not exist "%BUILD%\pgs_admin_qt\CMakeCache.txt" (
 cmake --build "%BUILD%\pgs_admin_qt" --config Release
 if errorlevel 1 ( echo ERROR: Qt build failed & popd & exit /b 1 )
 
-REM --- Web console (pgs_admin_web): Qt6 Core/Network/HttpServer ---
-if not exist "%BUILD%\pgs_admin_web\CMakeCache.txt" (
-    cmake -S qt\pgs_admin_web -B "%BUILD%\pgs_admin_web" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
-    if errorlevel 1 ( echo ERROR: cmake configure web failed & popd & exit /b 1 )
-)
-cmake --build "%BUILD%\pgs_admin_web" --config Release
+REM --- Web console (pgs_admin_web): Qt6 Core/Network + lightweight HTTP shim ---
+cmake -S qt\pgs_admin_web -B "%BUILD%\pgs_admin_web" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+if errorlevel 1 ( echo ERROR: cmake configure web failed & popd & exit /b 1 )
+if exist "%BUILD%\pgs_admin_web\CMakeFiles\pgs_admin_web.dir\objects.a" del /f /q "%BUILD%\pgs_admin_web\CMakeFiles\pgs_admin_web.dir\objects.a" >nul 2>&1
+cmake --build "%BUILD%\pgs_admin_web" --config Release --clean-first
 if errorlevel 1 ( echo ERROR: Qt web build failed & popd & exit /b 1 )
 
-REM --- Cluster web dashboard (pgs_cluster_web): Qt6 Core/Network/HttpServer ---
-if not exist "%BUILD%\pgs_cluster_web\CMakeCache.txt" (
-    cmake -S qt\pgs_cluster_web -B "%BUILD%\pgs_cluster_web" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
-    if errorlevel 1 ( echo ERROR: cmake configure cluster web failed & popd & exit /b 1 )
-)
-cmake --build "%BUILD%\pgs_cluster_web" --config Release
+REM --- Cluster web dashboard (pgs_cluster_web): Qt6 Core/Network + lightweight HTTP shim ---
+cmake -S qt\pgs_cluster_web -B "%BUILD%\pgs_cluster_web" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+if errorlevel 1 ( echo ERROR: cmake configure cluster web failed & popd & exit /b 1 )
+if exist "%BUILD%\pgs_cluster_web\CMakeFiles\pgs_cluster_web.dir\objects.a" del /f /q "%BUILD%\pgs_cluster_web\CMakeFiles\pgs_cluster_web.dir\objects.a" >nul 2>&1
+cmake --build "%BUILD%\pgs_cluster_web" --config Release --clean-first
 if errorlevel 1 ( echo ERROR: Qt cluster web build failed & popd & exit /b 1 )
 
 echo [3/6] Assemble release tree...
@@ -88,7 +86,7 @@ copy /Y "README.md"                   "%RELEASE%\" >nul
 
 echo [4/6] Deploy Qt6 DLLs + plugins (windeployqt6)...
 "%MINGW%\windeployqt6.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw "%RELEASE%\pgs_admin_qt.exe" >nul 2>&1
-REM pgs_admin_web pulls Qt6HttpServer (+transitive Qt6WebSockets) into the shared release tree.
+REM pgs_admin_web still links Qt6HttpServer for response/header helpers; HTTP I/O is handled by the local QTcpServer shim.
 "%MINGW%\windeployqt6.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw "%RELEASE%\pgs_admin_web.exe" >nul 2>&1
 REM pgs_cluster_web shares the same Qt runtime closure but has its own executable.
 "%MINGW%\windeployqt6.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw "%RELEASE%\pgs_cluster_web.exe" >nul 2>&1

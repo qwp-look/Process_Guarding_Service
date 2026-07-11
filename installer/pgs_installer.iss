@@ -29,7 +29,7 @@ AppPublisher={#PGSAppPublisher}
 DefaultDirName={autopf}\ProcessGuard
 DefaultGroupName=ProcessGuard
 DisableProgramGroupPage=yes
-OutputDir=installer\Output
+OutputDir=Output
 OutputBaseFilename=pgs_setup_{#PGSAppVersion}
 Compression=lzma2
 SolidCompression=yes
@@ -124,4 +124,3 @@ begin
     end;
   end;
 end;
-
