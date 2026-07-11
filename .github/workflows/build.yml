@@ -13,8 +13,9 @@ jobs:
       - uses: actions/checkout@v5
 
       # Cache only the compile-critical parts of the installed MinGW64
-      # toolchain plus Qt's runtime metadata. Qt CMake targets reference
-      # share/qt6 plugin/metatype files, so cache hits must restore it too.
+      # toolchain plus CMake/Qt runtime metadata. CMake itself needs
+      # share/cmake modules at runtime; Qt CMake targets also reference
+      # share/qt6 plugin/metatype files, so cache hits must restore both.
       - name: Cache MinGW64 toolchain
         id: mingw-cache
         uses: actions/cache@v4
@@ -24,13 +25,24 @@ jobs:
             C:\msys64\mingw64\lib
             C:\msys64\mingw64\include
             C:\msys64\mingw64\x86_64-w64-mingw32
+            C:\msys64\mingw64\share\cmake
             C:\msys64\mingw64\share\qt6
-          key: msys2-mingw64-installed-${{ runner.os }}-v4
+          key: msys2-mingw64-installed-${{ runner.os }}-v5
 
       - name: Install MinGW64 toolchain
-        if: steps.mingw-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
+          $needsInstall = '${{ steps.mingw-cache.outputs.cache-hit }}' -ne 'true'
+          if (-not $needsInstall) {
+            & 'C:\msys64\mingw64\bin\cmake.exe' --version
+            if ($LASTEXITCODE -ne 0) { $needsInstall = $true }
+          }
+          if (-not (Test-Path 'C:\msys64\mingw64\share\cmake\Modules\CMake.cmake')) { $needsInstall = $true }
+          if (-not (Test-Path 'C:\msys64\mingw64\share\qt6')) { $needsInstall = $true }
+          if (-not $needsInstall) {
+            'MinGW64 toolchain cache is complete.'
+            return
+          }
           & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-httpserver mingw-w64-x86_64-qt6-websockets mingw-w64-x86_64-qt6-tools'
 
       - name: Build C++ core, CLI and examples
