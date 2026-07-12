@@ -18,16 +18,16 @@ token，跨站页面无法读取它或用 simple request 写节点注册表。
 如果要绑定非回环地址，必须同时提供 API token 与 HTTPS 证书/私钥；否则拒绝启动：
 
 ```bat
+set PGS_CLUSTER_API_TOKEN=<dashboard-token>
 pgs_cluster_web.exe ^
   --listen-address 0.0.0.0 ^
   --listen-port 19090 ^
   --nodes-file pgs_cluster_nodes.txt ^
-  --api-token <dashboard-token> ^
   --tls-cert cert.pem ^
   --tls-key key.pem
 ```
 
-远程浏览器访问首页 `/` 和 API 时都需要 token。API 可用 `X-API-Token: <dashboard-token>`、`Authorization: Bearer <dashboard-token>`，浏览器直开首页时也可使用 Basic challenge：用户名任意，密码填 `<dashboard-token>`。内置页面会把输入的 token 存在浏览器 `localStorage`，仅用于访问 cluster dashboard 自身 API，不会发给被管理节点。
+`--api-token <dashboard-token>` 仍保留为兼容参数。远程浏览器访问首页 `/` 和 API 时都需要 token。API 可用 `X-API-Token: <dashboard-token>`、`Authorization: Bearer <dashboard-token>`，浏览器直开首页时也可使用 Basic challenge：用户名任意，密码填 `<dashboard-token>`。内置页面会把输入的 token 存在浏览器 `sessionStorage`，仅用于访问 cluster dashboard 自身 API，不会发给被管理节点。
 
 节点 HTTPS 证书默认严格校验。若 PGS 节点使用私有 CA，可给聚合器传入 CA：
 

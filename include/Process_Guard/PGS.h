@@ -166,6 +166,7 @@ namespace ProcessGuard
         // Small fixed-size worker pool because request traffic is low-volume and
         // command-oriented; dynamic thread-per-connection would be unnecessary.
         static constexpr std::size_t kClientWorkerCount = 4;
+        static constexpr std::size_t kMaxClientQueueSize = 64;
         static constexpr int kDefaultMaxRestarts = 3;
         // v3 policy defaults (all preserve legacy behaviour when untouched).
         static constexpr int kDefaultRestartWindowSec = 0; // 0 = lifetime count
@@ -241,6 +242,10 @@ namespace ProcessGuard
         void handleClient(SOCKET clientSocket);
 
         std::string processMessage(const std::string &message);
+        // Dispatch a command after authentication has already been handled.
+        // TCP clients must go through processMessage(); ABI v2 module callbacks
+        // use this path so they do not need to know the operator token.
+        std::string dispatchCommandLine(const std::string &commandLine);
         // "module list|load|unload|call" sub-protocol handler.
         std::string handleModuleCommand(const std::string &args);
         // "ppl set|get|clear" convenience wrapper that routes to the ppl module.
@@ -248,7 +253,7 @@ namespace ProcessGuard
         // Resolve <pgs_service.exe dir>\modules for the plugin scan.
         static std::string moduleDirectoryOfSelf();
         // ABI v2 thunks: let modules call back into PGS via PGS_Services.
-        // callThunk routes a line-protocol command to processMessage;
+        // callThunk routes a trusted in-process command to dispatchCommandLine;
         // nowMsThunk returns epoch millis for schedule arithmetic.
         static int callThunk(void *context, const char *request, char *response, size_t responseSize);
         static long long nowMsThunk(void *context);

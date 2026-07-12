@@ -34,6 +34,28 @@
 #include <QFile>
 #include <QApplication>
 
+namespace
+{
+QStringList redactedArgsForLog(QStringList args)
+{
+    static const QStringList sensitiveFlags{
+        QStringLiteral("--token"),
+        QStringLiteral("--old-token"),
+        QStringLiteral("--new-token"),
+        QStringLiteral("--service-password")
+    };
+    for (int i = 0; i + 1 < args.size(); ++i)
+    {
+        if (sensitiveFlags.contains(args.at(i)))
+        {
+            args[i + 1] = QStringLiteral("<redacted>");
+            ++i;
+        }
+    }
+    return args;
+}
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       m_blessProcess(new QProcess(this)),
@@ -217,6 +239,7 @@ void MainWindow::setupUi()
     m_labelToken = new QLabel(connectionBox);
     connectionLayout->addWidget(m_labelToken, 2, 0);
     m_tokenEdit = new QLineEdit(connectionBox);
+    m_tokenEdit->setEchoMode(QLineEdit::Password);
     connectionLayout->addWidget(m_tokenEdit, 2, 1);
 
     m_labelLanguage = new QLabel(connectionBox);
@@ -234,12 +257,13 @@ void MainWindow::setupUi()
     connectionLayout->addWidget(m_themeCombo, 4, 1);
 
     m_labelNewToken = new QLabel(connectionBox);
-    connectionLayout->addWidget(m_labelNewToken, 4, 0);
+    connectionLayout->addWidget(m_labelNewToken, 5, 0);
     m_newTokenEdit = new QLineEdit(connectionBox);
-    connectionLayout->addWidget(m_newTokenEdit, 4, 1);
+    m_newTokenEdit->setEchoMode(QLineEdit::Password);
+    connectionLayout->addWidget(m_newTokenEdit, 5, 1);
 
     m_jsonCheck = new QCheckBox(connectionBox);
-    connectionLayout->addWidget(m_jsonCheck, 5, 1);
+    connectionLayout->addWidget(m_jsonCheck, 6, 1);
 
     auto *targetBox = new QGroupBox(blessPage);
     auto *targetLayout = new QGridLayout(targetBox);
@@ -326,6 +350,7 @@ void MainWindow::setupUi()
     m_labelServiceToken = new QLabel(serviceBox);
     serviceGrid->addWidget(m_labelServiceToken, 2, 0);
     m_serviceTokenEdit = new QLineEdit(serviceBox);
+    m_serviceTokenEdit->setEchoMode(QLineEdit::Password);
     serviceGrid->addWidget(m_serviceTokenEdit, 2, 1);
 
     auto *serviceRow1 = new QHBoxLayout();
@@ -378,6 +403,7 @@ void MainWindow::setupUi()
     m_labelTableToken = new QLabel(tableConfigBox);
     tableGrid->addWidget(m_labelTableToken, 2, 0);
     m_tableTokenEdit = new QLineEdit(tableConfigBox);
+    m_tableTokenEdit->setEchoMode(QLineEdit::Password);
     tableGrid->addWidget(m_tableTokenEdit, 2, 1);
 
     m_labelTableInterval = new QLabel(tableConfigBox);
@@ -573,11 +599,6 @@ void MainWindow::setupUi()
     });
     connect(m_btnServiceRun, &QPushButton::clicked, this, [this]() {
         QStringList args{"run"};
-        const QString token = m_serviceTokenEdit->text();
-        if (!token.isEmpty())
-        {
-            args << "--token" << token;
-        }
         runServiceCommand(args);
     });
     connect(m_btnServiceRunStop, &QPushButton::clicked, this, [this]() {
@@ -777,7 +798,7 @@ void MainWindow::applyLanguage()
     m_launchArgsEdit->setPlaceholderText(trUi("--flag value", "--参数 值"));
     m_launchCommandEdit->setPlaceholderText(trUi("\"C:/app.exe\" --arg1 x", "\"C:/程序.exe\" --参数 值"));
     m_newTokenEdit->setPlaceholderText(trUi("new token", "新 token"));
-    m_serviceTokenEdit->setPlaceholderText(trUi("used by run --token", "用于 run --token"));
+    m_serviceTokenEdit->setPlaceholderText(trUi("used by PGS_SERVICE_TOKEN", "用于 PGS_SERVICE_TOKEN"));
 
     m_btnPing->setText(trUi("Ping", "探活"));
     m_btnList->setText(trUi("List", "列表"));
@@ -825,6 +846,7 @@ void MainWindow::setupModuleTab(QWidget *page)
     m_labelModuleToken = new QLabel(cfgBox);
     cfgGrid->addWidget(m_labelModuleToken, 2, 0);
     m_moduleTokenEdit = new QLineEdit(cfgBox);
+    m_moduleTokenEdit->setEchoMode(QLineEdit::Password);
     cfgGrid->addWidget(m_moduleTokenEdit, 2, 1);
 
     m_labelModuleDir = new QLabel(cfgBox);
@@ -927,7 +949,7 @@ void MainWindow::runBlessCommand(const QStringList &args)
         env.insert(QStringLiteral("PGS_AUTH_TOKEN"), token);
     }
 
-    appendBlessOutput(">>> " + program + " " + finalArgs.join(' '));
+    appendBlessOutput(">>> " + program + " " + redactedArgsForLog(finalArgs).join(' '));
     m_blessProcess->setWorkingDirectory(QFileInfo(program).absolutePath());
     m_blessProcess->setProcessEnvironment(env);
     m_blessProcess->start(program, finalArgs);
@@ -957,10 +979,20 @@ void MainWindow::runServiceCommand(const QStringList &args)
         return;
     }
 
-    appendServiceOutput(">>> " + program + " " + args.join(' '));
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    if (!args.isEmpty() && args.first() == "run")
+    {
+        const QString token = m_serviceTokenEdit->text();
+        if (!token.isEmpty())
+        {
+            env.insert(QStringLiteral("PGS_SERVICE_TOKEN"), token);
+        }
+    }
+
+    appendServiceOutput(">>> " + program + " " + redactedArgsForLog(args).join(' '));
     m_serviceRunModeActive = (!args.isEmpty() && args.first() == "run");
     m_serviceProcess->setWorkingDirectory(QFileInfo(program).absolutePath());
-    m_serviceProcess->setProcessEnvironment(QProcessEnvironment::systemEnvironment());
+    m_serviceProcess->setProcessEnvironment(env);
     m_serviceProcess->start(program, args);
 }
 

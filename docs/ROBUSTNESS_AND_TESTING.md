@@ -246,7 +246,7 @@ C++ 主线构建、core unit、sched cron unit、smoke test、Qt Web 构建拆�
 
 当前烟测覆盖：
 
-- `pgs_service.exe run --token ...` 启动
+- `PGS_SERVICE_TOKEN=... pgs_service.exe run` 启动
 - `pgs_bless ping`
 - `pgs_bless list --json`
 - `token-set` 在线切换 token

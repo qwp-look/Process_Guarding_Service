@@ -63,32 +63,6 @@ bool isSha256Hex(const std::string &value)
     return true;
 }
 
-bool applyRestrictedDacl(const std::wstring &path, bool containerInherit)
-{
-    if (path.empty())
-    {
-        return false;
-    }
-    PSECURITY_DESCRIPTOR psd = nullptr;
-    ULONG sdSize = 0;
-    const wchar_t *sddl = containerInherit
-        ? L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
-        : L"D:P(A;;FA;;;SY)(A;;FA;;;BA)";
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &psd, &sdSize) || !psd)
-    {
-        return false;
-    }
-    BOOL daclPresent = FALSE;
-    BOOL daclDefaulted = FALSE;
-    PACL dacl = nullptr;
-    GetSecurityDescriptorDacl(psd, &daclPresent, &dacl, &daclDefaulted);
-    const DWORD rc = SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
-                                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                           nullptr, nullptr, dacl, nullptr);
-    LocalFree(psd);
-    return rc == ERROR_SUCCESS;
-}
-
 bool secureModulesTree(const std::string &modulesDir)
 {
     if (modulesDir.empty() || !ProcessGuard::util::secureCreateDirectory(modulesDir))
@@ -119,7 +93,7 @@ bool secureModulesTree(const std::string &modulesDir)
         }
         else if (it->is_regular_file(typeEc))
         {
-            if (!applyRestrictedDacl(ProcessGuard::util::utf8ToWide(path.string()), false))
+            if (!ProcessGuard::util::secureApplyDacl(path.string(), false))
             {
                 return false;
             }
@@ -224,8 +198,8 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     }
 
     // Ensure the data root (logs + state) is created with a restrictive DACL
-    // (SYSTEM + Administrators only) so the persisted token hash and guard
-    // archive are not world-readable under ProgramData.
+    // (SYSTEM + Administrators + current runtime identity) so persisted secrets
+    // are not world-readable while console/dev runs can still write their files.
     {
         std::filesystem::path statePath = std::filesystem::path(defaultStateFilePath(logFilePath));
         std::filesystem::path stateDir = statePath.parent_path();
@@ -1132,11 +1106,25 @@ void PGS::listenerLoop()
             }
             continue;
         }
+        bool queued = false;
         {
             std::lock_guard<std::mutex> lock(m_clientQueueMutex);
-            m_clientQueue.push(clientSocket);
+            if (m_clientQueue.size() < kMaxClientQueueSize)
+            {
+                m_clientQueue.push(clientSocket);
+                queued = true;
+            }
         }
-        m_clientQueueCv.notify_one();
+        if (queued)
+        {
+            m_clientQueueCv.notify_one();
+        }
+        else
+        {
+            Logger::warning("PGS: client queue full, rejecting connection");
+            sendAll(clientSocket, "ERR server busy\n");
+            closesocket(clientSocket);
+        }
     }
 }
 
@@ -1963,10 +1951,11 @@ int PGS::callThunk(void *context, const char *request, char *response, size_t re
     {
         return 1;
     }
-    // processMessage is the same entry point the TCP worker pool uses, so a
-    // module call-back sees identical semantics to a real client (auth envelope
-    // already stripped by the caller; PGS_Call sends raw wire commands).
-    std::string resp = self->processMessage(request ? request : "");
+    // Module callbacks run in-process after the module itself has passed the
+    // allowlist/signature gate, so they do not know or carry the operator token.
+    // Keep external TCP auth in processMessage() and route trusted callbacks to
+    // the authenticated command dispatcher directly.
+    std::string resp = self->dispatchCommandLine(request ? request : "");
     size_t n = resp.size();
     if (n >= responseSize)
     {
@@ -2063,22 +2052,10 @@ bool PGS::writeInitialTokenFile(const std::string &stateDir, const std::string &
     out.flush();
     out.close();
 
-    // Apply the same restrictive DACL to the file (SYSTEM + Administrators).
-    const std::wstring wpath = utf8ToWide(filePath.string());
-    PSECURITY_DESCRIPTOR psd = nullptr;
-    ULONG sdSize = 0;
-    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &psd, &sdSize) &&
-        psd)
+    // Apply the same protected DACL to the file as the state directory.
+    if (!util::secureApplyDacl(filePath.string(), false))
     {
-        BOOL daclPresent = FALSE;
-        BOOL daclDefaulted = FALSE;
-        PACL dacl = nullptr;
-        GetSecurityDescriptorDacl(psd, &daclPresent, &dacl, &daclDefaulted);
-        SetNamedSecurityInfoW(const_cast<LPWSTR>(wpath.c_str()), SE_FILE_OBJECT,
-                              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                              nullptr, nullptr, dacl, nullptr);
-        LocalFree(psd);
+        Logger::warning("PGS: failed to secure bootstrap token file ACL: " + filePath.string());
     }
     return true;
 }
