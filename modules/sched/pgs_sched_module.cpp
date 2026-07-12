@@ -27,6 +27,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -215,7 +216,7 @@ namespace
         return "pgs_sched.db";
     }
 
-    void persistSchedules()
+    void persistSchedulesLocked()
     {
         std::string path = g_dbPath;
         std::string tmp = path + ".tmp";
@@ -223,7 +224,6 @@ namespace
         if (!out.is_open())
             return;
         out << "# PGS schedule db v1\n";
-        std::lock_guard<std::mutex> lock(g_mtx);
         for (const auto &p : g_schedules)
         {
             const Schedule &s = p.second;
@@ -237,7 +237,16 @@ namespace
         }
         out.close();
         // Atomic replace
-        MoveFileA(tmp.c_str(), path.c_str());
+        if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            std::cerr << "PGS sched: failed to replace db file: " << path << "\n";
+        }
+    }
+
+    void persistSchedules()
+    {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        persistSchedulesLocked();
     }
 
     void loadSchedules()
@@ -285,6 +294,8 @@ namespace
                 continue;
             s.expr = f[2];
             s.action = f[3];
+            if (!isActionAllowed(s.action))
+                continue;
             s.enabled = (f[4] == "1");
             if (!parseInt(f[5], lastRun))
                 continue;
@@ -603,8 +614,8 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
         {
             std::lock_guard<std::mutex> lock(g_mtx);
             g_schedules[s.id] = s;
+            persistSchedulesLocked();
         }
-        persistSchedules();
         setResponse(responseBuf, responseBufSize, "OK added id=" + std::to_string(s.id) + " next_run_ms=" + std::to_string(s.nextRunMs));
         return 0;
     }
@@ -648,7 +659,7 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
             setResponse(responseBuf, responseBufSize, "ERR no such schedule id");
             return 1;
         }
-        persistSchedules();
+        persistSchedulesLocked();
         setResponse(responseBuf, responseBufSize, "OK removed id=" + std::to_string(id));
         return 0;
     }
@@ -679,7 +690,7 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
         {
             it->second.nextRunMs = 0;
         }
-        persistSchedules();
+        persistSchedulesLocked();
         setResponse(responseBuf, responseBufSize, "OK " + op + "d id=" + std::to_string(id));
         return 0;
     }

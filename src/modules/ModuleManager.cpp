@@ -36,6 +36,16 @@
 namespace ProcessGuard
 {
 
+    namespace
+    {
+        thread_local std::vector<const void *> g_invokeRuntimeStack;
+
+        bool runtimeOnCurrentInvokeStack(const void *runtime)
+        {
+            return std::find(g_invokeRuntimeStack.begin(), g_invokeRuntimeStack.end(), runtime) != g_invokeRuntimeStack.end();
+        }
+    } // namespace
+
 
     ModuleManager::ModuleManager() = default;
 
@@ -43,15 +53,32 @@ namespace ProcessGuard
     // matter; modules must not call back into PGS during shutdown.
     ModuleManager::~ModuleManager()
     {
-        std::unique_lock<std::shared_mutex> lock(m_mutex);
-        for (Entry &e : m_modules)
+        std::vector<Entry> entries;
         {
+            std::unique_lock<std::shared_mutex> lock(m_mutex);
+            for (Entry &e : m_modules)
+            {
+                if (e.runtime)
+                {
+                    std::lock_guard<std::mutex> rtLock(e.runtime->mutex);
+                    e.runtime->unloading = true;
+                }
+            }
+            entries = std::move(m_modules);
+            m_modules.clear();
+        }
+        for (Entry &e : entries)
+        {
+            if (e.runtime)
+            {
+                std::unique_lock<std::mutex> rtLock(e.runtime->mutex);
+                e.runtime->cv.wait(rtLock, [&e]() { return e.runtime->activeInvokes == 0; });
+            }
             if (e.shutdown)
                 e.shutdown();
             if (e.handle)
                 FreeLibrary(e.handle);
         }
-        m_modules.clear();
     }
 
     // ASCII lowercase for case-insensitive module-name keys. Module names are
@@ -141,7 +168,9 @@ namespace ProcessGuard
         // Resolve every export. PG_GetName + PG_Invoke are mandatory; the rest
         // are optional (NULL-safe). Cast via void* to silence -Wcast-function-type.
         Entry e{};
+        e.path = path;
         e.handle = handle;
+        e.runtime = std::make_shared<Entry::RuntimeState>();
         e.getName = reinterpret_cast<const char *(*)(void)>(reinterpret_cast<void *>(GetProcAddress(handle, "PG_GetName")));
         e.getVersion = reinterpret_cast<const char *(*)(void)>(reinterpret_cast<void *>(GetProcAddress(handle, "PG_GetVersion")));
         e.getAbiVersion = reinterpret_cast<unsigned int (*)(void)>(reinterpret_cast<void *>(GetProcAddress(handle, "PG_GetAbiVersion")));
@@ -220,24 +249,62 @@ namespace ProcessGuard
     bool ModuleManager::unload(const std::string &name, std::string &err)
     {
         const std::string key = lower(name);
-        std::unique_lock<std::shared_mutex> lock(m_mutex);
-        for (auto it = m_modules.begin(); it != m_modules.end(); ++it)
+        std::shared_ptr<Entry::RuntimeState> runtime;
         {
-            if (lower(it->name) == key)
+            std::shared_lock<std::shared_mutex> lock(m_mutex);
+            for (const Entry &e : m_modules)
             {
-                // Erase from the table first so a (theoretical) re-entrant call
-                // cannot double-unload, then release the DLL.
-                if (it->shutdown)
-                    it->shutdown();
-                HMODULE handle = it->handle;
-                m_modules.erase(it);
-                if (handle)
-                    FreeLibrary(handle);
-                return true;
+                if (lower(e.name) == key)
+                {
+                    runtime = e.runtime;
+                    break;
+                }
             }
         }
-        err = "module not found: " + name;
-        return false;
+        if (!runtime)
+        {
+            err = "module not found: " + name;
+            return false;
+        }
+        if (runtimeOnCurrentInvokeStack(runtime.get()))
+        {
+            err = "module cannot unload itself during invoke: " + name;
+            return false;
+        }
+
+        Entry entry{};
+        {
+            std::unique_lock<std::shared_mutex> lock(m_mutex);
+            for (auto it = m_modules.begin(); it != m_modules.end(); ++it)
+            {
+                if (lower(it->name) == key)
+                {
+                    if (it->runtime)
+                    {
+                        std::lock_guard<std::mutex> rtLock(it->runtime->mutex);
+                        it->runtime->unloading = true;
+                    }
+                    entry = std::move(*it);
+                    m_modules.erase(it);
+                    break;
+                }
+            }
+        }
+        if (!entry.handle)
+        {
+            err = "module not found: " + name;
+            return false;
+        }
+        if (entry.runtime)
+        {
+            std::unique_lock<std::mutex> rtLock(entry.runtime->mutex);
+            entry.runtime->cv.wait(rtLock, [&entry]() { return entry.runtime->activeInvokes == 0; });
+        }
+        if (entry.shutdown)
+            entry.shutdown();
+        if (entry.handle)
+            FreeLibrary(entry.handle);
+        return true;
     }
 
     // Scan <dir> for modules: load loose *.dll directly under <dir> AND descend
@@ -352,21 +419,71 @@ namespace ProcessGuard
                                std::string &response, std::string &err)
     {
         const std::string key = lower(name);
-        std::shared_lock<std::shared_mutex> lock(m_mutex);
-        for (const Entry &e : m_modules)
+        int (*invokeFn)(const char *, char *, size_t) = nullptr;
+        std::shared_ptr<Entry::RuntimeState> runtime;
         {
-            if (lower(e.name) == key)
+            std::shared_lock<std::shared_mutex> lock(m_mutex);
+            for (const Entry &e : m_modules)
             {
-                std::vector<char> buf(8192, '\0');
-                const int rc = e.invoke(request.c_str(), buf.data(), buf.size());
-                response.assign(buf.data());
-                if (rc != 0 && response.empty())
-                    response = "ERR module invoke failed rc=" + std::to_string(rc);
-                return true;
+                if (lower(e.name) == key)
+                {
+                    invokeFn = e.invoke;
+                    runtime = e.runtime;
+                    break;
+                }
             }
         }
-        err = "module not found: " + name;
-        return false;
+        if (!invokeFn || !runtime)
+        {
+            err = "module not found: " + name;
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> rtLock(runtime->mutex);
+            if (runtime->unloading)
+            {
+                err = "module unloading: " + name;
+                return false;
+            }
+            ++runtime->activeInvokes;
+        }
+
+        g_invokeRuntimeStack.push_back(runtime.get());
+        struct ActiveInvokeGuard
+        {
+            std::shared_ptr<Entry::RuntimeState> runtime;
+            ~ActiveInvokeGuard()
+            {
+                if (!runtime)
+                {
+                    return;
+                }
+                std::lock_guard<std::mutex> rtLock(runtime->mutex);
+                --runtime->activeInvokes;
+                runtime->cv.notify_all();
+                if (!g_invokeRuntimeStack.empty() && g_invokeRuntimeStack.back() == runtime.get())
+                {
+                    g_invokeRuntimeStack.pop_back();
+                }
+                else
+                {
+                    const auto it = std::find(g_invokeRuntimeStack.begin(), g_invokeRuntimeStack.end(), runtime.get());
+                    if (it != g_invokeRuntimeStack.end())
+                    {
+                        g_invokeRuntimeStack.erase(it);
+                    }
+                }
+            }
+        } guard{runtime};
+
+        std::vector<char> buf(8192, '\0');
+        const int rc = invokeFn(request.c_str(), buf.data(), buf.size());
+
+        response.assign(buf.data());
+        if (rc != 0 && response.empty())
+            response = "ERR module invoke failed rc=" + std::to_string(rc);
+        return true;
     }
 
     // ---- v3 allowlist + Authenticode helpers --------------------------------

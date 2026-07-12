@@ -43,6 +43,17 @@ std::string PGS::processMessage(const std::string &message)
         return m_requireAuth ? "ERR auth failed or token missing" : "ERR empty command";
     }
 
+    return dispatchCommandLine(normalized);
+}
+
+std::string PGS::dispatchCommandLine(const std::string &commandLine)
+{
+    const std::string normalized = trim(commandLine);
+    if (normalized.empty())
+    {
+        return "ERR empty command";
+    }
+
     const auto spacePos = normalized.find(' ');
     std::string command = (spacePos == std::string::npos) ? normalized : normalized.substr(0, spacePos);
     const std::string args = (spacePos == std::string::npos) ? std::string() : trim(normalized.substr(spacePos + 1));

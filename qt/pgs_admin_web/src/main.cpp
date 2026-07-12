@@ -37,7 +37,7 @@ int main(int argc, char *argv[])
     QCommandLineOption httpPortOption(QStringList{QStringLiteral("http-port")}, QStringLiteral("HTTP listen port"), QStringLiteral("port"), QStringLiteral("18080"));
     QCommandLineOption pgsHostOption(QStringList{QStringLiteral("pgs-host")}, QStringLiteral("PGS host"), QStringLiteral("host"), QStringLiteral("127.0.0.1"));
     QCommandLineOption pgsPortOption(QStringList{QStringLiteral("pgs-port")}, QStringLiteral("PGS port"), QStringLiteral("port"), QStringLiteral("12345"));
-    QCommandLineOption tokenOption(QStringList{QStringLiteral("pgs-token")}, QStringLiteral("PGS token held by the web backend"), QStringLiteral("token"));
+    QCommandLineOption tokenOption(QStringList{QStringLiteral("pgs-token")}, QStringLiteral("PGS token held by the web backend; prefer PGS_WEB_PGS_TOKEN env"), QStringLiteral("token"));
     QCommandLineOption blessToolOption(QStringList{QStringLiteral("bless-tool")}, QStringLiteral("Path to pgs_bless.exe"), QStringLiteral("path"));
     QCommandLineOption serviceToolOption(QStringList{QStringLiteral("service-tool")}, QStringLiteral("Path to pgs_service.exe"), QStringLiteral("path"));
     QCommandLineOption remoteOption(QStringList{QStringLiteral("remote")}, QStringLiteral("Enable remote-gateway mode (forces TLS + RBAC, allows non-loopback bind)"));
@@ -69,6 +69,14 @@ int main(int argc, char *argv[])
         options.bindAddress = QStringLiteral("0.0.0.0");
     options.pgsHost = parser.value(pgsHostOption);
     options.pgsToken = parser.value(tokenOption);
+    if (options.pgsToken.isEmpty())
+    {
+        options.pgsToken = QString::fromLocal8Bit(qgetenv("PGS_WEB_PGS_TOKEN"));
+    }
+    if (options.pgsToken.isEmpty())
+    {
+        options.pgsToken = QString::fromLocal8Bit(qgetenv("PGS_AUTH_TOKEN"));
+    }
     options.blessToolPath = parser.value(blessToolOption);
     options.serviceToolPath = parser.value(serviceToolOption);
     options.tlsCertPath = parser.value(tlsCertOption);

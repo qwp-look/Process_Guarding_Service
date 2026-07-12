@@ -31,17 +31,45 @@ param(
 $ErrorActionPreference = "Continue"
 Set-Location $Here
 
+function Invoke-PgsBless {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Args
+    )
+
+    $prevToken = $env:PGS_AUTH_TOKEN
+    $env:PGS_AUTH_TOKEN = $Token
+    try {
+        & "$Here\pgs_bless.exe" @Args 2>&1
+    }
+    finally {
+        if ($null -eq $prevToken) {
+            Remove-Item Env:PGS_AUTH_TOKEN -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:PGS_AUTH_TOKEN = $prevToken
+        }
+    }
+}
+
 "=== 0) cleanup ==="
 Get-Process pgs_service,pgs_bless,msedge -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 Remove-Item "$env:ProgramData\ProcessGuard\state\pgs_guard_state.db","$env:ProgramData\ProcessGuard\state\pgs_initial_token.txt" -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 400
 
 "=== 1) start pgs_service ==="
-$svc = Start-Process "$Here\pgs_service.exe" -ArgumentList "run --token $Token" -WorkingDirectory $Here -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Here\svc.log" -RedirectStandardError "$Here\svc.err"
+$prevServiceToken = $env:PGS_SERVICE_TOKEN
+$env:PGS_SERVICE_TOKEN = $Token
+try {
+    $svc = Start-Process "$Here\pgs_service.exe" -ArgumentList "run" -WorkingDirectory $Here -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Here\svc.log" -RedirectStandardError "$Here\svc.err"
+}
+finally {
+    if ($null -eq $prevServiceToken) { Remove-Item Env:PGS_SERVICE_TOKEN -ErrorAction SilentlyContinue } else { $env:PGS_SERVICE_TOKEN = $prevServiceToken }
+}
 "SERVICE_PID=$($svc.Id)"
 $ready = 0
 for ($i = 0; $i -lt 30; $i++) {
-    $r = & "$Here\pgs_bless.exe" ping --token $Token 2>$null
+    $r = Invoke-PgsBless ping 2>$null
     if ($r -match "pong") { $ready = 1; break }
     Start-Sleep -Milliseconds 300
 }
@@ -60,12 +88,12 @@ if (-not $edge) { "ABORT target did not start"; Stop-Process -Id $svc.Id -Force;
 "EDGE_PID=$($edge.Id) Session=$($edge.SessionId)"
 
 "=== 3) bless winapp ==="
-$bl = & "$Here\pgs_bless.exe" bless --pid $edge.Id --winapp --aumid $Aumid --hash none --token $Token 2>&1
+$bl = Invoke-PgsBless bless --pid $edge.Id --winapp --aumid $Aumid --hash none 2>&1
 "BLESS_OUT=$bl"
 Start-Sleep -Milliseconds 1200
 
 "=== 4) list ==="
-& "$Here\pgs_bless.exe" list --token $Token 2>&1 | ForEach-Object { "LIST: $_" }
+Invoke-PgsBless list 2>&1 | ForEach-Object { "LIST: $_" }
 
 "=== 5) kill target ==="
 Stop-Process -Id $edge.Id -Force
@@ -83,7 +111,7 @@ $sw.Stop()
 "RESTARTED=$restarted NEW_PID=$new NEW_SESSION=$newSession DELAY_SEC=$([math]::Round($sw.Elapsed.TotalSeconds,2))"
 
 "=== 7) cleanup ==="
-if ($new) { & "$Here\pgs_bless.exe" unregister --pid $new --token $Token 2>&1 | Out-Null }
+if ($new) { Invoke-PgsBless unregister --pid $new 2>&1 | Out-Null }
 Get-Process msedge -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 try { Stop-Process -Id $svc.Id -Force -ErrorAction SilentlyContinue } catch {}
 

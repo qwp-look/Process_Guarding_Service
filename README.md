@@ -289,13 +289,13 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 ### B) 非服务模式（控制台）
 
-启动时可指定当前进程 token：
+启动时推荐用环境变量指定当前进程 token，避免明文出现在进程命令行：
 
 ```bash
-./build/pgs_service.exe run --token your-secret-token
+PGS_SERVICE_TOKEN=your-secret-token ./build/pgs_service.exe run
 ```
 
-若不传 `--token`，则会优先尝试从归档恢复 token hash；归档也没有时自动生成随机 token（明文写入 `pgs_initial_token.txt`）。
+`--token your-secret-token` 仍保留为兼容参数。若不传 token，则会优先尝试从归档恢复 token hash；归档也没有时自动生成随机 token（明文写入 `pgs_initial_token.txt`）。
 
 ### B.1) 归档文件位置
 
@@ -472,7 +472,8 @@ Qt 管理端：
 tools\build_pgs.bat
 
 # 以管理员运行服务（需测试签名模式以加载 Sirius.sys）
-pgs_service.exe run --token <your-token>
+set PGS_SERVICE_TOKEN=<your-token>
+pgs_service.exe run
 
 # 模块与 PPL 操作
 pgs_bless.exe module list

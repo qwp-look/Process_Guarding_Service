@@ -749,8 +749,9 @@ input{background:#2b2f36;border:1px solid #444a54;color:#e6e9ef;border-radius:4p
 function fmt(s){return s||'--';}
 const tokenInput=document.getElementById('apiToken');
 const embeddedApiToken='__PGS_CLUSTER_API_TOKEN__';
-tokenInput.value=localStorage.getItem('pgsClusterApiToken')||embeddedApiToken;
-tokenInput.addEventListener('input',()=>localStorage.setItem('pgsClusterApiToken',tokenInput.value));
+try{localStorage.removeItem('pgsClusterApiToken')}catch(e){}
+tokenInput.value=sessionStorage.getItem('pgsClusterApiToken')||embeddedApiToken;
+tokenInput.addEventListener('input',()=>sessionStorage.setItem('pgsClusterApiToken',tokenInput.value));
 document.getElementById('addNode').addEventListener('click',addNode);
 function apiHeaders(extra){
   const headers=Object.assign({},extra||{});

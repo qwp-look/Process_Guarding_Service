@@ -140,17 +140,17 @@ PGS 当前 token 规则：
 - token 仅以 **SHA-256** 哈希形式持久化（状态文件版本 2），不保存明文；旧版（v1）FNV 哈希在迁移时被丢弃并强制重生成 token。
 - state/logs 目录以受限 ACL 创建（仅 SYSTEM + Administrators），避免本地其他用户读取 token 哈希。
 - token hash 会跟随守护归档一起恢复
-- **token 不走命令行**：Qt 管理端与 Web 控制台通过环境变量 PGS_AUTH_TOKEN 把 token 传给 pgs_bless，避免被本地其他用户经进程命令行查询泄露。
+- **token 不走命令行**：控制台 `run` 可用 `PGS_SERVICE_TOKEN`，Qt 管理端与 Web 控制台通过环境变量 `PGS_AUTH_TOKEN` 把 token 传给 `pgs_bless`，避免被本地其他用户经进程命令行查询泄露。
 
 ### 控制台运行模式
 
-可在启动时设置/更新 token：
+控制台运行模式推荐通过环境变量设置/更新 token：
 
 ```bash
-./build/pgs_service.exe run --token your-secret-token
+PGS_SERVICE_TOKEN=your-secret-token ./build/pgs_service.exe run
 ```
 
-若当前启动显式指定了 token，它会覆盖归档里的旧 token hash；若本次启动没有显式指定，则会优先尝试从归档恢复。
+`--token your-secret-token` 仍保留为兼容参数。若当前启动显式指定了 token，它会覆盖归档里的旧 token hash；若本次启动没有显式指定，则会优先尝试从归档恢复。
 
 当前控制台 `run` 模式也补上了 `Ctrl+C / CTRL_CLOSE_EVENT` 的优雅停服处理，方便本地调试和烟测收尾。
 
@@ -415,7 +415,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 - **默认不启用 PPL/驱动**：PPL 模块（`modules/ppl`）与 `Sirius.sys` 内核驱动默认**不加载**。仅当设置环境变量 `PGS_ENABLE_PPL=1` 或向 `pgs_service` 传入 `--enable-ppl` 时才加载。非 opt-in 部署下，`ppl set/get/clear` 不可达，内核驱动也不会被引入。
 - **token 鉴权强制开启**：空 token 不再被接受；未配置 token 时服务自动生成随机 token 并写入受限目录下的 `pgs_initial_token.txt`（仅 SYSTEM/Administrators 可读）。token 哈希为 SHA-256，state/logs 目录以受限 ACL 创建。
-- **token 不走命令行**：Qt 管理端与 Web 控制台通过环境变量 `PGS_AUTH_TOKEN` 传 token 给 `pgs_bless`，避免被本地其他用户经进程命令行查询泄露。
+- **token 不走命令行**：控制台 `run` 可用 `PGS_SERVICE_TOKEN`，Qt 管理端与 Web 控制台通过环境变量 `PGS_AUTH_TOKEN` 传 token 给 `pgs_bless`，避免被本地其他用户经进程命令行查询泄露。
 - **`module load` 路径白名单**：服务端只允许加载位于模块目录之内的 DLL，`..`/UNC/盘外绝对路径一律拒绝，避免任意 DLL 被加载进 SYSTEM 级服务进程。
 - **绑定回环**：PGS 管理端口默认绑定 `127.0.0.1`；Web 控制台默认绑定 `127.0.0.1` 并要求 `X-PGS-Token` 头 + `Host`/`Origin` 校验（防 DNS rebinding 与跨站 CSRF）。远程 Web 控制台必须显式 `--remote`，并配置 TLS、RBAC users 文件和 audit log。
 - **cluster 远程监听强制 TLS+token**：`pgs_cluster_web` 默认只监听回环；非回环监听必须提供 `--api-token --tls-cert --tls-key`。

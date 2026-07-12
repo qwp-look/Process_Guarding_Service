@@ -34,6 +34,8 @@
 
 #include <windows.h>
 
+#include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -124,6 +126,7 @@ namespace ProcessGuard
         {
             std::string name;     // from PG_GetName
             std::string version;  // from PG_GetVersion (may be empty)
+            std::string path;     // original DLL path; useful for diagnostics
             HMODULE handle = nullptr;
             const char *(*getName)(void) = nullptr;
             const char *(*getVersion)(void) = nullptr;
@@ -131,6 +134,14 @@ namespace ProcessGuard
             int (*init)(void *) = nullptr;
             void (*shutdown)(void) = nullptr;
             int (*invoke)(const char *, char *, size_t) = nullptr;
+            struct RuntimeState
+            {
+                std::mutex mutex;
+                std::condition_variable cv;
+                int activeInvokes = 0;
+                bool unloading = false;
+            };
+            std::shared_ptr<RuntimeState> runtime;
         };
 
         mutable std::shared_mutex m_mutex;

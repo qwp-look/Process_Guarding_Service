@@ -364,7 +364,8 @@ private:
     int printHelp(const char *exe) const
     {
         std::cout
-            << "Usage: " << exe << " [install|uninstall|start|stop|status|run|--service] [--token <value>]\n";
+            << "Usage: " << exe << " [install|uninstall|start|stop|status|run|--service] [--token <value>]\n"
+            << "       Set PGS_SERVICE_TOKEN to provide the service token without exposing it on the command line.\n";
         return 1;
     }
 
@@ -661,6 +662,17 @@ private:
 
             return false;
         }
+        if (!out.hasToken)
+        {
+            if (const char *envToken = std::getenv("PGS_SERVICE_TOKEN"))
+            {
+                if (*envToken)
+                {
+                    out.hasToken = true;
+                    out.token = envToken;
+                }
+            }
+        }
         return true;
     }
 
@@ -714,8 +726,8 @@ int main(int argc, char *argv[])
 {
     const std::string logPath = defaultServiceLogPath();
     // Restrict the data root (ProgramData\ProcessGuard and its logs/state) to
-    // SYSTEM + Administrators before any file is written, so persisted secrets
-    // are not world-readable.
+    // SYSTEM + Administrators + the runtime identity before any file is written,
+    // so persisted secrets are not world-readable.
     {
         std::filesystem::path logP(logPath);
         std::filesystem::path logsDir = logP.parent_path();

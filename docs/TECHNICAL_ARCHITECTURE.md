@@ -157,7 +157,7 @@
 - 服务端默认始终开启 token 鉴权（`m_requireAuth=true`）
 - 服务端不保存 token 明文，只保存 token 哈希
 - token hash 会跟随守护归档一起持久化
-- `pgs_service run --token <value>` 可设置本次进程启动 token
+- `PGS_SERVICE_TOKEN=<value> pgs_service run` 可设置本次进程启动 token，`--token <value>` 保留为兼容参数
 - 若本次启动未显式指定 token，则会优先从归档恢复 token hash
 - `set-token` 命令用于在线切换 token：必须先验证旧 token 才会更新，并会立即写回归档
 - 只有首次启动且此前没有归档时，自动生成随机 64 位十六进制 token（明文写入 `pgs_initial_token.txt`），永不接受空 token
@@ -495,7 +495,7 @@ release\
 └─ LICENSE                  Apache 2.0
 ```
 
-运行：以管理员开终端，`pgs_service.exe run --token <你的token>`，另开终端 `pgs_bless.exe ping --token <你的token>`。
+运行：以管理员开终端，`PGS_SERVICE_TOKEN=<你的token> pgs_service.exe run`，另开终端 `PGS_AUTH_TOKEN=<你的token> pgs_bless.exe ping`。
 ## 8. CI 与验证
 
 - GitHub Actions 会在 Windows runner 上用 MSYS2 MinGW64 构建 C++ 主线，并把 core unit、sched cron unit、smoke test 拆成独立步骤。

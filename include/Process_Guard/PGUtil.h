@@ -531,27 +531,70 @@ namespace ProcessGuard
             return diff == 0;
         }
 
-        // Create a directory (recursively) and apply a restrictive DACL granting
-        // full control only to SYSTEM and Administrators (protected, no inherit).
-        inline bool secureCreateDirectory(const std::string &utf8Path)
+        inline std::wstring currentUserSidString()
+        {
+            HANDLE token = nullptr;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+            {
+                return std::wstring();
+            }
+
+            DWORD needed = 0;
+            GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+            if (needed == 0)
+            {
+                CloseHandle(token);
+                return std::wstring();
+            }
+
+            std::vector<unsigned char> buffer(needed);
+            if (!GetTokenInformation(token, TokenUser, buffer.data(), needed, &needed))
+            {
+                CloseHandle(token);
+                return std::wstring();
+            }
+            CloseHandle(token);
+
+            auto *user = reinterpret_cast<TOKEN_USER *>(buffer.data());
+            LPWSTR sidText = nullptr;
+            if (!ConvertSidToStringSidW(user->User.Sid, &sidText) || !sidText)
+            {
+                return std::wstring();
+            }
+            std::wstring result(sidText);
+            LocalFree(sidText);
+            return result;
+        }
+
+        inline std::wstring secureDaclSddl(bool container)
+        {
+            std::wstring sddl = container
+                ? L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+                : L"D:P(A;;FA;;;SY)(A;;FA;;;BA)";
+
+            const std::wstring userSid = currentUserSidString();
+            if (!userSid.empty() && userSid != L"S-1-5-18")
+            {
+                sddl += container ? L"(A;OICI;FA;;;" : L"(A;;FA;;;";
+                sddl += userSid;
+                sddl += L")";
+            }
+            return sddl;
+        }
+
+        inline bool secureApplyDacl(const std::string &utf8Path, bool container)
         {
             const std::wstring wpath = utf8ToWide(utf8Path);
             if (wpath.empty())
             {
                 return false;
             }
-            std::error_code ec;
-            std::filesystem::create_directories(utf8Path, ec);
-            if (!std::filesystem::is_directory(std::filesystem::path(utf8Path), ec))
-            {
-                return false;
-            }
 
-            // SDDL: protected DACL, SYSTEM + Administrators full (container/file inherit).
             PSECURITY_DESCRIPTOR psd = nullptr;
             ULONG sdSize = 0;
+            const std::wstring sddl = secureDaclSddl(container);
             if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", SDDL_REVISION_1, &psd, &sdSize) ||
+                    sddl.c_str(), SDDL_REVISION_1, &psd, &sdSize) ||
                 !psd)
             {
                 return false;
@@ -565,6 +608,21 @@ namespace ProcessGuard
                                                     nullptr, nullptr, dacl, nullptr);
             LocalFree(psd);
             return rc == ERROR_SUCCESS;
+        }
+
+        // Create a directory recursively and apply a protected DACL granting full
+        // control to SYSTEM, Administrators, and the current runtime identity.
+        // The current identity entry keeps console/dev runs and custom service
+        // accounts from locking themselves out after creating the directory.
+        inline bool secureCreateDirectory(const std::string &utf8Path)
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(utf8Path, ec);
+            if (!std::filesystem::is_directory(std::filesystem::path(utf8Path), ec))
+            {
+                return false;
+            }
+            return secureApplyDacl(utf8Path, true);
         }
         // ---- v3 hardening: testable pure helpers ---------------------------------
 

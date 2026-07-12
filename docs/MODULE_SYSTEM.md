@@ -304,7 +304,7 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 | `ERR OpenSCManager failed, error=5` | 非管理员 | 以管理员运行 PGS |
 | `ERR CreateFile(...) failed, error=5` | 驱动未加载/无权限 | 开测试签名；确认 Sirius.sys 在位 |
 | `ERR invalid signer: X` | signer 字符串不合法 | 用第 6.2 节列出的取值 |
-| `pgs_bless: Failed to connect to PGS` | 服务未运行 | `pgs_service.exe run --token <t>` |
+| `pgs_bless: Failed to connect to PGS` | 服务未运行 | `PGS_SERVICE_TOKEN=<t> pgs_service.exe run` |
 
 ---
 
