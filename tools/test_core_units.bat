@@ -11,7 +11,7 @@ set "PATH=%MINGW_BIN%;%PATH%"
 if not exist "build" mkdir "build"
 
 echo [unit:core] Compiling tests\test_pgs_core.cpp...
-"%CXX%" -std=c++17 -Wall -Wextra -O2 -Iinclude tests\test_pgs_core.cpp -o build\test_pgs_core.exe -lbcrypt
+"%CXX%" -std=c++17 -Wall -Wextra -O2 -DPGS_ENABLE_TEST_HOOKS -Iinclude tests\test_pgs_core.cpp modules\sched\pgs_sched_module.cpp modules\ppl\pgs_ppl_module.cpp -o build\test_pgs_core.exe -lbcrypt
 if errorlevel 1 (
     echo Failed to compile core unit tests
     popd

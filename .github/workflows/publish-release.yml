@@ -2,14 +2,17 @@ name: publish-release
 
 on:
   push:
-    branches: [codex/roadmap-sched-remote-cluster]
-    tags: [Personal_Version_V3.1.0]
-    paths:
-      - .github/workflows/publish-release.yml
-      - installer/Output/**
-      - installer/pgs_installer.iss
-      - tools/build_installer.bat
+    branches:
       - release/**
+      - codex/roadmap-sched-remote-cluster
+    tags:
+      - 'Personal_Version_V*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag to create or update when dispatching from a branch.
+        required: false
+        default: Personal_Version_V3.1.0
 
 permissions:
   contents: write
@@ -18,7 +21,8 @@ jobs:
   publish:
     runs-on: windows-2025
     env:
-      TAG_NAME: Personal_Version_V3.1.0
+      DEFAULT_TAG_NAME: Personal_Version_V3.1.0
+      REQUESTED_TAG_NAME: ${{ github.event.inputs.tag_name }}
       RELEASE_NAME: ProcessGuard Service 3.1.0
       INSTALLER: installer/Output/pgs_setup_3.1.0.exe
       RELEASE_ZIP: installer/Output/pgs_release_3.1.0.zip
@@ -27,13 +31,85 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Cache only the compile-critical parts of the installed MinGW64
+      # toolchain plus CMake/Qt runtime metadata. CMake itself needs
+      # share/cmake modules at runtime; Qt CMake targets also reference
+      # share/qt6 plugin/metatype files, so cache hits must restore both.
+      - name: Cache MinGW64 toolchain
+        id: mingw-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\msys64\mingw64\bin
+            C:\msys64\mingw64\lib
+            C:\msys64\mingw64\include
+            C:\msys64\mingw64\x86_64-w64-mingw32
+            C:\msys64\mingw64\share\cmake
+            C:\msys64\mingw64\share\qt6
+          key: msys2-mingw64-installed-${{ runner.os }}-v5
+
+      - name: Install MinGW64 toolchain
+        shell: pwsh
+        run: |
+          $needsInstall = '${{ steps.mingw-cache.outputs.cache-hit }}' -ne 'true'
+          if (-not $needsInstall) {
+            & 'C:\msys64\mingw64\bin\cmake.exe' --version
+            if ($LASTEXITCODE -ne 0) { $needsInstall = $true }
+          }
+          if (-not (Test-Path 'C:\msys64\mingw64\share\cmake\Modules\CMake.cmake')) { $needsInstall = $true }
+          if (-not (Test-Path 'C:\msys64\mingw64\share\qt6')) { $needsInstall = $true }
+          if (-not $needsInstall) {
+            'MinGW64 toolchain cache is complete.'
+            return
+          }
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-httpserver mingw-w64-x86_64-qt6-websockets mingw-w64-x86_64-qt6-tools'
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $isccDisplay = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          $isccBatchPath = 'C:\Progra~2\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $isccDisplay)) {
+            choco install innosetup --yes --no-progress
+          }
+          if (-not (Test-Path -LiteralPath $isccDisplay)) {
+            throw "Inno Setup compiler not found at $isccDisplay"
+          }
+          "ISCC=$isccBatchPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Prepare clean build outputs
+        shell: pwsh
+        run: |
+          foreach ($path in @('build', 'release', 'installer\Output')) {
+            if (Test-Path -LiteralPath $path) {
+              Remove-Item -LiteralPath $path -Recurse -Force
+            }
+          }
+          New-Item -ItemType Directory -Force -Path 'build\tmp', 'build\home' | Out-Null
+
+      - name: Verify current ref from source
+        shell: pwsh
+        run: |
+          .\tools\verify.bat
+
+      - name: Build release artifacts from current ref
+        shell: pwsh
+        run: |
+          .\tools\build_installer.bat
+
       - name: Publish GitHub release
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           $repo = $env:GITHUB_REPOSITORY
-          $tag = $env:TAG_NAME
+          $tag = $env:REQUESTED_TAG_NAME
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = $env:DEFAULT_TAG_NAME
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag = $env:GITHUB_REF_NAME
+          }
           $headers = @{
             Authorization = "Bearer $env:GITHUB_TOKEN"
             Accept = 'application/vnd.github+json'
@@ -50,23 +126,26 @@ jobs:
           $installerHash = (Get-FileHash -LiteralPath $env:INSTALLER -Algorithm SHA256).Hash
           $zipHash = (Get-FileHash -LiteralPath $env:RELEASE_ZIP -Algorithm SHA256).Hash
           $body = @"
-          ProcessGuard Service 3.1.0 release.
+ProcessGuard Service 3.1.0 release.
 
-          Assets:
-          - pgs_setup_3.1.0.exe - installer, SHA256 $installerHash
-          - pgs_release_3.1.0.zip - portable release tree, SHA256 $zipHash
+Source ref:
+- $env:GITHUB_REF_NAME ($env:GITHUB_SHA)
 
-          Includes:
-          - hardened admin web remote mode with TLS/RBAC/audit/CSRF gates
-          - hardened cluster dashboard with API token, HTTPS, node TLS verification, and safe registry handling
-          - lightweight Qt TCP HTTP shim for Windows VM response reliability
-          - refreshed self-contained release tree with Qt/OpenSSL runtime closure
-          - Inno Setup installer plus portable zip
+Assets:
+- pgs_setup_3.1.0.exe - installer, SHA256 $installerHash
+- pgs_release_3.1.0.zip - portable release tree, SHA256 $zipHash
 
-          Validation:
-          - unit tests and MSYS2 verify_pgs build
-          - VM release validation for portable zip, installer, service ping, web consoles, portable ping, and uninstall
-          "@
+Includes:
+- hardened admin web remote mode with TLS/RBAC/audit/CSRF gates
+- hardened cluster dashboard with API token, HTTPS, node TLS verification, and safe registry handling
+- lightweight Qt TCP HTTP shim for Windows VM response reliability
+- refreshed self-contained release tree with Qt/OpenSSL runtime closure
+- Inno Setup installer plus portable zip
+
+Validation completed by this workflow:
+- tools\verify.bat from the checked-out ref
+- tools\build_installer.bat, which rebuilds release\ and installer\Output from the checked-out ref
+"@
 
           $release = $null
           try {
@@ -82,6 +161,7 @@ jobs:
           if (-not $release) {
             $payload = @{
               tag_name = $tag
+              target_commitish = $env:GITHUB_SHA
               name = $env:RELEASE_NAME
               body = $body
               draft = $false

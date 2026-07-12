@@ -29,7 +29,9 @@ void test_allowlist_key_for_path()
     CHECK_EQ(ModuleManager::allowlistKeyForPath("C:\\pgs\\modules\\ppl\\pgs_ppl_module.dll"), "ppl");
     CHECK_EQ(ModuleManager::allowlistKeyForPath("C:\\pgs\\modules\\foo.dll"), "foo");
     CHECK_EQ(ModuleManager::allowlistKeyForPath("C:/pgs/modules/foo/foo.dll"), "foo");
+    CHECK_EQ(ModuleManager::allowlistKeyForPath("C:/pgs/modules/foo/Bar.DLL"), "foo");
     CHECK_EQ(ModuleManager::allowlistKeyForPath("C:/pgs/modules/SCHED.DLL"), "sched");
+    CHECK_EQ(ModuleManager::allowlistKeyForPath("C:/pgs/runtime/foo.dll"), "runtime");
     CHECK_EQ(ModuleManager::allowlistKeyForPath("loose.dll"), "loose");
     CHECK_EQ(ModuleManager::allowlistKeyForPath("foo"), "foo");
 }

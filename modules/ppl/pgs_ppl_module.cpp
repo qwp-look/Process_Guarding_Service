@@ -25,9 +25,6 @@
 
 namespace
 {
-    HMODULE g_hSelfModule = nullptr;
-    pgs_ppl::SiriusDriverClient g_driver;
-
     // PPL is always Protected Light, matching StarlightGUI's SetPPL behavior
     // (SetPPL hardcodes PsProtectedTypeProtectedLight and lets only the signer vary).
     // "clear" is the exception: it sets type=None to remove protection entirely.
@@ -39,9 +36,9 @@ namespace
         UCHAR value;
     };
     // String -> PS_PROTECTED_SIGNER mapping. Accepted case-insensitively by
-    // parseSigner; "CodeGen"/"Codegen" are both listed for convenience. Numeric
-    // 0..255 also accepted so callers can pass raw enum values. signerName() is
-    // the reverse lookup for human-readable responses.
+    // parseSigner; "CodeGen"/"Codegen" are both listed for convenience.
+    // Numeric raw values are rejected so the module stays on the documented
+    // signer names instead of an open-ended 0..255 enum surface.
     const SignerMap kSigners[] = {
         {"None", PsProtectedSignerNone},
         {"Authenticode", PsProtectedSignerAuthenticode},
@@ -75,15 +72,32 @@ namespace
                 return true;
             }
         }
-        // Also accept raw numeric signer values.
-        char *end = nullptr;
-        long v = std::strtol(text.c_str(), &end, 10);
-        if (end != text.c_str() && *end == '\0' && v >= 0 && v <= 255)
+        return false;
+    }
+
+    // Parse PID strictly in the documented 1..DWORD_MAX range. Rejects zero,
+    // overflow, and any non-digit input.
+    bool parsePid(const std::string &s, ULONG &out)
+    {
+        if (s.empty())
+            return false;
+        for (char c : s)
         {
-            out = static_cast<UCHAR>(v);
+            if (c < '0' || c > '9')
+                return false;
+        }
+        try
+        {
+            const unsigned long long v = std::stoull(s);
+            if (v < 1ull || v > 0xFFFFFFFFull)
+                return false;
+            out = static_cast<ULONG>(v);
             return true;
         }
-        return false;
+        catch (...)
+        {
+            return false;
+        }
     }
 
     // Minimal KV parser for "op=set;pid=1234;signer=Antimalware". Returns the
@@ -99,18 +113,6 @@ namespace
         return (end == std::string::npos) ? kv.substr(pos) : kv.substr(pos, end - pos);
     }
 
-    bool parseUlong(const std::string &s, ULONG &out)
-    {
-        if (s.empty())
-            return false;
-        char *end = nullptr;
-        unsigned long v = std::strtoul(s.c_str(), &end, 10);
-        if (end == s.c_str() || *end != '\0')
-            return false;
-        out = static_cast<ULONG>(v);
-        return true;
-    }
-
     void setResponse(char *buf, size_t bufsize, const std::string &msg)
     {
         if (!buf || bufsize == 0)
@@ -121,7 +123,34 @@ namespace
         std::memcpy(buf, msg.c_str(), n);
         buf[n] = '\0';
     }
+
+#ifndef PGS_ENABLE_TEST_HOOKS
+    HMODULE g_hSelfModule = nullptr;
+    pgs_ppl::SiriusDriverClient g_driver;
+#endif
 } // namespace
+
+#ifdef PGS_ENABLE_TEST_HOOKS
+namespace pgs_ppl_test
+{
+    bool parsePidForTest(const std::string &text, ULONG &out)
+    {
+        return parsePid(text, out);
+    }
+
+    bool parseSignerForTest(const std::string &text, UCHAR &out)
+    {
+        return parseSigner(text, out);
+    }
+
+    const char *signerNameForTest(UCHAR value)
+    {
+        return signerName(value);
+    }
+} // namespace pgs_ppl_test
+#endif
+
+#ifndef PGS_ENABLE_TEST_HOOKS
 
 extern "C" BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD reason, LPVOID /*reserved*/)
 {
@@ -181,7 +210,7 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
     std::string pidText = kvValue(req, "pid");
 
     ULONG pid = 0;
-    if (!parseUlong(pidText, pid))
+    if (!parsePid(pidText, pid))
     {
         setResponse(responseBuf, responseBufSize, "ERR invalid or missing pid");
         return 1;
@@ -242,3 +271,4 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
     setResponse(responseBuf, responseBufSize, "ERR unknown op: " + op);
     return 1;
 }
+#endif // !PGS_ENABLE_TEST_HOOKS

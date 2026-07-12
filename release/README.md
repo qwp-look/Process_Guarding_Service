@@ -25,7 +25,7 @@ pgs_admin_qt.exe
 
 ## 开发者构建入口
 
-开发环境推荐 MSYS2 MinGW64。脚本默认使用 `C:\msys64\mingw64`，也支持通过环境变量改路径：
+开发环境推荐 MSYS2 MinGW64。脚本默认使用 `C:\msys64\mingw64`，也支持通过环境变量改路径。注意变量名分工：Windows `.bat` 脚本读取 `CXX`，MSYS2 bash `.sh` 脚本读取 `GXX`；两边都读取 `MINGW_ROOT` 和 `CMAKE`。
 
 ```bat
 set MINGW_ROOT=C:\msys64\mingw64
@@ -77,33 +77,21 @@ Qt 桌面管理端继续保留 Qt Widgets 是合理的；Web/Cluster 后端若�
 
 ## 2. MSYS2 MinGW64 手动编译（C++ 部分）
 
-在 `MSYS2 MinGW64` 终端执行：
+推荐直接使用仓库脚本，和 CI/发布链路保持一致：
 
 ```bash
 cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
-mkdir -p build
+export MINGW_ROOT=/mingw64
+export GXX=$MINGW_ROOT/bin/g++.exe
+./tools/build_pgs.sh
+```
 
-# 可选：固定 PATH，避免串库
-export PATH=/mingw64/bin:/usr/bin
-hash -r
+Windows `cmd` 入口等价：
 
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/common/PGLogger.cpp -o build/PGLogger.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/PGS.cpp -o build/PGS.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/pgs_service.cpp -o build/pgs_service.o
-g++ -std=c++17 -Wall -Wextra -O2 \
-  build/PGLogger.o build/PGS.o build/pgs_service.o \
-  -o build/pgs_service.exe \
-  -lws2_32 -ladvapi32 -lwtsapi32 -luserenv
-
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude tools/pgs_bless.cpp -o build/pgs_bless.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/guard_example.cpp -o build/guard_example.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/quick_start.cpp -o build/quick_start.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/smoke_worker.cpp -o build/smoke_worker.exe -lws2_32
-
-# 复制 MinGW 运行库到 C++ 可执行目录（build/）
-cp -f /mingw64/bin/libstdc++-6.dll build/
-cp -f /mingw64/bin/libgcc_s_seh-1.dll build/
-cp -f /mingw64/bin/libwinpthread-1.dll build/
+```bat
+set MINGW_ROOT=C:\msys64\mingw64
+set CXX=%MINGW_ROOT%\bin\g++.exe
+tools\build_pgs.bat
 ```
 
 生成：
@@ -113,6 +101,11 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/
 - `build/guard_example.exe`
 - `build/quick_start.exe`
 - `build/smoke_worker.exe`
+- `build/modules/sched/pgs_sched_module.dll`
+- `build/modules/ppl/pgs_ppl_module.dll`
+- `build/modules/modules.allow`
+
+当前 C++ 主线还会编译 `src/modules/ModuleManager.cpp`、`src/service/PGSProtocol.cpp`、`src/common/PGSClient.cpp` 以及 bundled `sched`/`ppl` 模块，并链接 `bcrypt`、`wintrust`、`ole32`、`shell32` 等 Windows 库；逐条手工命令请以 `tools/build_pgs.sh` 和 `tools/build_pgs.bat` 为准。
 
 示例程序连接 PGS 时也需要 token（与服务当前 token 一致）：
 
@@ -127,16 +120,22 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/
 
 ```bash
 cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
-rm -rf build/pgs_admin_qt
+export MINGW_ROOT=/mingw64
+export CMAKE=$MINGW_ROOT/bin/cmake.exe
+export GXX=$MINGW_ROOT/bin/g++.exe
+./tools/build_qt_admin.sh
 
+# 等价手工 CMake 命令：
+rm -rf build/pgs_admin_qt
 cmake -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
   -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe \
+  -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build/pgs_admin_qt -j4
 
 # Qt 依赖部署 + 复制 MinGW 运行库到 Qt 可执行目录
-/mingw64/bin/windeployqt-qt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
+/mingw64/bin/windeployqt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
 cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
@@ -151,6 +150,8 @@ Qt 产物：
 > ```bat
 > tools\package_release.bat
 > ```
+>
+> 生成安装包和便携 zip 时使用 `tools\build_installer.bat`；它会先调用 `tools\package_release.bat`，清空并从当前源码构建输出重建 `release\`，再生成 `installer\Output\pgs_setup_3.1.0.exe` 与 `installer\Output\pgs_release_3.1.0.zip`。不要直接发布仓库中已有的 `release\` 或 `installer\Output\` 二进制。
 
 ## 3.1 MSYS2 MinGW64 手动编译（网页控制端）
 
@@ -158,18 +159,32 @@ Qt 产物：
 
 ```bash
 cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
-rm -rf build/pgs_admin_web
+export MINGW_ROOT=/mingw64
+export CMAKE=$MINGW_ROOT/bin/cmake.exe
+export GXX=$MINGW_ROOT/bin/g++.exe
+./tools/build_qt_web.sh
 
+# 等价手工 CMake 命令：
+rm -rf build/pgs_admin_web build/pgs_cluster_web
 cmake -S qt/pgs_admin_web -B build/pgs_admin_web -G "MinGW Makefiles" \
   -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe \
+  -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build/pgs_admin_web -j4
+
+cmake -S qt/pgs_cluster_web -B build/pgs_cluster_web -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH=/mingw64 \
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build/pgs_cluster_web -j4
 ```
 
 网页控制端产物：
 
 - `build/pgs_admin_web/pgs_admin_web.exe`
+- `build/pgs_cluster_web/pgs_cluster_web.exe`
 
 运行示例：
 
@@ -202,15 +217,14 @@ remote 模式下首页和 API 都走 Basic RBAC；变更类 API 还要求同源 
 
 ## 3.2 MSYS2 MinGW64 手动编译（集群面板）
 
+`pgs_cluster_web` 与网页控制端一起由 `tools/build_qt_web.sh` 构建；如果只看等价 CMake 命令，请以上一节的 `pgs_cluster_web` 部分为准。
+
 ```bash
 cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
-rm -rf build/pgs_cluster_web
-
-cmake -S qt/pgs_cluster_web -B build/pgs_cluster_web -G "MinGW Makefiles" \
-  -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
-
-cmake --build build/pgs_cluster_web -j4
+export MINGW_ROOT=/mingw64
+export CMAKE=$MINGW_ROOT/bin/cmake.exe
+export GXX=$MINGW_ROOT/bin/g++.exe
+./tools/build_qt_web.sh
 ```
 
 本地运行：
@@ -251,7 +265,7 @@ cmake --build build/pgs_cluster_web -j4
 Qt 程序建议额外执行：
 
 ```bash
-/mingw64/bin/windeployqt-qt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
+/mingw64/bin/windeployqt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
 cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
@@ -289,13 +303,13 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 ### B) 非服务模式（控制台）
 
-启动时可指定当前进程 token：
+启动时推荐用环境变量指定当前进程 token，避免明文出现在进程命令行：
 
 ```bash
-./build/pgs_service.exe run --token your-secret-token
+PGS_SERVICE_TOKEN=your-secret-token ./build/pgs_service.exe run
 ```
 
-若不传 `--token`，则会优先尝试从归档恢复 token hash；归档也没有时自动生成随机 token（明文写入 `pgs_initial_token.txt`）。
+`--token your-secret-token` 仍保留为兼容参数。若不传 token，则会优先尝试从归档恢复 token hash；归档也没有时自动生成随机 token（明文写入 `pgs_initial_token.txt`）。
 
 ### B.1) 归档文件位置
 
@@ -472,7 +486,8 @@ Qt 管理端：
 tools\build_pgs.bat
 
 # 以管理员运行服务（需测试签名模式以加载 Sirius.sys）
-pgs_service.exe run --token <your-token>
+set PGS_SERVICE_TOKEN=<your-token>
+pgs_service.exe run
 
 # 模块与 PPL 操作
 pgs_bless.exe module list
@@ -484,7 +499,8 @@ pgs_bless.exe ppl clear --pid <pid>
 完整说明（ABI、如何写新模块、排错、版权）见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
 ## 9. CI 与验证
 
-- GitHub Actions 使用 MSYS2 MinGW64，按阶段执行 C++ 主线构建、core unit、sched cron unit、smoke test 和 Qt Web console 构建。
+- GitHub Actions 使用 MSYS2 MinGW64，按阶段执行 C++ 主线构建、core/module/sched unit、smoke test、Qt 桌面端和 Qt Web/Cluster console 构建；`build` workflow 覆盖 `main`/`master`、release 分支和 `Personal_Version_V*` 标签。
+- `publish-release` 会从当前 checkout 先跑 `tools\verify.bat`，再跑 `tools\build_installer.bat` 重新生成 `installer\Output` 里的安装包和便携 zip。
 - 本地 unit test 可单独跑：`tools/test_core_units.sh`、`tools/test_sched_cron.sh`；`tools/run_unit_tests.sh` 保留为聚合入口。
 - Qt Web console 可单独跑：`tools/build_qt_web.sh`，同时构建 `pgs_admin_web` 与 `pgs_cluster_web`。
 - 本地 smoke test 的“服务重启后恢复持久化 token / 守护集”步骤需要管理员权限；在非管理员沙盒里会因为 `ProgramData\ProcessGuard` 的 ACL 受限而失败。

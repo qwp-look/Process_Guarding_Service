@@ -312,51 +312,34 @@
 ### 8.1 C++ 构建命令
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect_need/Process_Guarding_Service
-mkdir -p build
-
-export PATH=/mingw64/bin:/usr/bin
-hash -r
-
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/common/PGLogger.cpp -o build/PGLogger.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/PGS.cpp -o build/PGS.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/pgs_service.cpp -o build/pgs_service.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/modules/ModuleManager.cpp -o build/ModuleManager.o
-g++ -std=c++17 -Wall -Wextra -O2 \
-  build/PGLogger.o build/PGS.o build/ModuleManager.o build/pgs_service.o \
-  -o build/pgs_service.exe \
-  -lws2_32 -ladvapi32 -lwtsapi32 -luserenv
-
-# PPL 模块（独立 DLL，放入 build/modules/ 供 PGS 启动自动加载）
-mkdir -p build/modules
-g++ -std=c++17 -Wall -Wextra -O2 -shared -o build/modules/pgs_ppl_module.dll modules/ppl/pgs_ppl_module.cpp -Iinclude -ladvapi32
-cp -f modules/ppl/Sirius.sys build/modules/Sirius.sys
-
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude tools/pgs_bless.cpp -o build/pgs_bless.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/guard_example.cpp -o build/guard_example.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/quick_start.cpp -o build/quick_start.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/smoke_worker.cpp -o build/smoke_worker.exe -lws2_32
-
-# 复制 MinGW 运行库到 C++ 可执行目录（build/）
-cp -f /mingw64/bin/libstdc++-6.dll build/
-cp -f /mingw64/bin/libgcc_s_seh-1.dll build/
-cp -f /mingw64/bin/libwinpthread-1.dll build/
+cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
+export MINGW_ROOT=/mingw64
+export GXX=$MINGW_ROOT/bin/g++.exe
+./tools/build_pgs.sh
 ```
+
+当前 C++ 主线会编译 `PGSProtocol.cpp`、`ModuleManager.cpp`、`PGSClient.cpp` 以及 bundled `sched`/`ppl` 模块，并链接 `bcrypt`、`wintrust`、`ole32`、`shell32` 等 Windows 库；逐条手工命令请以 `tools/build_pgs.sh` 和 `tools/build_pgs.bat` 为准。
 
 ### 8.2 Qt 构建命令
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect_need/Process_Guarding_Service
-rm -rf build/pgs_admin_qt
+cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
+export MINGW_ROOT=/mingw64
+export CMAKE=$MINGW_ROOT/bin/cmake.exe
+export GXX=$MINGW_ROOT/bin/g++.exe
+./tools/build_qt_admin.sh
 
+# 等价手工 CMake 命令：
+rm -rf build/pgs_admin_qt
 cmake -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
   -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe \
+  -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build/pgs_admin_qt -j4
 
 # Qt 依赖部署 + 复制 MinGW 运行库到 Qt 可执行目录
-/mingw64/bin/windeployqt-qt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
+/mingw64/bin/windeployqt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
 cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
@@ -373,7 +356,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 Qt 程序建议：
 
 ```bash
-/mingw64/bin/windeployqt-qt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
+/mingw64/bin/windeployqt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
 cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
@@ -565,7 +548,7 @@ GUARD\t<guardId>\t<lastKnownPid>\t<sessionId>\t<maxRestartsLabel>\t<pathB64>\t<r
 `lastKnownPid=0` 持久化；若服务在 delay 期间重启，restore 会完成这次已记账的 relaunch，不再二次扣预算。
 达到上限或 restore relaunch 失败的 guard 会从归档删除，避免服务下次启动再次复活。
 
-**迁移**：`version==2` 走保持迁移（老记录字段补默认：Win32/无 aumid/window=0=生命周期累计/delay=0/no backoff/hang=0/killOnExit=0），日志提示一次升级；`version<2` 沿用现有 v1→v2 重置 token 哈希的迁移链。旧客户端协议动词（register/unregister/...）保持不变，`bless`/`unbless`/`bless-start` 作为协议层别名加入，消除「CLI 用 bless、协议用 register」的认知分叉。
+**迁移**：`version==2` 走保持迁移（老记录字段补默认：Win32/无 aumid/window=0=生命周期累计/delay=0/no backoff/hang=0/killOnExit=0），日志提示一次升级；`version<2` 沿用现有 v1→v2 重置 token 哈希的迁移链。旧客户端协议动词（register/unregister/...）保持不变，`bless`/`unbless` 作为协议层别名加入；`bless-start` 仍是 CLI 侧“启动后注册”的原子流程。
 
 ### 16.5 协议版本与 stats
 

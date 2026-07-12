@@ -36,7 +36,7 @@ private:
     void appendBlessOutput(const QString &text);
     void appendServiceOutput(const QString &text);
     void runTableRefresh(bool silentIfBusy = false);
-    void populateGuardTableFromJson(const QString &jsonText);
+    void populateGuardTableFromJson(const QString &jsonText, const QString &stderrText);
     void setupUi();
     QString pidArg() const;
     bool isChineseUi() const;
@@ -47,6 +47,7 @@ private:
     void attachProcessHandlers();
     void setupModuleTab(QWidget *page);
     void refreshModuleTabs();
+    void syncModulePageSettings();
     QString defaultModuleDir() const;
 
     QTabWidget *m_tabs = nullptr;
@@ -131,6 +132,7 @@ private:
     bool m_guardTableColumnsSized = false;
     bool m_lastTableRefreshWasAuto = false;
     QString m_tableStdoutBuffer;
+    QString m_tableStderrBuffer;
     QTimer *m_tableRefreshTimer = nullptr;
     // module management tab
     QTabWidget *m_moduleSubTabs = nullptr;

@@ -124,8 +124,13 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
         int hangTimeoutMs = 0;
         {
             DWORD v = 0;
-            if (fields.size() >= 9 && util::parseDwordValue(trim(fields[8]), v))
+            const std::string hv = (fields.size() >= 9) ? trim(fields[8]) : std::string();
+            if (!hv.empty())
             {
+                if (!util::parseDwordValue(hv, v) || v > static_cast<DWORD>(kMaxHangTimeoutMs))
+                {
+                    return "ERR invalid hang-timeout";
+                }
                 hangTimeoutMs = static_cast<int>(v);
             }
         }
@@ -495,10 +500,10 @@ std::string PGS::handleUnregister(DWORD pid)
         m_policyByGuardId.erase(guardId);
         m_persistedGuards.erase(guardId);
         // v3: stop observing this guard's Job Object. The guarded process is
-        // left running - "unregister" means stop protecting, not kill. Closing
-        // PGS's job handle leaves the process alive; the kernel job lingers
-        // until the last process in it exits. See docs/GUARD_POLICIES.md.
-        closeGuardJob(guardId);
+        // left running - "unregister" means stop protecting, not kill. If this
+        // guard was registered with killOnExit, clear KILL_ON_JOB_CLOSE before
+        // closing PGS's job handle so unregister does not terminate the job.
+        closeGuardJob(guardId, true);
     }
 
     persistState();
@@ -697,6 +702,11 @@ std::string PGS::handleModuleCommand(const std::string &args)
         {
             Logger::warning("PGS: rejected module load outside modules dir, path=" + path);
             return "ERR module load restricted to modules directory";
+        }
+        const std::string allowKey = ModuleManager::allowlistKeyForPath(path);
+        if (!m_pplEnabled && allowKey == "ppl")
+        {
+            return "ERR ppl module loading requires PGS_ENABLE_PPL=1 or --enable-ppl";
         }
         // Startup may skip directory scanning unless PPL/module loading is
         // explicitly enabled, but a direct module load must still honor the

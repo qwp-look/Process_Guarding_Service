@@ -2,9 +2,11 @@
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, release/**, codex/roadmap-sched-remote-cluster]
+    tags:
+      - 'Personal_Version_V*'
   pull_request:
-    branches: [master, main]
+    branches: [master, main, release/**, codex/roadmap-sched-remote-cluster]
 
 jobs:
   mingw-build:

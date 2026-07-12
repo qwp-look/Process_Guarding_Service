@@ -82,6 +82,8 @@ private:
         quint64 generation = 0;
         bool healthReachable = false;
         bool guardsReachable = false;
+        int healthStatus = 0;
+        int guardsStatus = 0;
         QString healthError;
         QString guardsError;
         QString healthJson;   // raw /api/cluster/health body

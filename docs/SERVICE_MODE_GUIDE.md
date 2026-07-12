@@ -12,56 +12,47 @@
 
 ## 2. MSYS2 MinGW64 编译命令（C++）
 
-在 `MSYS2 MinGW64` 终端执行：
+推荐直接使用仓库脚本，和 CI/发布链路保持一致。MSYS2 bash `.sh` 脚本读取 `GXX`，Windows `.bat` 脚本读取 `CXX`。
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect
-mkdir -p build
-
-export PATH=/mingw64/bin:/usr/bin
-hash -r
-
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/common/PGLogger.cpp -o build/PGLogger.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/PGS.cpp -o build/PGS.o
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude -c src/service/pgs_service.cpp -o build/pgs_service.o
-g++ -std=c++17 -Wall -Wextra -O2 \
-  build/PGLogger.o build/PGS.o build/pgs_service.o \
-  -o build/pgs_service.exe \
-  -lws2_32 -ladvapi32 -lwtsapi32 -luserenv
-
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude tools/pgs_bless.cpp -o build/pgs_bless.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/guard_example.cpp -o build/guard_example.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/quick_start.cpp -o build/quick_start.exe -lws2_32
-g++ -std=c++17 -Wall -Wextra -O2 -Iinclude examples/smoke_worker.cpp -o build/smoke_worker.exe -lws2_32
-
-# 复制 MinGW 运行库到 C++ 可执行目录（build/）
-cp -f /mingw64/bin/libstdc++-6.dll build/
-cp -f /mingw64/bin/libgcc_s_seh-1.dll build/
-cp -f /mingw64/bin/libwinpthread-1.dll build/
-```
-
-也可以直接执行仓库脚本：
-
-```bash
+cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
+export MINGW_ROOT=/mingw64
+export GXX=$MINGW_ROOT/bin/g++.exe
 ./tools/build_pgs.sh
 ```
+
+Windows `cmd` 入口等价：
+
+```bat
+set MINGW_ROOT=C:\msys64\mingw64
+set CXX=%MINGW_ROOT%\bin\g++.exe
+tools\build_pgs.bat
+```
+
+当前 C++ 主线会编译 `PGSProtocol.cpp`、`ModuleManager.cpp`、`PGSClient.cpp` 以及 bundled `sched`/`ppl` 模块，并链接 `bcrypt`、`wintrust`、`ole32`、`shell32` 等 Windows 库；逐条手工命令请以 `tools/build_pgs.sh` 和 `tools/build_pgs.bat` 为准。
 
 ## 3. MSYS2 MinGW64 编译命令（Qt）
 
 在 `MSYS2 MinGW64` 终端执行：
 
 ```bash
-cd /c/Users/wtg/Desktop/other/MY-code/process_protect
-rm -rf build/pgs_admin_qt
+cd /c/Users/wtg/Desktop/other/MY-code/Process_Guarding_Service
+export MINGW_ROOT=/mingw64
+export CMAKE=$MINGW_ROOT/bin/cmake.exe
+export GXX=$MINGW_ROOT/bin/g++.exe
+./tools/build_qt_admin.sh
 
+# 等价手工 CMake 命令：
+rm -rf build/pgs_admin_qt
 cmake -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
   -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe \
+  -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build/pgs_admin_qt -j4
 
 # Qt 依赖部署 + 复制 MinGW 运行库到 Qt 可执行目录
-/mingw64/bin/windeployqt-qt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
+/mingw64/bin/windeployqt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
 cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
@@ -72,14 +63,19 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 `QHttpServerResponse`/`QHttpHeaders`，构建环境仍需安装 Qt6 HttpServer 组件。MSYS2 当前 Qt 6.11 可直接构建：
 
 ```bash
+./tools/build_qt_web.sh
+
+# 等价手工 CMake 命令：
 cmake -S qt/pgs_admin_web -B build/pgs_admin_web -G "MinGW Makefiles" \
   -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe \
+  -DCMAKE_BUILD_TYPE=Release
 cmake --build build/pgs_admin_web -j4
 
 cmake -S qt/pgs_cluster_web -B build/pgs_cluster_web -G "MinGW Makefiles" \
   -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe \
+  -DCMAKE_BUILD_TYPE=Release
 cmake --build build/pgs_cluster_web -j4
 ```
 
@@ -289,7 +285,7 @@ export PGS_AUTH_TOKEN=your-secret-token
 补充说明：
 
 - Qt 桌面端现在只保留本地运维壳层职责。
-- 真正的浏览器控制端由 `pgs_admin_web` 单独承担，见 `docs/WEB_CONTROL_CONSOLE_PLAN.md`。
+- 真正的浏览器控制端由 `pgs_admin_web` 单独承担，远程暴露要求见 `docs/REMOTE_GATEWAY.md`。
 
 ## 5.2 浏览器控制端
 
@@ -298,9 +294,13 @@ export PGS_AUTH_TOKEN=your-secret-token
 手动编译：
 
 ```bash
+./tools/build_qt_web.sh
+
+# 等价手工 CMake 命令：
 cmake -S qt/pgs_admin_web -B build/pgs_admin_web -G "MinGW Makefiles" \
   -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe \
+  -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build/pgs_admin_web -j4
 ```
@@ -399,7 +399,7 @@ cmake --build build/pgs_admin_web -j4
 Qt 程序建议部署：
 
 ```bash
-/mingw64/bin/windeployqt-qt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
+/mingw64/bin/windeployqt6.exe build/pgs_admin_qt/pgs_admin_qt.exe
 cp -f /mingw64/bin/libstdc++-6.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libgcc_s_seh-1.dll build/pgs_admin_qt/
 cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
@@ -416,7 +416,7 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 - **默认不启用 PPL/驱动**：PPL 模块（`modules/ppl`）与 `Sirius.sys` 内核驱动默认**不加载**。仅当设置环境变量 `PGS_ENABLE_PPL=1` 或向 `pgs_service` 传入 `--enable-ppl` 时才加载。非 opt-in 部署下，`ppl set/get/clear` 不可达，内核驱动也不会被引入。
 - **token 鉴权强制开启**：空 token 不再被接受；未配置 token 时服务自动生成随机 token 并写入受限目录下的 `pgs_initial_token.txt`（仅 SYSTEM/Administrators 可读）。token 哈希为 SHA-256，state/logs 目录以受限 ACL 创建。
 - **token 不走命令行**：控制台 `run` 可用 `PGS_SERVICE_TOKEN`，Qt 管理端与 Web 控制台通过环境变量 `PGS_AUTH_TOKEN` 传 token 给 `pgs_bless`，避免被本地其他用户经进程命令行查询泄露。
-- **`module load` 路径白名单**：服务端只允许加载位于模块目录之内的 DLL，`..`/UNC/盘外绝对路径一律拒绝，避免任意 DLL 被加载进 SYSTEM 级服务进程。
+- **`module load` 路径白名单**：服务端只允许加载位于模块目录之内的 DLL，`..`/UNC/盘外绝对路径一律拒绝，避免任意 DLL 被加载进 SYSTEM 级服务进程。普通模块可显式加载；`ppl` 模块仍要求 `PGS_ENABLE_PPL=1` 或 `--enable-ppl`。
 - **绑定回环**：PGS 管理端口默认绑定 `127.0.0.1`；Web 控制台默认绑定 `127.0.0.1` 并要求 `X-PGS-Token` 头 + `Host`/`Origin` 校验（防 DNS rebinding 与跨站 CSRF）。远程 Web 控制台必须显式 `--remote`，并配置 TLS、RBAC users 文件和 audit log。
 - **cluster 远程监听强制 TLS+token**：`pgs_cluster_web` 默认只监听回环；非回环监听必须提供 `--api-token --tls-cert --tls-key`。
 - **不要在不受信任的主机启用 PPL**：`Sirius.sys` 一旦加载常驻并暴露 `\\.\Sirius` 设备，具备 ARK 级内核能力（终止/隐藏/注入/改 token/读写内存/关 PatchGuard/关 DSE 等），任何能打开该设备的本地主体都获得完整内核级能力；用户态无法修改驱动设备 DACL。

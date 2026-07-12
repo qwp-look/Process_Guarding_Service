@@ -174,7 +174,7 @@ void MainWindow::attachProcessHandlers()
         m_tableStdoutBuffer += QString::fromUtf8(bytes);
     });
     connect(m_tableProcess, &QProcess::readyReadStandardError, this, [this]() {
-        m_tableStdoutBuffer += QString::fromUtf8(m_tableProcess->readAllStandardError());
+        m_tableStderrBuffer += QString::fromUtf8(m_tableProcess->readAllStandardError());
     });
     connect(m_tableProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         QString msg = trUi("table process error: ", "表格进程错误：");
@@ -202,17 +202,25 @@ void MainWindow::attachProcessHandlers()
         }
         statusBar()->showMessage(msg, 5000);
         m_tableStdoutBuffer.clear();
+        m_tableStderrBuffer.clear();
     });
     connect(m_tableProcess, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
         if (exitCode == 0 && status == QProcess::NormalExit)
         {
-            populateGuardTableFromJson(m_tableStdoutBuffer.trimmed());
+            populateGuardTableFromJson(m_tableStdoutBuffer.trimmed(), m_tableStderrBuffer.trimmed());
         }
         else
         {
-            statusBar()->showMessage(trUi("guard table refresh failed", "守护表格刷新失败"), 5000);
+            const QString detail = m_tableStderrBuffer.trimmed();
+            QString message = trUi("guard table refresh failed", "守护表格刷新失败");
+            if (!detail.isEmpty())
+            {
+                message += QStringLiteral(": ") + detail.left(240);
+            }
+            statusBar()->showMessage(message, 5000);
         }
         m_tableStdoutBuffer.clear();
+        m_tableStderrBuffer.clear();
     });
 }
 
@@ -865,6 +873,12 @@ void MainWindow::setupModuleTab(QWidget *page)
     connect(m_btnModuleRefresh, &QPushButton::clicked, this, [this]() {
         refreshModuleTabs();
     });
+    connect(m_moduleTokenEdit, &QLineEdit::textChanged, this, [this](const QString &) {
+        syncModulePageSettings();
+    });
+    connect(m_moduleToolPathEdit, &QLineEdit::textChanged, this, [this](const QString &) {
+        syncModulePageSettings();
+    });
 }
 
 QString MainWindow::defaultModuleDir() const
@@ -911,6 +925,26 @@ void MainWindow::refreshModuleTabs()
     {
         auto *mp = new ModulePage(folder, dir, toolPath, token, zh, m_moduleSubTabs);
         m_moduleSubTabs->addTab(mp, folder);
+    }
+}
+
+void MainWindow::syncModulePageSettings()
+{
+    if (!m_moduleSubTabs)
+        return;
+    const QString token = m_moduleTokenEdit ? m_moduleTokenEdit->text() : QString();
+    QString toolPath = m_moduleToolPathEdit ? m_moduleToolPathEdit->text().trimmed() : QString();
+    if (toolPath.isEmpty())
+    {
+        toolPath = blessToolPath();
+    }
+    for (int i = 0; i < m_moduleSubTabs->count(); ++i)
+    {
+        if (auto *page = qobject_cast<ModulePage *>(m_moduleSubTabs->widget(i)))
+        {
+            page->setToken(token);
+            page->setToolPath(toolPath);
+        }
     }
 }
 
@@ -1077,12 +1111,13 @@ void MainWindow::runTableRefresh(bool silentIfBusy)
 
     m_lastTableRefreshWasAuto = silentIfBusy;
     m_tableStdoutBuffer.clear();
+    m_tableStderrBuffer.clear();
     m_tableProcess->setWorkingDirectory(QFileInfo(program).absolutePath());
     m_tableProcess->setProcessEnvironment(env);
     m_tableProcess->start(program, args);
 }
 
-void MainWindow::populateGuardTableFromJson(const QString &jsonText)
+void MainWindow::populateGuardTableFromJson(const QString &jsonText, const QString &stderrText)
 {
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &parseError);
@@ -1091,7 +1126,13 @@ void MainWindow::populateGuardTableFromJson(const QString &jsonText)
         // Preserve the previous table snapshot on transient failures so the UI
         // does not flicker between "valid data" and "empty table" during brief
         // command or parse hiccups.
-        statusBar()->showMessage(trUi("guard table JSON parse failed", "守护表格 JSON 解析失败"), 5000);
+        QString message = trUi("guard table JSON parse failed", "守护表格 JSON 解析失败");
+        const QString detail = stderrText.trimmed();
+        if (!detail.isEmpty())
+        {
+            message += QStringLiteral(": ") + detail.left(240);
+        }
+        statusBar()->showMessage(message, 5000);
         return;
     }
 

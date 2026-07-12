@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -125,9 +126,11 @@ private:
     SERVICE_STATUS_HANDLE m_statusHandle = nullptr;
     SERVICE_STATUS m_status{};
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_stopping{false};
     std::atomic<bool> m_consoleStopRequested{false};
     PGS m_pgs;
     std::thread m_worker;
+    std::mutex m_statusMutex;
 
     inline static PGSServiceHost *s_instance = nullptr;
     inline static PGSServiceHost *s_consoleInstance = nullptr;
@@ -477,7 +480,20 @@ private:
             {
                 Sleep(500);
             }
+            m_stopping = true;
+            std::thread stopStatusPulse([this]() {
+                while (m_stopping.load())
+                {
+                    updateStatus(SERVICE_STOP_PENDING, NO_ERROR, 10000);
+                    Sleep(2000);
+                }
+            });
             m_pgs.stop();
+            m_stopping = false;
+            if (stopStatusPulse.joinable())
+            {
+                stopStatusPulse.join();
+            }
         });
 
         updateStatus(SERVICE_RUNNING, NO_ERROR, 0);
@@ -510,6 +526,7 @@ private:
 
     void updateStatus(DWORD state, DWORD win32ExitCode, DWORD waitHint)
     {
+        std::lock_guard<std::mutex> lock(m_statusMutex);
         m_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
         m_status.dwCurrentState = state;
         m_status.dwWin32ExitCode = win32ExitCode;

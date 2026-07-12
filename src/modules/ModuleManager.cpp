@@ -3,7 +3,8 @@
  * @brief Implementation of the PGS module registry (ModuleManager).
  *
  * Loading pipeline:
- *   LoadLibraryW -> GetProcAddress(PG_GetName/Invoke/...) -> name lookup
+ *   export preprobe -> allowlist/hash/signature -> LoadLibraryW ->
+ *   GetProcAddress(PG_GetName/Invoke/...) -> ABI/name lookup
  *   (reject duplicates) -> PG_Init -> store Entry.
  *
  * The directory scan (loadFromDirectory) holds the lock for the whole scan so
@@ -121,28 +122,37 @@ namespace ProcessGuard
     {
         const std::wstring wpath = util::utf8ToWide(path);
 
+        // Refuse obvious non-modules before the real LoadLibraryW. This probe
+        // maps the image without running DllMain.
+        if (!hasExportByName(wpath, "PG_GetName") || !hasExportByName(wpath, "PG_Invoke"))
+        {
+            err = "missing required PG_ exports";
+            return false;
+        }
+
         // v3 security gate: refuse to LoadLibrary a module that is not on the
         // allowlist (fail-closed when the allowlist is empty and we are not in
         // permissive/development mode), and enforce an Authenticode signature
         // when the allowlist entry requires one. This runs BEFORE the real
         // LoadLibraryW so an untrusted DLL never gets its DllMain under PGS.
+        std::string allowKey;
         if (!m_permissive)
         {
-            const std::string key = moduleKeyFromPath(path);
-            if (key.empty())
+            allowKey = moduleKeyFromPath(path);
+            if (allowKey.empty())
             {
                 err = "module not in allowlist (cannot derive key)";
                 return false;
             }
-            const AllowEntry *entry = findAllowEntry(key);
+            const AllowEntry *entry = findAllowEntry(allowKey);
             if (!entry)
             {
-                err = "module not in allowlist: " + key;
+                err = "module not in allowlist: " + allowKey;
                 return false;
             }
             if (entry->requireSigned && !verifySignature(wpath))
             {
-                err = "signature verification failed: " + key;
+                err = "signature verification failed: " + allowKey;
                 return false;
             }
             // Optional pinned-hash check against the file on disk.
@@ -152,7 +162,7 @@ namespace ProcessGuard
                 if (!util::sha256FileHex(path, actual) ||
                     util::toLowerAscii(actual) != util::toLowerAscii(entry->sha256))
                 {
-                    err = "hash mismatch: " + key;
+                    err = "hash mismatch: " + allowKey;
                     return false;
                 }
             }
@@ -186,12 +196,38 @@ namespace ProcessGuard
             return false;
         }
 
-        e.name = e.getName();
-        e.version = e.getVersion ? e.getVersion() : "";
+        if (e.getAbiVersion)
+        {
+            const unsigned int abi = e.getAbiVersion();
+            if (abi != PG_MODULE_ABI_VERSION)
+            {
+                FreeLibrary(handle);
+                err = "module ABI mismatch: got " + std::to_string(abi) +
+                      ", expected " + std::to_string(PG_MODULE_ABI_VERSION);
+                return false;
+            }
+        }
+
+        const char *namePtr = e.getName();
+        if (!namePtr || namePtr[0] == '\0')
+        {
+            FreeLibrary(handle);
+            err = "module returned empty name";
+            return false;
+        }
+        e.name = namePtr;
+        const char *versionPtr = e.getVersion ? e.getVersion() : "";
+        e.version = versionPtr ? versionPtr : "";
         if (e.name.empty())
         {
             FreeLibrary(handle);
             err = "module returned empty name";
+            return false;
+        }
+        if (!m_permissive && lower(e.name) != lower(allowKey))
+        {
+            FreeLibrary(handle);
+            err = "module name mismatch: allowlist key " + allowKey + ", PG_GetName " + e.name;
             return false;
         }
 

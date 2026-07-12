@@ -12,7 +12,10 @@
 
 #include <windows.h>
 #include <winsvc.h>
+#include <algorithm>
+#include <cwctype>
 #include <string>
+#include <vector>
 
 #include "SiriusIO.h"
 
@@ -64,6 +67,8 @@ namespace pgs_ppl
         bool loadSiriusDriver(const std::wstring &driverPath, std::string &err);
         static std::string toUtf8(const std::wstring &w);
         static std::wstring dirOf(HMODULE hModule);
+        static std::wstring normalizePathForCompare(std::wstring path);
+        static bool serviceImagePathMatches(SC_HANDLE service, const std::wstring &expectedPath, std::string &err);
     };
 
     inline SiriusDriverClient::SiriusDriverClient()
@@ -96,6 +101,63 @@ inline std::string SiriusDriverClient::toUtf8(const std::wstring &w)
         std::wstring p(buf);
         std::size_t slash = p.find_last_of(L"\\/");
         return (slash == std::wstring::npos) ? std::wstring(L".") : p.substr(0, slash);
+    }
+
+    inline std::wstring SiriusDriverClient::normalizePathForCompare(std::wstring path)
+    {
+        while (path.size() >= 2 && path.front() == L'"' && path.back() == L'"')
+        {
+            path = path.substr(1, path.size() - 2);
+        }
+        if (path.rfind(L"\\??\\", 0) == 0)
+        {
+            path = path.substr(4);
+        }
+        else if (path.rfind(L"\\\\?\\", 0) == 0)
+        {
+            path = path.substr(4);
+        }
+
+        std::vector<wchar_t> full(MAX_PATH, L'\0');
+        DWORD len = GetFullPathNameW(path.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
+        if (len >= full.size())
+        {
+            full.assign(len + 1, L'\0');
+            len = GetFullPathNameW(path.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
+        }
+        std::wstring normalized = (len > 0 && len < full.size()) ? std::wstring(full.data(), len) : path;
+        std::replace(normalized.begin(), normalized.end(), L'/', L'\\');
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+        return normalized;
+    }
+
+    inline bool SiriusDriverClient::serviceImagePathMatches(SC_HANDLE service, const std::wstring &expectedPath, std::string &err)
+    {
+        DWORD needed = 0;
+        QueryServiceConfigW(service, nullptr, 0, &needed);
+        if (needed == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+        {
+            err = "QueryServiceConfig(Sirius) failed, error=" + std::to_string(GetLastError());
+            return false;
+        }
+
+        std::vector<BYTE> buffer(needed);
+        auto *config = reinterpret_cast<QUERY_SERVICE_CONFIGW *>(buffer.data());
+        if (!QueryServiceConfigW(service, config, needed, &needed))
+        {
+            err = "QueryServiceConfig(Sirius) failed, error=" + std::to_string(GetLastError());
+            return false;
+        }
+
+        const std::wstring actual = config->lpBinaryPathName ? config->lpBinaryPathName : L"";
+        if (normalizePathForCompare(actual) != normalizePathForCompare(expectedPath))
+        {
+            err = "existing Sirius service points to unexpected driver: " + toUtf8(actual);
+            return false;
+        }
+        return true;
     }
 
     // Find Sirius.sys: prefer beside this module DLL, then beside the main
@@ -137,8 +199,16 @@ inline std::string SiriusDriverClient::toUtf8(const std::wstring &w)
         if (hService)
         {
             // Pre-existing service (e.g. loaded by StarlightGUI): we did NOT
-            // create it, so shutdown() must leave it alone.
+            // create it, so shutdown() must leave it alone. Do not trust the
+            // service name alone: require the ImagePath to match the Sirius.sys
+            // that ships beside this module.
             m_weCreatedService = false;
+            if (!serviceImagePathMatches(hService, driverPath, err))
+            {
+                CloseServiceHandle(hService);
+                CloseServiceHandle(hSCM);
+                return false;
+            }
             SERVICE_STATUS status{};
             if (QueryServiceStatus(hService, &status))
             {
@@ -171,9 +241,10 @@ inline std::string SiriusDriverClient::toUtf8(const std::wstring &w)
 
     // Lazily make the device handle ready. Idempotent and thread-safe
     // (CRITICAL_SECTION). Resolves Sirius.sys beside the module DLL (else beside
-    // the main exe), asks the SCM to load it, then opens \\.\Sirius. Even if the
-    // SCM step fails we still try CreateFile — another host may already have
-    // loaded the driver.
+    // the main exe), asks the SCM to load it, then opens \\.\Sirius. The SCM
+    // step must succeed or attach to a verified service before we open the
+    // device. Otherwise a pre-existing unrelated \\.\Sirius device could be
+    // mistaken for the bundled driver.
     inline bool SiriusDriverClient::ensureDevice(std::string &err)
     {
         lock();
@@ -187,8 +258,8 @@ inline std::string SiriusDriverClient::toUtf8(const std::wstring &w)
 
         if (!loadSiriusDriver(m_driverPath, err))
         {
-            // The device may still exist if another host (e.g. StarlightGUI)
-            // already loaded the driver; try to open it regardless.
+            unlock();
+            return false;
         }
 
         HANDLE device = CreateFileW(kSiriusDeviceName, GENERIC_READ | GENERIC_WRITE, 0, nullptr,

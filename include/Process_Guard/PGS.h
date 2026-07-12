@@ -172,6 +172,7 @@ namespace ProcessGuard
         static constexpr int kDefaultRestartWindowSec = 0; // 0 = lifetime count
         static constexpr int kDefaultRestartDelayMs = 0;
         static constexpr int kDefaultHangTimeoutMs = 0;
+        static constexpr int kMaxHangTimeoutMs = 60000;
         static constexpr int kMaxBackoffMs = 60000; // backoff cap
 
         enum class RecvResult { Ok, Closed, Error, TooLarge };
@@ -294,7 +295,7 @@ namespace ProcessGuard
         // restart / unregister / intentional to "clear the field" before relaunch.
         void terminateGuardFamily(std::uint64_t guardId);
         // Close + forget a guard's job handle.
-        void closeGuardJob(std::uint64_t guardId);
+        void closeGuardJob(std::uint64_t guardId, bool preserveProcesses = false);
 
         // GUI hang probe: returns true if the guard's main window is unresponsive.
         bool isGuardHung(const GuardInfo &info) const;

@@ -25,7 +25,7 @@ PGS 命令（bless / unbless / policy 等）。它是首个使用 **ABI v2** 的
 
 ## 2. 动作白名单
 
-允许：bless register unbless unregister bless-start start-bless policy set-policy intentional list get ping
+允许：bless register unbless unregister policy set-policy intentional list get ping
 禁止：token-set module load/unload service install/stop/uninstall ppl
 
 这是防提权硬约束：即使 pgs_sched.db 被篡改，也无法通过调度执行高危命令。

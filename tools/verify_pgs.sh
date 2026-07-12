@@ -58,7 +58,7 @@ echo
 if [[ "${PGS_SKIP_SMOKE:-0}" == "1" ]]; then
   echo "[Smoke] skipped because PGS_SKIP_SMOKE=1"
 else
-  bash ./tools/smoke_test_pgs.sh
+  PGS_SMOKE_PORT="${PGS_SMOKE_PORT:-23456}" bash ./tools/smoke_test_pgs.sh
 fi
 
 echo
