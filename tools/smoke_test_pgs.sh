@@ -4,7 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-export PATH="/mingw64/bin:/usr/bin"
+MINGW_ROOT="${MINGW_ROOT:-/mingw64}"
+export PATH="${MINGW_ROOT}/bin:/usr/bin:${PATH:-}"
 
 # Lightweight runtime validation for the most failure-prone paths:
 # - console run mode startup
@@ -15,17 +16,23 @@ export PATH="/mingw64/bin:/usr/bin"
 
 token="smoke-token"
 rotated_token="smoke-token-rotated"
+pgs_port="${PGS_SMOKE_PORT:-12345}"
 service_pid=""
 service_job_pid=""
 guard_pid=""
 worker_path_win="$(cygpath -w "$repo_root/build/smoke_worker.exe")"
 service_log="$repo_root/build/smoke_service.log"
 service_err_log="$repo_root/build/smoke_service.err.log"
+smoke_program_data="${PGS_SMOKE_PROGRAMDATA:-$repo_root/build/local_pd_smoke}"
 ps_exe="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
 process_exists() {
   local pid="$1"
   "$ps_exe" -NoProfile -Command "if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >/dev/null 2>&1
+}
+
+bless() {
+  ./build/pgs_bless.exe --port "$pgs_port" "$@"
 }
 
 force_stop_process() {
@@ -35,10 +42,11 @@ force_stop_process() {
 
 start_service_process() {
   local token_value="${1:-}"
+  mkdir -p "$smoke_program_data"
   if [[ -n "$token_value" ]]; then
-    ./build/pgs_service.exe run --token "$token_value" >"$service_log" 2>"$service_err_log" &
+    ProgramData="$(cygpath -w "$smoke_program_data")" ./build/pgs_service.exe run --token "$token_value" --port "$pgs_port" >"$service_log" 2>"$service_err_log" &
   else
-    ./build/pgs_service.exe run >"$service_log" 2>"$service_err_log" &
+    ProgramData="$(cygpath -w "$smoke_program_data")" ./build/pgs_service.exe run --port "$pgs_port" >"$service_log" 2>"$service_err_log" &
   fi
 
   service_job_pid=$!
@@ -56,7 +64,7 @@ cleanup() {
   set +e
 
   if [[ -n "$guard_pid" ]]; then
-    ./build/pgs_bless.exe intentional --pid "$guard_pid" --token "$token" >/dev/null 2>&1 || true
+    bless intentional --pid "$guard_pid" --token "$token" >/dev/null 2>&1 || true
     force_stop_process "$guard_pid"
   fi
 
@@ -79,7 +87,7 @@ fi
 
 ready=0
 for _ in $(seq 1 40); do
-  if ./build/pgs_bless.exe ping --token "$token" >/dev/null 2>&1; then
+  if bless ping --token "$token" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -92,16 +100,16 @@ if [[ "$ready" -ne 1 ]]; then
 fi
 
 echo "[Smoke] ping ok"
-./build/pgs_bless.exe list --json --token "$token" >"$repo_root/build/smoke_list_initial.json"
+bless list --json --token "$token" >"$repo_root/build/smoke_list_initial.json"
 
 echo "[Smoke] rotating token..."
-./build/pgs_bless.exe token-set --old-token "$token" --new-token "$rotated_token" --token "$token" >/dev/null
+bless token-set --old-token "$token" --new-token "$rotated_token" --token "$token" >/dev/null
 token="$rotated_token"
-./build/pgs_bless.exe ping --token "$token" >/dev/null
+bless ping --token "$token" >/dev/null
 
 echo "[Smoke] bless-start smoke_worker..."
 bless_output="$(
-  ./build/pgs_bless.exe bless-start \
+  bless bless-start \
     --path "$worker_path_win" \
     --start-args "--sleep-ms 30000" \
     --max-restarts 1 \
@@ -116,8 +124,8 @@ if [[ -z "$guard_pid" ]]; then
   exit 1
 fi
 
-./build/pgs_bless.exe get --pid "$guard_pid" --token "$token" >"$repo_root/build/smoke_guard_get.txt"
-./build/pgs_bless.exe list --json --token "$token" >"$repo_root/build/smoke_list_after_bless.json"
+bless get --pid "$guard_pid" --token "$token" >"$repo_root/build/smoke_guard_get.txt"
+bless list --json --token "$token" >"$repo_root/build/smoke_list_after_bless.json"
 
 echo "[Smoke] simulating service crash..."
 force_stop_process "$service_pid"
@@ -128,7 +136,7 @@ for _ in $(seq 1 20); do
     sleep 0.2
     continue
   fi
-  if ./build/pgs_bless.exe ping --token "$token" >/dev/null 2>&1; then
+  if bless ping --token "$token" >/dev/null 2>&1; then
     sleep 0.2
     continue
   fi
@@ -168,7 +176,7 @@ fi
 
 ready=0
 for _ in $(seq 1 40); do
-  if ./build/pgs_bless.exe ping --token "$token" >/dev/null 2>&1; then
+  if bless ping --token "$token" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -185,7 +193,7 @@ restored_list_path="$repo_root/build/smoke_list_restored.json"
 restored_list_path_win="$(cygpath -w "$restored_list_path")"
 restored_pid=""
 for _ in $(seq 1 40); do
-  ./build/pgs_bless.exe list --json --token "$token" >"$restored_list_path"
+  bless list --json --token "$token" >"$restored_list_path"
   restored_pid="$(
     "$ps_exe" -NoProfile -Command "\$items = Get-Content -Raw '$restored_list_path_win' | ConvertFrom-Json; \$item = \$items | Where-Object { \$_.path -like '*smoke_worker.exe' } | Select-Object -First 1; if (\$item) { Write-Output \$item.pid }"
   )"
@@ -201,10 +209,10 @@ if [[ -z "$restored_pid" ]]; then
 fi
 
 guard_pid="$restored_pid"
-./build/pgs_bless.exe get --pid "$guard_pid" --token "$token" >"$repo_root/build/smoke_guard_restored_get.txt"
+bless get --pid "$guard_pid" --token "$token" >"$repo_root/build/smoke_guard_restored_get.txt"
 
 echo "[Smoke] cleaning restored guard..."
-./build/pgs_bless.exe intentional --pid "$guard_pid" --token "$token" >/dev/null
+bless intentional --pid "$guard_pid" --token "$token" >/dev/null
 force_stop_process "$guard_pid"
 
 
@@ -215,14 +223,14 @@ window_list_win="$(cygpath -w "$window_list_path")"
 
 # echo the pid of any currently-guarded smoke_worker (empty if none)
 find_worker_pid() {
-  ./build/pgs_bless.exe list --json --token "$token" >"$window_list_path" 2>/dev/null || true
+  bless list --json --token "$token" >"$window_list_path" 2>/dev/null || true
   "$ps_exe" -NoProfile -Command "\$items = Get-Content -Raw '$window_list_win' | ConvertFrom-Json; \$item = \$items | Where-Object { \$_.path -like '*smoke_worker.exe' } | Select-Object -First 1; if (\$item) { Write-Output \$item.pid }" 2>/dev/null | tr -d '\r\n'
   return 0
 }
 
 # register a fresh worker: max-restarts 1 => one restart allowed, second kill stops
 window_bless_output="$(
-  ./build/pgs_bless.exe bless-start \
+  bless bless-start \
     --path "$worker_path_win" \
     --start-args "--sleep-ms 30000" \
     --max-restarts 1 \
@@ -273,5 +281,5 @@ fi
 echo "[Smoke] v3: window-exhaust stop confirmed (no restart after kill #2)"
 
 # tidy: unregister the exhausted guard if its entry lingers
-./build/pgs_bless.exe unregister --pid "$first_restarted" --token "$token" >/dev/null 2>&1 || true
+bless unregister --pid "$first_restarted" --token "$token" >/dev/null 2>&1 || true
 echo "[Smoke] smoke test completed"

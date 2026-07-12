@@ -165,6 +165,8 @@ PGS 当前 token 规则：
 
 服务由 SCM 恢复后，会先读取守护归档和 token hash 再恢复现场。只有首次启动且此前没有旧归档时，服务会自动生成随机 token 并写入 `pgs_initial_token.txt`（目录 ACL 仅 SYSTEM+Administrators）。要切换 token，使用 `token-set` 命令。
 
+`install` 会把需要 SCM 后续启动继续生效的运行参数写入服务 `binPath`，目前包括 `--port <1-65535>`、`--enable-ppl` 和 `--allow-all-modules`。`--allow-all-modules` 等价于关闭模块 allowlist 边界，只建议开发/应急调试使用。`--token` 不会写入 SCM 命令行，避免被本机其他用户从服务配置或进程命令行读取；token 请通过首次生成文件、环境变量或 `token-set` 管理。
+
 ### 客户端携带 token
 
 方式 1：显式参数
@@ -352,8 +354,7 @@ cmake --build build/pgs_admin_web -j4
   --tls-key key.pem
 ```
 
-节点文件格式为 `name;https://host:port;user:pass`。URL 不允许嵌入 `user:pass@host`，
-API 也不会回显第三列凭据；但文件本身仍是明文，生产部署请限制 ACL。
+节点文件新保存格式为 `name;https://host:port;dpapi:<protected user:pass>`；旧 `name;https://host:port;user:pass` 兼容读取，并会在下次保存时迁移。URL 不允许嵌入 `user:pass@host`，API 也不会回显第三列凭据。Windows DPAPI 保护的是静态落盘内容，运行该仪表盘的同一 Windows 用户/服务账号仍可解密，生产部署仍应限制 ACL。
 
 ## 5.4 `pgs_bless` 参数详解
 

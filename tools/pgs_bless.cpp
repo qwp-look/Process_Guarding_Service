@@ -621,12 +621,14 @@ void showUsage(const char *exe)
         << "  --host <ip>          default 127.0.0.1\n"
         << "  --port <port>        default 12345\n"
         << "  --token <value>      prepend auth envelope: token <value> <command>\n"
+        << "                      --host/--port/--token may appear before or after the command\n"
         << "  --old-token <value>  old token for token-set (defaults to --token)\n"
         << "  --new-token <value>  new token for token-set\n"
         << "  --path <exe>         for bless-start, or override path in bless mode\n"
         << "  --start-args \"...\"   process launch arguments for bless-start\n"
         << "  --command \"...\"      custom full launch command for bless-start\n"
-        << "  --json               print list/get output as JSON\n"        << "  --name <value>       module name (module unload/call, ppl module)\n"
+        << "  --json               print list/get output as JSON\n"
+        << "  --name <value>       module name (module unload/call, ppl module)\n"
         << "  --request \"kv\"      module call request, e.g. op=set;pid=N;signer=X\n"
         << "  --signer <value>     PPL signer for ppl set\n"
         << "\nCompatibility:\n"
@@ -748,21 +750,71 @@ int main()
     std::string aumid;
     bool winapp = false;
 
-    if (parsePid(argsUtf8[1], pid))
+    auto consumeValue = [&](int &index, const char *name) -> std::string {
+        if (index + 1 >= static_cast<int>(argsUtf8.size()))
+        {
+            std::cerr << "Missing value for " << name << "\n";
+            return std::string();
+        }
+        return argsUtf8[++index];
+    };
+
+    // Common transport/auth options are accepted before the command as well as
+    // after it. This keeps `pgs_bless --port 12443 ping` intuitive while
+    // preserving the existing `pgs_bless ping --port 12443` form.
+    while (argIndex < static_cast<int>(argsUtf8.size()))
+    {
+        const std::string arg = argsUtf8[argIndex];
+        if (arg == "--host")
+        {
+            host = consumeValue(argIndex, "--host");
+            if (host.empty())
+                return 1;
+            ++argIndex;
+            continue;
+        }
+        if (arg == "--port")
+        {
+            const std::string value = consumeValue(argIndex, "--port");
+            if (!parseUnsignedShort(value, port))
+            {
+                std::cerr << "Invalid --port value\n";
+                return 1;
+            }
+            ++argIndex;
+            continue;
+        }
+        if (arg == "--token")
+        {
+            token = consumeValue(argIndex, "--token");
+            if (token.empty())
+                return 1;
+            ++argIndex;
+            continue;
+        }
+        break;
+    }
+
+    if (argIndex >= static_cast<int>(argsUtf8.size()))
+    {
+        showUsage(argsUtf8[0].c_str());
+        return 1;
+    }
+
+    if (parsePid(argsUtf8[argIndex], pid))
     {
         command = "bless";
         hasPid = true;
-        argIndex = 2;
+        ++argIndex;
     }
     else
     {
-        command = argsUtf8[1];
-        argIndex = 2;
+        command = argsUtf8[argIndex++];
         // Peel off the subcommand token for module/ppl so argIndex skips it.
         if (command == "module" || command == "ppl" || command == "schedule")
         {
-            subCommand = (argsUtf8.size() > 2) ? argsUtf8[2] : std::string();
-            argIndex = 3;
+            subCommand = (argIndex < static_cast<int>(argsUtf8.size())) ? argsUtf8[argIndex] : std::string();
+            ++argIndex;
         }
     }
 
@@ -770,12 +822,7 @@ int main()
     {
         const std::string arg = argsUtf8[i];
         auto needValue = [&](const char *name) -> std::string {
-            if (i + 1 >= static_cast<int>(argsUtf8.size()))
-            {
-                std::cerr << "Missing value for " << name << "\n";
-                return std::string();
-            }
-            return argsUtf8[++i];
+            return consumeValue(i, name);
         };
 
         if (arg == "--pid")

@@ -2,6 +2,48 @@
 一个利用AI-Codeing的windows进程守护小工具
 本项目由qwp-look和AI一同开发
 
+## 普通用户快速开始
+
+推荐优先使用安装包：以管理员身份运行 `pgs_setup_3.1.0.exe`，按向导安装。默认会把程序装到 `Program Files\ProcessGuard`，可选安装并启动 PGS Windows 服务、启用 Sirius PPL 驱动所需的测试签名模式、添加远程网关防火墙规则。安装完成后可启动 **PGS 管理端（Qt）**，填写当前 token 后添加、查看、取消守护进程。
+
+首次安装服务后，如果没有旧状态归档，PGS 会自动生成随机 token，明文只写入受限目录下的 `C:\ProgramData\ProcessGuard\state\pgs_initial_token.txt`，token hash 会随状态归档持久化。卸载时安装器会删除安装目录、停止并卸载 PGS 服务、移除防火墙规则；`C:\ProgramData\ProcessGuard` 默认保留，便于重装后恢复守护列表和 token hash，卸载过程会询问是否删除。
+
+如果使用便携包，解压后在管理员终端执行：
+
+```bat
+pgs_service.exe install
+pgs_service.exe start
+pgs_admin_qt.exe
+```
+
+普通运维只需要这些文档：
+
+- 服务安装、token、常用命令：[`docs/SERVICE_MODE_GUIDE.md`](docs/SERVICE_MODE_GUIDE.md)
+- 模块与 PPL 驱动：[`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)
+- 远程 Web 网关：[`docs/REMOTE_GATEWAY.md`](docs/REMOTE_GATEWAY.md)
+- 集群监控面板：[`docs/CLUSTER_DASHBOARD.md`](docs/CLUSTER_DASHBOARD.md)
+
+## 开发者构建入口
+
+开发环境推荐 MSYS2 MinGW64。脚本默认使用 `C:\msys64\mingw64`，也支持通过环境变量改路径：
+
+```bat
+set MINGW_ROOT=C:\msys64\mingw64
+set CXX=%MINGW_ROOT%\bin\g++.exe
+set CMAKE=%MINGW_ROOT%\bin\cmake.exe
+set MSYS2_BASH=C:\msys64\usr\bin\bash.exe
+tools\verify.bat
+```
+
+```bash
+export MINGW_ROOT=/mingw64
+export GXX=$MINGW_ROOT/bin/g++.exe
+export CMAKE=$MINGW_ROOT/bin/cmake.exe
+./tools/verify_pgs.sh
+```
+
+Qt 桌面管理端继续保留 Qt Widgets 是合理的；Web/Cluster 后端若后续要进一步轻量化，可以把 HTTP/JSON/TLS 聚合层逐步迁移到 Boost.Asio/Beast + Boost.JSON，减少 QtHttpServer 类型依赖。但这属于中期架构重构，不建议在当前交付里贸然替换桌面端 Qt。
+
 # ProcessGuard（PGS 服务主线）
 
 本仓库已统一为一条实现主线：

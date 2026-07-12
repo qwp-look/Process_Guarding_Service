@@ -445,7 +445,7 @@ PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染�
 
 `pgs_cluster_web` 是独立聚合器，按 5s cadence 轮询多个 remote gateway：
 
-- 节点 registry 格式为 `name;https://host:port;user:pass`；API 不回显第三列 credentials。
+- 节点 registry 新保存格式为 `name;https://host:port;dpapi:<protected user:pass>`；旧 `name;https://host:port;user:pass` 兼容读取并会在下次保存时迁移。API 不回显第三列 credentials。
 - 节点 URL 必须为 HTTPS，且拒绝 `user:pass@host`、query、fragment，避免凭据从 list/summary 或前端泄漏。
 - 默认只监听 `127.0.0.1` 并生成本次运行 API token 嵌入本地页面；非回环监听必须提供显式
   `--api-token --tls-cert --tls-key`。

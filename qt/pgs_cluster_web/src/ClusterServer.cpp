@@ -17,6 +17,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QHostAddress>
+#include <QHttpHeaders>
 #include <QHttpServerRequest>
 #include <QHttpServerResponse>
 #include <QJsonArray>
@@ -37,6 +38,17 @@
 #include <QUrl>
 #include <utility>
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <dpapi.h>
+#endif
+
 namespace
 {
 QHttpServerResponse jsonError(const QString &message, int statusCode)
@@ -45,6 +57,15 @@ QHttpServerResponse jsonError(const QString &message, int statusCode)
     obj.insert("ok", false);
     obj.insert("error", message);
     return QHttpServerResponse(obj, static_cast<QHttpServerResponse::StatusCode>(statusCode));
+}
+
+QHttpServerResponse jsonUnauthorized()
+{
+    QHttpServerResponse response = jsonError(QStringLiteral("unauthorized"), 401);
+    QHttpHeaders headers = response.headers();
+    headers.replaceOrAppend(QByteArrayLiteral("WWW-Authenticate"), QByteArrayLiteral("Basic realm=\"PGS Cluster\""));
+    response.setHeaders(std::move(headers));
+    return response;
 }
 
 bool isLoopbackBindAddress(const QHostAddress &address)
@@ -174,6 +195,53 @@ bool normalizeNodeUrl(const QString &input, QString &outUrl)
     }
     return true;
 }
+
+QString protectNodeCredentials(const QString &plain)
+{
+#ifdef Q_OS_WIN
+    QByteArray utf8 = plain.toUtf8();
+    DATA_BLOB in{};
+    in.cbData = static_cast<DWORD>(utf8.size());
+    in.pbData = reinterpret_cast<BYTE *>(utf8.data());
+    DATA_BLOB out{};
+    if (CryptProtectData(&in, L"PGS cluster node credentials", nullptr, nullptr, nullptr, 0, &out))
+    {
+        QByteArray protectedBytes(reinterpret_cast<const char *>(out.pbData), static_cast<int>(out.cbData));
+        LocalFree(out.pbData);
+        return QStringLiteral("dpapi:") + QString::fromLatin1(protectedBytes.toBase64());
+    }
+#endif
+    return plain;
+}
+
+bool unprotectNodeCredentials(const QString &stored, QString &plain)
+{
+    if (!stored.startsWith(QStringLiteral("dpapi:")))
+    {
+        plain = stored;
+        return true;
+    }
+#ifdef Q_OS_WIN
+    const QByteArray encoded = stored.mid(6).toLatin1();
+    const QByteArray protectedBytes = QByteArray::fromBase64(encoded);
+    if (protectedBytes.isEmpty())
+        return false;
+    DATA_BLOB in{};
+    in.cbData = static_cast<DWORD>(protectedBytes.size());
+    in.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(protectedBytes.constData()));
+    DATA_BLOB out{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, 0, &out))
+        return false;
+    QByteArray clear(reinterpret_cast<const char *>(out.pbData), static_cast<int>(out.cbData));
+    LocalFree(out.pbData);
+    plain = QString::fromUtf8(clear);
+    return true;
+#else
+    Q_UNUSED(stored);
+    Q_UNUSED(plain);
+    return false;
+#endif
+}
 }
 
 ClusterServer::ClusterServer(QString nodesFile, QString listenAddress, quint16 listenPort,
@@ -209,6 +277,7 @@ bool ClusterServer::start()
     if (bindAddress.isNull())
         return false;
     const bool remoteBind = !isLoopbackBindAddress(bindAddress);
+    m_remoteBind = remoteBind;
     if (remoteBind && m_apiTokenGenerated)
         return false;
     if ((remoteBind || !m_tlsCertPath.trimmed().isEmpty() || !m_tlsKeyPath.trimmed().isEmpty()) && !setupTls())
@@ -253,24 +322,26 @@ bool ClusterServer::start()
             {
                 if (!qgetenv("PGS_WEB_TRACE").isEmpty())
                     QTextStream(stderr) << "PGS cluster route / entered\n";
+                if (m_remoteBind && !isApiAuthorized(req))
+                    return jsonUnauthorized();
                 return handleDashboard();
             }
             if (path == QStringLiteral("/api/cluster/summary") && req.method() == Method::Get)
             {
                 if (!isApiAuthorized(req))
-                    return jsonError(QStringLiteral("unauthorized"), 401);
+                    return jsonUnauthorized();
                 return handleSummary();
             }
             if (path == QStringLiteral("/api/cluster/nodes") && req.method() == Method::Get)
             {
                 if (!isApiAuthorized(req))
-                    return jsonError(QStringLiteral("unauthorized"), 401);
+                    return jsonUnauthorized();
                 return handleNodesList();
             }
             if (path == QStringLiteral("/api/cluster/nodes") && req.method() == Method::Post)
             {
                 if (!isApiAuthorized(req))
-                    return jsonError(QStringLiteral("unauthorized"), 401);
+                    return jsonUnauthorized();
                 if (!isJsonRequest(req))
                     return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
                 return handleNodeAdd(req);
@@ -278,7 +349,7 @@ bool ClusterServer::start()
             if (path == QStringLiteral("/api/cluster/nodes") && req.method() == Method::Delete)
             {
                 if (!isApiAuthorized(req))
-                    return jsonError(QStringLiteral("unauthorized"), 401);
+                    return jsonUnauthorized();
                 if (!isJsonRequest(req))
                     return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
                 return handleNodeRemove(req);
@@ -316,8 +387,17 @@ bool ClusterServer::isApiAuthorized(const PgsHttp::Request &request) const
 
     const QString bearerPrefix = QStringLiteral("Bearer ");
     const QString authorization = request.value("Authorization").trimmed();
-    if (authorization.startsWith(bearerPrefix) && constantTimeEquals(authorization.mid(bearerPrefix.size()), m_apiToken))
+    if (authorization.startsWith(bearerPrefix, Qt::CaseInsensitive) && constantTimeEquals(authorization.mid(bearerPrefix.size()), m_apiToken))
         return true;
+
+    const QString basicPrefix = QStringLiteral("Basic ");
+    if (authorization.startsWith(basicPrefix, Qt::CaseInsensitive))
+    {
+        const QByteArray decoded = QByteArray::fromBase64(authorization.mid(basicPrefix.size()).toLatin1());
+        const int colon = decoded.indexOf(':');
+        if (colon >= 0 && constantTimeEquals(QString::fromUtf8(decoded.mid(colon + 1)), m_apiToken))
+            return true;
+    }
 
     const QString token = request.value("X-API-Token").trimmed();
     return !token.isEmpty() && constantTimeEquals(token, m_apiToken);
@@ -371,7 +451,7 @@ bool ClusterServer::loadNodeCaCertificates()
 }
 
 // ---- Node registry persistence ----
-// Format: name;baseHttpsUrl;user:pass
+// Format: name;baseHttpsUrl;dpapi:<protected user:pass> (legacy user:pass is read)
 void ClusterServer::loadNodes()
 {
     QFile f(m_nodesFile);
@@ -391,7 +471,8 @@ void ClusterServer::loadNodes()
         if (!normalizeNodeUrl(QString::fromUtf8(parts[1]), normalizedUrl))
             continue;
         n.baseHttpsUrl = normalizedUrl;
-        n.credentials = QString::fromUtf8(parts[2]);
+        if (!unprotectNodeCredentials(QString::fromUtf8(parts[2]), n.credentials))
+            continue;
         if (!isSafeRegistryField(n.name) ||
             !isSafeRegistryField(n.baseHttpsUrl) ||
             !isSafeRegistryField(n.credentials))
@@ -410,9 +491,9 @@ void ClusterServer::saveNodes()
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
         return;
     QTextStream ts(&f);
-    ts << "# PGS cluster node registry: name;baseHttpsUrl;user:pass\n";
+    ts << "# PGS cluster node registry: name;baseHttpsUrl;dpapi:<protected user:pass>\n";
     for (const Node &n : m_nodes)
-        ts << n.name << ';' << n.baseHttpsUrl << ';' << n.credentials << '\n';
+        ts << n.name << ';' << n.baseHttpsUrl << ';' << protectNodeCredentials(n.credentials) << '\n';
 }
 
 // ---- Polling ----

@@ -1,16 +1,13 @@
 ; ===========================================================================
 ;  PGS (ProcessGuard Service) - Inno Setup installer
 ;
-;  Builds a one-click installer from a pre-assembled release\ tree (produced
-;  by tools\package_release.bat). The installer:
-;    - copies the self-contained release tree to {app}
-;    - optionally installs + starts the Windows service (pgs_service install)
-;    - detects test-signing mode for the Sirius.sys PPL driver and offers to
-;      enable it (with reboot), warning that PPL is unavailable otherwise
-;    - optionally adds an inbound firewall rule for the remote-gateway port
-;    - on uninstall: stops + uninstalls the service, removes files; the
-;      ProgramData\ProcessGuard state archive is retained by default (the
-;      user may opt to wipe it) so guard sets survive a reinstall.
+;  从 tools\package_release.bat 生成的 release\ 目录构建一键安装包。安装器会：
+;    - 复制完整的自包含 release 目录到 {app}
+;    - 可选安装并启动 PGS Windows 服务（pgs_service install）
+;    - 可选启用 Windows 测试签名模式，用于 Sirius.sys PPL 驱动（需要重启）
+;    - 可选添加远程网关端口的入站防火墙规则
+;    - 卸载时停止并删除 PGS 服务、删除安装目录；ProgramData\ProcessGuard
+;      状态目录默认保留，用户可选择删除，以便重装后恢复守护列表。
 ;
 ;  Build (after producing release\):
 ;    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\pgs_installer.iss
@@ -41,41 +38,41 @@ UninstallDisplayIcon={app}\pgs_admin_qt.exe
 LicenseFile=..\LICENSE
 
 [Languages]
-Name: "en"; MessagesFile: "compiler:Default.isl"
+Name: "zh"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
-Name: "installservice"; Description: "Install and start the PGS Windows service (LocalSystem)"; GroupDescription: "Service:"
-Name: "enabletestsign"; Description: "Enable Windows test-signing mode for the Sirius PPL driver (requires reboot)"; GroupDescription: "Driver:"
-Name: "firewallremote"; Description: "Add inbound firewall rule for the remote-gateway port"; GroupDescription: "Network:"; Flags: unchecked
+Name: "installservice"; Description: "安装并启动 PGS Windows 服务（LocalSystem）"; GroupDescription: "服务："
+Name: "enabletestsign"; Description: "启用 Sirius PPL 驱动所需的 Windows 测试签名模式（需要重启）"; GroupDescription: "驱动："
+Name: "firewallremote"; Description: "添加远程网关端口的入站防火墙规则"; GroupDescription: "网络："; Flags: unchecked
 
 [Files]
 ; The entire self-contained release tree is copied verbatim.
 Source: "..\release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-Name: "{group}\PGS Admin (Qt)"; Filename: "{app}\pgs_admin_qt.exe"
-Name: "{group}\PGS Web Console"; Filename: "{app}\pgs_admin_web.exe"
-Name: "{group}\Uninstall PGS"; Filename: "{uninstallexe}"
+Name: "{group}\PGS 管理端（Qt）"; Filename: "{app}\pgs_admin_qt.exe"
+Name: "{group}\PGS Web 控制台"; Filename: "{app}\pgs_admin_web.exe"
+Name: "{group}\卸载 PGS"; Filename: "{uninstallexe}"
 
 [Run]
 ; --- Service install + start (optional task) ---
-Filename: "{app}\pgs_service.exe"; Parameters: "install"; StatusMsg: "Installing PGS service..."; Tasks: installservice; Flags: runhidden
-Filename: "{app}\pgs_service.exe"; Parameters: "start"; StatusMsg: "Starting PGS service..."; Tasks: installservice; Flags: runhidden
+Filename: "{app}\pgs_service.exe"; Parameters: "install"; StatusMsg: "正在安装 PGS 服务..."; Tasks: installservice; Flags: runhidden
+Filename: "{app}\pgs_service.exe"; Parameters: "start"; StatusMsg: "正在启动 PGS 服务..."; Tasks: installservice; Flags: runhidden
 
 ; --- Test-signing detection + enable (optional task) ---
 ; bcdedit /set testsigning on requires admin (we already are) and a reboot.
-Filename: "{cmd}"; Parameters: "/c bcdedit /set testsigning on"; StatusMsg: "Enabling test-signing mode..."; Tasks: enabletestsign; Flags: runhidden; Check: NeedsTestSigning
+Filename: "{cmd}"; Parameters: "/c bcdedit /set testsigning on"; StatusMsg: "正在启用测试签名模式..."; Tasks: enabletestsign; Flags: runhidden; Check: NeedsTestSigning
 
 ; --- Firewall rule for remote gateway (optional, default port 12443) ---
-Filename: "{cmd}"; Parameters: "/c netsh advfirewall firewall add rule name=""PGS Remote Gateway"" dir=in action=allow protocol=TCP localport=12443"; StatusMsg: "Adding firewall rule..."; Tasks: firewallremote; Flags: runhidden
+Filename: "{cmd}"; Parameters: "/c netsh advfirewall firewall add rule name=""PGS Remote Gateway"" dir=in action=allow protocol=TCP localport=12443"; StatusMsg: "正在添加防火墙规则..."; Tasks: firewallremote; Flags: runhidden
 
 ; --- Launch the Qt admin GUI after install ---
-Filename: "{app}\pgs_admin_qt.exe"; Description: "Launch PGS Admin (Qt)"; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\pgs_admin_qt.exe"; Description: "启动 PGS 管理端（Qt）"; Flags: nowait postinstall skipifsilent unchecked
 
 [UninstallRun]
 ; --- Stop + uninstall the service before removing files ---
-Filename: "{app}\pgs_service.exe"; Parameters: "stop"; StatusMsg: "Stopping PGS service..."; Flags: runhidden; RunOnceId: "StopService"
-Filename: "{app}\pgs_service.exe"; Parameters: "uninstall"; StatusMsg: "Uninstalling PGS service..."; Flags: runhidden; RunOnceId: "UninstallService"
+Filename: "{app}\pgs_service.exe"; Parameters: "stop"; StatusMsg: "正在停止 PGS 服务..."; Flags: runhidden; RunOnceId: "StopService"
+Filename: "{app}\pgs_service.exe"; Parameters: "uninstall"; StatusMsg: "正在卸载 PGS 服务..."; Flags: runhidden; RunOnceId: "UninstallService"
 ; --- Remove the firewall rule if it exists ---
 Filename: "{cmd}"; Parameters: "/c netsh advfirewall firewall delete rule name=""PGS Remote Gateway"""; Flags: runhidden; RunOnceId: "RemoveFirewall"
 
@@ -84,12 +81,11 @@ Filename: "{cmd}"; Parameters: "/c netsh advfirewall firewall delete rule name="
 Type: filesandordirs; Name: "{app}"
 
 [Code]
-// ---- Test-signing state check ----
-// Returns true when test-signing is NOT yet enabled, so the run step fires.
+// ---- 测试签名状态检查 ----
+// 返回 true 时会执行启用步骤。当前为 best-effort，bcdedit /set 可重复执行。
 function NeedsTestSigning(): Boolean;
 var
   ResultCode: Integer;
-  OutputText: AnsiString;
 begin
   Result := True;
   // `bcdedit` with no args echoes the current store; test-signing on shows
@@ -101,9 +97,8 @@ begin
   end;
 end;
 
-// ---- Optional: wipe ProgramData state on uninstall ----
-// Prompted during uninstall; default is to KEEP state so a reinstall resumes
-// the guard set. Implemented as a custom step via the post-uninstall hook.
+// ---- 卸载时可选删除 ProgramData 状态目录 ----
+// 默认保留状态目录，便于重装后恢复守护列表和 token hash。
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: String;
@@ -114,9 +109,9 @@ begin
     if DirExists(DataDir) then
     begin
       if SuppressibleMsgBox(
-           'Keep the PGS state archive under ' + DataDir + '?' + #13#10 +
-           'Yes = keep (recommended, guard set survives reinstall).' + #13#10 +
-           'No = delete it now.',
+           '是否保留 PGS 状态目录：' + DataDir + '?' + #13#10 +
+           '选择“是”：保留（推荐，重装后可恢复守护列表和 token hash）。' + #13#10 +
+           '选择“否”：现在删除该目录。',
            mbConfirmation, MB_YESNO, IDYES) = IDNO then
       begin
         DelTree(DataDir, True, True, True);

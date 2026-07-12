@@ -5,9 +5,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-export PATH="/mingw64/bin:/usr/bin:$PATH"
-CMAKE="${CMAKE:-/mingw64/bin/cmake.exe}"
-GXX="${GXX:-/mingw64/bin/g++.exe}"
+MINGW_ROOT="${MINGW_ROOT:-/mingw64}"
+export PATH="$MINGW_ROOT/bin:/usr/bin:$PATH"
+CMAKE="${CMAKE:-$MINGW_ROOT/bin/cmake.exe}"
+GXX="${GXX:-$MINGW_ROOT/bin/g++.exe}"
 
 build_one() {
   local name="$1"
@@ -16,7 +17,7 @@ build_one() {
 
   echo "[qt-web] configuring $name ..."
   "$CMAKE" -S "$source_dir" -B "$build_dir" -G "MinGW Makefiles" \
-    -DCMAKE_PREFIX_PATH=/mingw64 \
+    -DCMAKE_PREFIX_PATH="$MINGW_ROOT" \
     -DCMAKE_CXX_COMPILER="$GXX" \
     -DCMAKE_BUILD_TYPE=Release
 

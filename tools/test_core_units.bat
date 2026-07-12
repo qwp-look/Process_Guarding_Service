@@ -3,13 +3,15 @@ setlocal
 chcp 65001 >nul 2>&1
 pushd "%~dp0.."
 
-set "COMPILER=C:\msys64\mingw64\bin\g++.exe"
-set "PATH=C:\msys64\mingw64\bin;%PATH%"
+if not defined MINGW_ROOT set "MINGW_ROOT=C:\msys64\mingw64"
+if not defined MINGW_BIN set "MINGW_BIN=%MINGW_ROOT%\bin"
+if not defined CXX set "CXX=%MINGW_BIN%\g++.exe"
+set "PATH=%MINGW_BIN%;%PATH%"
 
 if not exist "build" mkdir "build"
 
 echo [unit:core] Compiling tests\test_pgs_core.cpp...
-%COMPILER% -std=c++17 -Wall -Wextra -O2 -Iinclude tests\test_pgs_core.cpp -o build\test_pgs_core.exe -lbcrypt
+"%CXX%" -std=c++17 -Wall -Wextra -O2 -Iinclude tests\test_pgs_core.cpp -o build\test_pgs_core.exe -lbcrypt
 if errorlevel 1 (
     echo Failed to compile core unit tests
     popd

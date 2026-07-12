@@ -288,8 +288,8 @@ PGS_SKIP_SMOKE=1 ./tools/verify_pgs.sh
 - 协议仍然是自定义文本协议，不是 protobuf/grpc
 - 已有磁盘归档恢复，但还不是带历史版本/事务语义的完整配置数据库
 - 还没有压力测试脚本
-- Web remote RBAC 用户文件仍是兼容格式的单次 HMAC-SHA256；在线登录已有限速/审计，但离线抗爆破可继续迁移到 PBKDF2/Argon2id/bcrypt
-- cluster 节点凭据不从 API 回显，但节点 registry 文件里仍是明文 `user:pass`；后续可用 DPAPI 加密
+- Web remote RBAC 用户文件已支持 PBKDF2-SHA256，旧 HMAC-SHA256 记录仅作为兼容格式保留；后续可继续迁移到 Argon2id/bcrypt
+- cluster 节点凭据不从 API 回显，Windows 上新保存的 registry 第三列会用 DPAPI 保护；仍需限制文件 ACL，因为同一运行账号可解密
 - `bless --pid` 对任意外部进程仍无法自动百分百还原原始环境变量与工作目录
 
 ## 7.1 关于“服务自我守护”

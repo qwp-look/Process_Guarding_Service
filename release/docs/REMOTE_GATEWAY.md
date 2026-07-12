@@ -33,22 +33,23 @@ pgs_admin_web.exe --remote --tls-cert cert.pem --tls-key key.pem --users-file us
 
 ## 3. 用户文件格式
 
-`user;role;saltHex;hashHex`，role ∈ {viewer, operator, admin}。`hashHex` 是
-`HMAC-SHA256(password, salt)` 的十六进制字符串，不存明文密码。
+推荐格式：`user;role;pbkdf2-sha256;iterations;saltHex;hashHex`，role ∈ {viewer, operator, admin}。`hashHex` 是 PBKDF2-SHA256 派生出的 32 字节密钥十六进制字符串，不存明文密码。为兼容旧部署，仍可读取旧格式 `user;role;saltHex;hashHex`（HMAC-SHA256）。
 
-生成示例（PowerShell + .NET HMACSHA256）：
+生成示例（PowerShell + .NET PBKDF2-SHA256）：
 
 ```powershell
 $saltBytes = New-Object byte[] 16
 [Security.Cryptography.RandomNumberGenerator]::Fill($saltBytes)
+$iterations = 210000
+$hashBytes = [Security.Cryptography.Rfc2898DeriveBytes]::Pbkdf2(
+  [Text.Encoding]::UTF8.GetBytes('s3cret'), $saltBytes, $iterations,
+  [Security.Cryptography.HashAlgorithmName]::SHA256, 32)
 $saltHex = -join ($saltBytes | ForEach-Object { $_.ToString('x2') })
-$hmac = [Security.Cryptography.HMACSHA256]::new($saltBytes)
-$hashHex = -join ($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes('s3cret')) | ForEach-Object { $_.ToString('x2') })
-"admin;admin;$saltHex;$hashHex"
+$hashHex = -join ($hashBytes | ForEach-Object { $_.ToString('x2') })
+"admin;admin;pbkdf2-sha256;$iterations;$saltHex;$hashHex"
 ```
 
-文件权限应仅 SYSTEM+Administrators（放 `ProgramData\ProcessGuard\` 下）。当前格式保持简单兼容，
-已做在线失败审计和退避；若用户文件可能离线泄露，后续可迁移到 PBKDF2/Argon2id/bcrypt 格式。
+文件权限应仅 SYSTEM+Administrators（放 `ProgramData\ProcessGuard\` 下）。远程模式已做在线失败审计和退避；若用户文件可能离线泄露，PBKDF2 格式比旧 HMAC 格式更适合作为默认。后续还可继续迁移到 Argon2id/bcrypt。
 
 ## 4. 审计
 

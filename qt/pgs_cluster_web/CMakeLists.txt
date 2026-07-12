@@ -25,5 +25,6 @@ target_link_libraries(pgs_cluster_web PRIVATE
     Qt6::Core
     Qt6::Network
     Qt6::HttpServer
+    crypt32
     ws2_32
 )

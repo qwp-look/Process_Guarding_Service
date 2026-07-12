@@ -49,28 +49,40 @@ jobs:
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/build_pgs.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp build/home && export HOME="$PWD/build/home" TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/build_pgs.sh'
 
       - name: Run core unit tests
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/test_core_units.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp build/home && export HOME="$PWD/build/home" TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/test_core_units.sh'
+
+      - name: Run module manager unit tests
+        shell: pwsh
+        run: |
+          $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp build/home && export HOME="$PWD/build/home" TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/test_module_manager.sh'
 
       - name: Run scheduler cron unit tests
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/test_sched_cron.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp build/home && export HOME="$PWD/build/home" TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/test_sched_cron.sh'
 
       - name: Run smoke test
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/smoke_test_pgs.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp build/home && export HOME="$PWD/build/home" TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/smoke_test_pgs.sh'
+
+      - name: Build Qt desktop app
+        shell: pwsh
+        run: |
+          $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp build/home && export HOME="$PWD/build/home" TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && rm -rf build/pgs_admin_qt && cmake -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH=/mingw64 -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe -DCMAKE_BUILD_TYPE=Release && cmake --build build/pgs_admin_qt -j 1'
 
       - name: Build Qt web consoles
         shell: pwsh
         run: |
           $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp && export TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/build_qt_web.sh'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE" && mkdir -p build/tmp build/home && export HOME="$PWD/build/home" TMPDIR="$(cygpath -w "$PWD/build/tmp")" && export TEMP="$TMPDIR" TMP="$TMPDIR" && bash ./tools/build_qt_web.sh'

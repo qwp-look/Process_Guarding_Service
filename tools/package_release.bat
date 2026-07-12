@@ -16,15 +16,21 @@ REM    - MinGW third-party runtime DLLs that Qt6Core/Qt6Gui transitively depend
 REM      on (windeployqt does NOT deploy these MSYS2 libs; without them the Qt
 REM      app fails with 0xC0000135 STATUS_DLL_NOT_FOUND on a clean box).
 REM
-REM  Prerequisite: MSYS2 MinGW64 toolchain + Qt6 at C:\msys64\mingw64.
+REM  Prerequisite: MSYS2 MinGW64 toolchain + Qt6. Override with MINGW_ROOT,
+REM  MINGW_BIN, CMAKE, or CXX when the toolchain is not under C:\msys64.
 REM ===========================================================================
 
-set "MINGW=C:\msys64\mingw64\bin"
-set "PATH=%MINGW%;%PATH%"
+if not defined MINGW_ROOT set "MINGW_ROOT=C:\msys64\mingw64"
+if not defined MINGW_BIN set "MINGW_BIN=%MINGW_ROOT%\bin"
+if not defined CMAKE set "CMAKE=%MINGW_BIN%\cmake.exe"
+if not defined CXX set "CXX=%MINGW_BIN%\g++.exe"
+set "MINGW=%MINGW_BIN%"
+set "PATH=%MINGW_BIN%;%PATH%"
 set "BUILD=build"
 set "RELEASE=release"
 
-if not exist "%MINGW%\g++.exe" ( echo MinGW g++ not found: %MINGW% & popd & exit /b 1 )
+if not exist "%CXX%" ( echo MinGW g++ not found: %CXX% & popd & exit /b 1 )
+if not exist "%CMAKE%" ( echo CMake not found: %CMAKE% & popd & exit /b 1 )
 
 echo [1/6] Build PGS core + CLI + PPL module (build_pgs.bat)...
 call tools\build_pgs.bat
@@ -33,24 +39,24 @@ if errorlevel 1 ( echo ERROR: build_pgs.bat failed & popd & exit /b 1 )
 echo [2/6] Configure+build Qt admin app + web consoles...
 REM     Builds the Qt GUI (pgs_admin_qt), admin web console, and cluster web console.
 if not exist "%BUILD%\pgs_admin_qt\CMakeCache.txt" (
-    cmake -S qt\pgs_admin_qt -B "%BUILD%\pgs_admin_qt" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+    "%CMAKE%" -S qt\pgs_admin_qt -B "%BUILD%\pgs_admin_qt" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%MINGW_ROOT%" -DCMAKE_CXX_COMPILER="%CXX%"
     if errorlevel 1 ( echo ERROR: cmake configure failed & popd & exit /b 1 )
 )
-cmake --build "%BUILD%\pgs_admin_qt" --config Release
+"%CMAKE%" --build "%BUILD%\pgs_admin_qt" --config Release
 if errorlevel 1 ( echo ERROR: Qt build failed & popd & exit /b 1 )
 
 REM --- Web console (pgs_admin_web): Qt6 Core/Network + lightweight HTTP shim ---
-cmake -S qt\pgs_admin_web -B "%BUILD%\pgs_admin_web" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+"%CMAKE%" -S qt\pgs_admin_web -B "%BUILD%\pgs_admin_web" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%MINGW_ROOT%" -DCMAKE_CXX_COMPILER="%CXX%"
 if errorlevel 1 ( echo ERROR: cmake configure web failed & popd & exit /b 1 )
 if exist "%BUILD%\pgs_admin_web\CMakeFiles\pgs_admin_web.dir\objects.a" del /f /q "%BUILD%\pgs_admin_web\CMakeFiles\pgs_admin_web.dir\objects.a" >nul 2>&1
-cmake --build "%BUILD%\pgs_admin_web" --config Release --clean-first
+"%CMAKE%" --build "%BUILD%\pgs_admin_web" --config Release --clean-first
 if errorlevel 1 ( echo ERROR: Qt web build failed & popd & exit /b 1 )
 
 REM --- Cluster web dashboard (pgs_cluster_web): Qt6 Core/Network + lightweight HTTP shim ---
-cmake -S qt\pgs_cluster_web -B "%BUILD%\pgs_cluster_web" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+"%CMAKE%" -S qt\pgs_cluster_web -B "%BUILD%\pgs_cluster_web" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%MINGW_ROOT%" -DCMAKE_CXX_COMPILER="%CXX%"
 if errorlevel 1 ( echo ERROR: cmake configure cluster web failed & popd & exit /b 1 )
 if exist "%BUILD%\pgs_cluster_web\CMakeFiles\pgs_cluster_web.dir\objects.a" del /f /q "%BUILD%\pgs_cluster_web\CMakeFiles\pgs_cluster_web.dir\objects.a" >nul 2>&1
-cmake --build "%BUILD%\pgs_cluster_web" --config Release --clean-first
+"%CMAKE%" --build "%BUILD%\pgs_cluster_web" --config Release --clean-first
 if errorlevel 1 ( echo ERROR: Qt cluster web build failed & popd & exit /b 1 )
 
 echo [3/6] Assemble release tree...
@@ -99,7 +105,7 @@ REM ICU version (78) tracks the MSYS2 Qt6 build; bump if Qt is upgraded.
 set "QT_MINGW_DEPS=libb2-1.dll libbrotlicommon.dll libbrotlidec.dll libbz2-1.dll libcrypto-3-x64.dll libdouble-conversion.dll libfreetype-6.dll libgcc_s_seh-1.dll libglib-2.0-0.dll libgraphite2.dll libharfbuzz-0.dll libiconv-2.dll libicudt78.dll libicuin78.dll libicuuc78.dll libintl-8.dll libmd4c.dll libpcre2-16-0.dll libpcre2-8-0.dll libpng16-16.dll libssl-3-x64.dll libstdc++-6.dll libwinpthread-1.dll libzstd.dll zlib1.dll"
 for %%D in (%QT_MINGW_DEPS%) do copy /Y "%MINGW%\%%D" "%RELEASE%\%%D" >nul 2>&1
 if not exist "%RELEASE%\tls" mkdir "%RELEASE%\tls" >nul 2>&1
-copy /Y "C:\msys64\mingw64\share\qt6\plugins\tls\qopensslbackend.dll" "%RELEASE%\tls\" >nul 2>&1
+copy /Y "%MINGW_ROOT%\share\qt6\plugins\tls\qopensslbackend.dll" "%RELEASE%\tls\" >nul 2>&1
 
 echo [6/6] Done. Release layout:
 echo   %RELEASE%\pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe / pgs_admin_web.exe / pgs_cluster_web.exe
