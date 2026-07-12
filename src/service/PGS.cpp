@@ -164,6 +164,49 @@ bool queryUserTokenForSession(DWORD sessionId, HANDLE &userToken)
     enableProcessPrivilege(SE_TCB_NAME_W);
     return WTSQueryUserToken(sessionId, &userToken) == TRUE;
 }
+
+std::string finalPathForCompareUtf8(const std::string &pathUtf8, bool directory)
+{
+    const std::wstring pathW = ProcessGuard::util::utf8ToWide(pathUtf8);
+    if (pathW.empty())
+    {
+        return std::string();
+    }
+
+    const DWORD flags = directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
+    HANDLE h = CreateFileW(pathW.c_str(), FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, flags, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        return std::string();
+    }
+
+    std::vector<wchar_t> buffer(32768, L'\0');
+    const DWORD len = GetFinalPathNameByHandleW(
+        h, buffer.data(), static_cast<DWORD>(buffer.size()),
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(h);
+    if (len == 0 || len >= buffer.size())
+    {
+        return std::string();
+    }
+
+    std::wstring normalized(buffer.data(), len);
+    if (normalized.rfind(L"\\\\?\\UNC\\", 0) == 0)
+    {
+        normalized = L"\\\\" + normalized.substr(8);
+    }
+    else if (normalized.rfind(L"\\\\?\\", 0) == 0)
+    {
+        normalized = normalized.substr(4);
+    }
+    std::replace(normalized.begin(), normalized.end(), L'/', L'\\');
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(towlower(ch));
+    });
+    return ProcessGuard::util::wideToUtf8(normalized);
+}
 } // namespace
 
 namespace ProcessGuard
@@ -1508,6 +1551,15 @@ void PGS::monitorLoop()
             }
         }
     }
+
+    for (PendingRestart &restart : pending)
+    {
+        if (restart.guard.handle)
+        {
+            CloseHandle(restart.guard.handle);
+            restart.guard.handle = nullptr;
+        }
+    }
 }
 
 bool PGS::isGuardAlive(const GuardInfo &info) const
@@ -2008,30 +2060,30 @@ bool PGS::isPathInsideModulesDir(const std::string &candidateUtf8) const
     {
         return false;
     }
-    const std::string candidateNorm = normalizePathForCompareUtf8(candidateUtf8);
-    const std::string modulesNorm = normalizePathForCompareUtf8(m_modulesDir);
-    if (candidateNorm.empty() || modulesNorm.empty())
-    {
-        return false;
-    }
-    // Require the candidate to be strictly under the modules directory.
-    // Both sides are already lowercased, backslashed, absolute.
-    if (candidateNorm == modulesNorm)
-    {
-        return false; // the directory itself is not a DLL
-    }
-    const std::string prefix = modulesNorm + "\\";
-    if (candidateNorm.rfind(prefix, 0) != 0)
-    {
-        return false;
-    }
-    // Must be an existing .dll file.
     const DWORD attr = GetFileAttributesW(utf8ToWide(candidateUtf8).c_str());
     if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
     {
         return false;
     }
-    return true;
+    const std::string candidateFinal = finalPathForCompareUtf8(candidateUtf8, false);
+    const std::string modulesFinal = finalPathForCompareUtf8(m_modulesDir, true);
+    if (candidateFinal.empty() || modulesFinal.empty())
+    {
+        return false;
+    }
+    if (candidateFinal.size() <= 4 ||
+        candidateFinal.compare(candidateFinal.size() - 4, 4, ".dll") != 0)
+    {
+        return false;
+    }
+    // Require the fully-resolved file path to be strictly under the fully-
+    // resolved modules directory, so junctions/symlinks cannot escape it.
+    if (candidateFinal == modulesFinal)
+    {
+        return false;
+    }
+    const std::string prefix = modulesFinal + "\\";
+    return candidateFinal.rfind(prefix, 0) == 0;
 }
 
 bool PGS::writeInitialTokenFile(const std::string &stateDir, const std::string &token) const
@@ -2194,7 +2246,7 @@ void PGS::terminateGuardFamily(std::uint64_t guardId)
     }
 }
 
-void PGS::closeGuardJob(std::uint64_t guardId)
+void PGS::closeGuardJob(std::uint64_t guardId, bool preserveProcesses)
 {
     std::lock_guard<std::mutex> lock(m_jobMutex);
     const auto it = m_jobs.find(guardId);
@@ -2202,6 +2254,26 @@ void PGS::closeGuardJob(std::uint64_t guardId)
     {
         if (it->second)
         {
+            if (preserveProcesses)
+            {
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli{};
+                if (QueryInformationJobObject(it->second, JobObjectExtendedLimitInformation, &eli, sizeof(eli), nullptr))
+                {
+                    eli.BasicLimitInformation.LimitFlags &= ~JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                    if (!SetInformationJobObject(it->second, JobObjectExtendedLimitInformation, &eli, sizeof(eli)))
+                    {
+                        Logger::warning("PGS: failed to clear kill-on-job-close guard-id=" +
+                                        std::to_string(guardId) +
+                                        ", error=" + std::to_string(GetLastError()));
+                    }
+                }
+                else
+                {
+                    Logger::warning("PGS: failed to query job limits guard-id=" +
+                                    std::to_string(guardId) +
+                                    ", error=" + std::to_string(GetLastError()));
+                }
+            }
             CloseHandle(it->second);
         }
         m_jobs.erase(it);
@@ -2245,7 +2317,7 @@ bool PGS::isGuardHung(const GuardInfo &info) const
         if (r == 0)
         {
             const DWORD err = GetLastError();
-            if (err == ERROR_TIMEOUT || err == ERROR_ACCESS_DENIED)
+            if (err == ERROR_TIMEOUT)
             {
                 c->hung = true;
                 return FALSE; // stop enumerating; we have our answer

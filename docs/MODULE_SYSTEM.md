@@ -133,8 +133,8 @@ opt-in 时才递归加固 modules tree 并扫描加载。`PGS` 析构时 `Module
 
 **初始化**（`initialize()`）：在置 `m_initialized=true` 之前，创建/加固 `m_modulesDir`。PPL opt-in 时会
 递归加固整个 modules tree，随后扫描 `m_modulesDir` 加载允许的模块，并记录日志（加载数量 / 目录）。
-非 opt-in 启动不自动扫描，但显式 `module load` 会先读取 `modules.allow`，再按同一 allowlist/签名/哈希
-规则加载指定 DLL。
+非 opt-in 启动不自动扫描，但显式 `module load` 仍可按同一 allowlist/签名/哈希规则加载指定 DLL；
+其中 `ppl` 模块本身仍要求 `PGS_ENABLE_PPL=1` 或 `--enable-ppl`，避免在未 opt-in 时把内核驱动拉进来。
 
 **命令分发**（`processMessage`）：在 `ping` 分支前新增：
 

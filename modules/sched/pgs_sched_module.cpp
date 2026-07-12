@@ -30,6 +30,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -80,6 +81,31 @@ namespace
         }
     }
 
+    constexpr long long kMaxIntervalSeconds = std::numeric_limits<long long>::max() / 1000LL;
+
+    bool parseIntervalSeconds(const std::string &s, long long &out)
+    {
+        return parseInt(s, out) && out > 0 && out <= kMaxIntervalSeconds;
+    }
+
+    bool intervalSecondsToMilliseconds(long long seconds, long long &outMs)
+    {
+        if (seconds <= 0 || seconds > kMaxIntervalSeconds)
+            return false;
+        outMs = seconds * 1000LL;
+        return true;
+    }
+
+    bool addMillisecondsChecked(long long baseMs, long long deltaMs, long long &outMs)
+    {
+        if (baseMs < 0 || deltaMs < 0)
+            return false;
+        if (baseMs > std::numeric_limits<long long>::max() - deltaMs)
+            return false;
+        outMs = baseMs + deltaMs;
+        return true;
+    }
+
     void setResponse(char *buf, size_t bufsize, const std::string &msg)
     {
         if (!buf || bufsize == 0)
@@ -101,13 +127,14 @@ namespace
         std::string a = trim(action);
         if (a.empty())
             return false;
-        // First token is the verb. bless-start is also "start-bless".
+        // First token is the service wire verb. bless-start/start-bless are
+        // CLI-side flows that launch a process before sending register, so a
+        // scheduler action cannot execute them through PGS_Services::call.
         std::string verb;
         std::size_t sp = a.find(' ');
         verb = (sp == std::string::npos) ? a : a.substr(0, sp);
         return verb == "bless" || verb == "register" ||
                verb == "unbless" || verb == "unregister" ||
-               verb == "bless-start" || verb == "start-bless" ||
                verb == "policy" || verb == "set-policy" ||
                verb == "intentional" ||
                verb == "list" || verb == "get" || verb == "ping";
@@ -163,7 +190,7 @@ namespace
     {
         std::string t = trim(s);
         // Accept "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD HH:MM:SS"
-        if (t.size() < 19)
+        if (t.size() != 19)
             return -1;
         for (size_t i = 0; i < t.size(); ++i)
         {
@@ -186,19 +213,68 @@ namespace
             else if (c < '0' || c > '9')
                 return -1;
         }
+        int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+        try
+        {
+            year = std::stoi(t.substr(0, 4));
+            month = std::stoi(t.substr(5, 2));
+            day = std::stoi(t.substr(8, 2));
+            hour = std::stoi(t.substr(11, 2));
+            minute = std::stoi(t.substr(14, 2));
+            second = std::stoi(t.substr(17, 2));
+        }
+        catch (...)
+        {
+            return -1;
+        }
         std::tm tmv{};
-        tmv.tm_year = std::atoi(t.substr(0, 4).c_str()) - 1900;
-        tmv.tm_mon = std::atoi(t.substr(5, 2).c_str()) - 1;
-        tmv.tm_mday = std::atoi(t.substr(8, 2).c_str());
-        tmv.tm_hour = std::atoi(t.substr(11, 2).c_str());
-        tmv.tm_min = std::atoi(t.substr(14, 2).c_str());
-        tmv.tm_sec = std::atoi(t.substr(17, 2).c_str());
+        tmv.tm_year = year - 1900;
+        tmv.tm_mon = month - 1;
+        tmv.tm_mday = day;
+        tmv.tm_hour = hour;
+        tmv.tm_min = minute;
+        tmv.tm_sec = second;
         tmv.tm_isdst = -1;
         std::time_t tt = std::mktime(&tmv);
         if (tt == static_cast<std::time_t>(-1))
             return -1;
+        std::tm roundtrip{};
+        if (localtime_s(&roundtrip, &tt) != 0)
+            return -1;
+        if (roundtrip.tm_year != year - 1900 || roundtrip.tm_mon != month - 1 ||
+            roundtrip.tm_mday != day || roundtrip.tm_hour != hour ||
+            roundtrip.tm_min != minute || roundtrip.tm_sec != second)
+            return -1;
+        if (static_cast<long long>(tt) > std::numeric_limits<long long>::max() / 1000LL)
+            return -1;
         return static_cast<long long>(tt) * 1000LL;
     }
+
+} // namespace
+
+#ifdef PGS_ENABLE_TEST_HOOKS
+namespace pgs_sched_test
+{
+    long long parseIso8601ForTest(const std::string &s)
+    {
+        return parseIso8601(s);
+    }
+
+    bool parseIntervalSecondsForTest(const std::string &s, long long &out)
+    {
+        return parseIntervalSeconds(s, out);
+    }
+
+    long long intervalSecondsLimitForTest()
+    {
+        return kMaxIntervalSeconds;
+    }
+} // namespace pgs_sched_test
+#endif
+
+#ifndef PGS_ENABLE_TEST_HOOKS
+namespace
+{
 
     // ---- Persistence: simple KV file, one record per line ----
     // Format: id;type;expr;action;enabled;lastRunMs;nextRunMs;runCount;maxCount
@@ -329,12 +405,23 @@ namespace
                 // Roll forward to the first future boundary >= now, honoring
                 // maxCount. We do NOT replay missed intervals (avoid storm).
                 long long interval = 0;
-                if (parseInt(s.expr, interval) && interval > 0)
+                long long intervalMs = 0;
+                if (parseIntervalSeconds(s.expr, interval) && intervalSecondsToMilliseconds(interval, intervalMs))
                 {
-                    if (s.nextRunMs < now)
+                    if (s.nextRunMs < 0)
                     {
-                        long long elapsed = (now - s.nextRunMs) / (interval * 1000);
-                        s.nextRunMs += (elapsed + 1) * interval * 1000;
+                        s.nextRunMs = 0;
+                    }
+                    else if (s.nextRunMs < now)
+                    {
+                        long long delta = now - s.nextRunMs;
+                        long long remainder = delta % intervalMs;
+                        long long advance = (remainder == 0) ? intervalMs : (intervalMs - remainder);
+                        long long nextRun = 0;
+                        if (addMillisecondsChecked(now, advance, nextRun))
+                            s.nextRunMs = nextRun;
+                        else
+                            s.nextRunMs = 0;
                     }
                 }
                 else
@@ -370,9 +457,12 @@ namespace
         }
         // interval: first fire = now + interval
         long long interval = 0;
-        if (!parseInt(s.expr, interval) || interval <= 0)
+        long long intervalMs = 0;
+        long long nextRun = 0;
+        if (!parseIntervalSeconds(s.expr, interval) || !intervalSecondsToMilliseconds(interval, intervalMs) ||
+            !addMillisecondsChecked(now, intervalMs, nextRun))
             return 0;
-        return now + interval * 1000;
+        return nextRun;
     }
 
     // ---- Fire an action: call PGS via services ----
@@ -435,8 +525,12 @@ namespace
                     else
                     {
                         long long interval = 0;
-                        if (parseInt(cur.expr, interval) && interval > 0)
-                            cur.nextRunMs = now + interval * 1000;
+                        long long intervalMs = 0;
+                        long long nextRun = 0;
+                        if (parseIntervalSeconds(cur.expr, interval) &&
+                            intervalSecondsToMilliseconds(interval, intervalMs) &&
+                            addMillisecondsChecked(now, intervalMs, nextRun))
+                            cur.nextRunMs = nextRun;
                         else
                         {
                             cur.enabled = false;
@@ -586,7 +680,7 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
         {
             s.type = SchedType::Interval;
             long long iv = 0;
-            if (!parseInt(expr, iv) || iv <= 0)
+            if (!parseIntervalSeconds(expr, iv))
             {
                 setResponse(responseBuf, responseBufSize, "ERR interval expr must be positive seconds");
                 return 1;
@@ -698,3 +792,4 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
     setResponse(responseBuf, responseBufSize, "ERR unknown op: " + op);
     return 1;
 }
+#endif // !PGS_ENABLE_TEST_HOOKS

@@ -11,8 +11,8 @@ GXX="${GXX:-$MINGW_ROOT/bin/g++.exe}"
 
 mkdir -p build
 echo "[unit:core] compiling tests/test_pgs_core.cpp ..."
-"$GXX" -std=c++17 -Wall -Wextra -O2 -Iinclude \
-    tests/test_pgs_core.cpp \
+"$GXX" -std=c++17 -Wall -Wextra -O2 -DPGS_ENABLE_TEST_HOOKS -Iinclude \
+    tests/test_pgs_core.cpp modules/sched/pgs_sched_module.cpp modules/ppl/pgs_ppl_module.cpp \
     -o build/test_pgs_core.exe \
     -lbcrypt
 

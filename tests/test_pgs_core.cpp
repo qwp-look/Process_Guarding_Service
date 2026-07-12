@@ -11,18 +11,37 @@
  * exercised by the smoke test instead.
  *
  * Build (MSYS2 MinGW64):
- *   g++ -std=c++17 -Iinclude tests/test_pgs_core.cpp -lbcrypt \
+ *   g++ -std=c++17 -DPGS_ENABLE_TEST_HOOKS -Iinclude \
+ *       tests/test_pgs_core.cpp modules/sched/pgs_sched_module.cpp \
+ *       modules/ppl/pgs_ppl_module.cpp -lbcrypt \
  *       -o build/test_pgs_core.exe
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "Process_Guard/PGUtil.h"
 
 #include <cstdint>
+#include <ctime>
 #include <iostream>
 #include <string>
 #include <vector>
 
 namespace u = ProcessGuard::util;
+
+#ifdef PGS_ENABLE_TEST_HOOKS
+namespace pgs_sched_test
+{
+long long parseIso8601ForTest(const std::string &s);
+bool parseIntervalSecondsForTest(const std::string &s, long long &out);
+long long intervalSecondsLimitForTest();
+} // namespace pgs_sched_test
+
+namespace pgs_ppl_test
+{
+bool parsePidForTest(const std::string &text, ULONG &out);
+bool parseSignerForTest(const std::string &text, UCHAR &out);
+const char *signerNameForTest(UCHAR value);
+} // namespace pgs_ppl_test
+#endif
 
 namespace
 {
@@ -80,6 +99,64 @@ void test_parse_and_labels()
     CHECK(u::parseBoolFlag("0", b) && !b);
     CHECK(!u::parseBoolFlag("2", b));
 }
+
+long long msForLocal(int y, int mo, int d, int h, int mi, int s)
+{
+    std::tm t{};
+    t.tm_year = y - 1900;
+    t.tm_mon = mo - 1;
+    t.tm_mday = d;
+    t.tm_hour = h;
+    t.tm_min = mi;
+    t.tm_sec = s;
+    t.tm_isdst = -1;
+    return static_cast<long long>(std::mktime(&t)) * 1000LL;
+}
+
+#ifdef PGS_ENABLE_TEST_HOOKS
+void test_sched_module_parsers()
+{
+    const long long expected = msForLocal(2026, 7, 9, 15, 30, 0);
+    CHECK_EQ(pgs_sched_test::parseIso8601ForTest("2026-07-09T15:30:00"), expected);
+    CHECK_EQ(pgs_sched_test::parseIso8601ForTest("2026-07-09 15:30:00"), expected);
+    CHECK_EQ(pgs_sched_test::parseIso8601ForTest("2024-02-29T12:00:00"), msForLocal(2024, 2, 29, 12, 0, 0));
+    CHECK_EQ(pgs_sched_test::parseIso8601ForTest("2026-02-31T00:00:00"), -1);
+    CHECK_EQ(pgs_sched_test::parseIso8601ForTest("2026-01-01T24:00:00"), -1);
+    CHECK_EQ(pgs_sched_test::parseIso8601ForTest("2026-01-01T00:60:00"), -1);
+    CHECK_EQ(pgs_sched_test::parseIso8601ForTest("2026-01-01T00:00:60"), -1);
+    CHECK_EQ(pgs_sched_test::parseIso8601ForTest("2026-01-01T00:00:001"), -1);
+
+    long long interval = 0;
+    const long long limit = pgs_sched_test::intervalSecondsLimitForTest();
+    CHECK(pgs_sched_test::parseIntervalSecondsForTest("1", interval) && interval == 1);
+    CHECK(pgs_sched_test::parseIntervalSecondsForTest(std::to_string(limit), interval) && interval == limit);
+    CHECK(!pgs_sched_test::parseIntervalSecondsForTest("0", interval));
+    CHECK(!pgs_sched_test::parseIntervalSecondsForTest(std::to_string(limit + 1), interval));
+    CHECK(!pgs_sched_test::parseIntervalSecondsForTest("9999999999999999", interval));
+}
+
+void test_ppl_module_parsers()
+{
+    ULONG pid = 0;
+    CHECK(pgs_ppl_test::parsePidForTest("1", pid) && pid == 1);
+    CHECK(pgs_ppl_test::parsePidForTest("4294967295", pid) && pid == 0xFFFFFFFFul);
+    CHECK(!pgs_ppl_test::parsePidForTest("0", pid));
+    CHECK(!pgs_ppl_test::parsePidForTest("4294967296", pid));
+    CHECK(!pgs_ppl_test::parsePidForTest("18446744073709551615", pid));
+    CHECK(!pgs_ppl_test::parsePidForTest("abc", pid));
+
+    UCHAR signer = 0;
+    CHECK(pgs_ppl_test::parseSignerForTest("Antimalware", signer));
+    CHECK_EQ(std::string(pgs_ppl_test::signerNameForTest(signer)), std::string("Antimalware"));
+    CHECK(pgs_ppl_test::parseSignerForTest("Codegen", signer));
+    CHECK_EQ(std::string(pgs_ppl_test::signerNameForTest(signer)), std::string("CodeGen"));
+    CHECK(pgs_ppl_test::parseSignerForTest("winsystem", signer));
+    CHECK_EQ(std::string(pgs_ppl_test::signerNameForTest(signer)), std::string("WinSystem"));
+    CHECK(!pgs_ppl_test::parseSignerForTest("0", signer));
+    CHECK(!pgs_ppl_test::parseSignerForTest("255", signer));
+    CHECK(!pgs_ppl_test::parseSignerForTest("42", signer));
+}
+#endif
 
 void test_split_base64()
 {
@@ -175,6 +252,10 @@ void test_backoff()
 int main()
 {
     test_parse_and_labels();
+#ifdef PGS_ENABLE_TEST_HOOKS
+    test_sched_module_parsers();
+    test_ppl_module_parsers();
+#endif
     test_split_base64();
     test_sha256();
     test_pfn_and_aumid();

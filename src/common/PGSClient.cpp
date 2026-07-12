@@ -110,9 +110,58 @@ namespace ProcessGuard::client
             return response;
         }
 
-        if (connect(sock, reinterpret_cast<sockaddr *>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
+        u_long nonBlocking = 1;
+        if (ioctlsocket(sock, FIONBIO, &nonBlocking) == SOCKET_ERROR)
         {
-            response.error = "connect failed, error=" + std::to_string(WSAGetLastError());
+            response.error = "ioctlsocket(non-blocking) failed, error=" + std::to_string(WSAGetLastError());
+            closesocket(sock);
+            return response;
+        }
+
+        const int connectResult = connect(sock, reinterpret_cast<sockaddr *>(&serverAddr), sizeof(serverAddr));
+        if (connectResult == SOCKET_ERROR)
+        {
+            const int connectError = WSAGetLastError();
+            if (connectError != WSAEWOULDBLOCK && connectError != WSAEINPROGRESS && connectError != WSAEINVAL)
+            {
+                response.error = "connect failed, error=" + std::to_string(connectError);
+                closesocket(sock);
+                return response;
+            }
+
+            fd_set writeSet;
+            FD_ZERO(&writeSet);
+            FD_SET(sock, &writeSet);
+            fd_set errorSet;
+            FD_ZERO(&errorSet);
+            FD_SET(sock, &errorSet);
+            timeval timeout{};
+            timeout.tv_sec = static_cast<long>(timeoutMs / 1000);
+            timeout.tv_usec = static_cast<long>((timeoutMs % 1000) * 1000);
+            const int ready = select(0, nullptr, &writeSet, &errorSet, &timeout);
+            if (ready <= 0)
+            {
+                response.error = (ready == 0) ? "connect timed out" :
+                                             "select(connect) failed, error=" + std::to_string(WSAGetLastError());
+                closesocket(sock);
+                return response;
+            }
+
+            int socketError = 0;
+            int socketErrorLen = sizeof(socketError);
+            if (getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&socketError), &socketErrorLen) == SOCKET_ERROR ||
+                socketError != 0)
+            {
+                response.error = "connect failed, error=" + std::to_string(socketError ? socketError : WSAGetLastError());
+                closesocket(sock);
+                return response;
+            }
+        }
+
+        u_long blocking = 0;
+        if (ioctlsocket(sock, FIONBIO, &blocking) == SOCKET_ERROR)
+        {
+            response.error = "ioctlsocket(blocking) failed, error=" + std::to_string(WSAGetLastError());
             closesocket(sock);
             return response;
         }
@@ -137,16 +186,27 @@ namespace ProcessGuard::client
         for (;;)
         {
             const int received = recv(sock, buffer, static_cast<int>(sizeof(buffer)), 0);
-            if (received <= 0)
+            if (received == 0)
             {
                 break;
+            }
+            if (received == SOCKET_ERROR)
+            {
+                response.error = "recv failed, error=" + std::to_string(WSAGetLastError());
+                closesocket(sock);
+                return response;
             }
             text.append(buffer, static_cast<std::size_t>(received));
         }
 
         closesocket(sock);
-        response.ok = true;
         response.payload = trim(text);
+        if (response.payload.empty())
+        {
+            response.error = "empty response from server";
+            return response;
+        }
+        response.ok = true;
         return response;
     }
 

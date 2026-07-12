@@ -88,7 +88,7 @@ pgs_bless schedule enable --id 2</pre>
 <h2>动作白名单</h2>
 <p>调度可执行的命令限定为守护管理类动词，<b>显式排除</b>提权/破坏性操作：</p>
 <table>
-  <tr><th>允许</th><td><code>bless</code> <code>register</code> <code>unbless</code> <code>unregister</code> <code>bless-start</code> <code>start-bless</code> <code>policy</code> <code>set-policy</code> <code>intentional</code> <code>list</code> <code>get</code> <code>ping</code></td></tr>
+  <tr><th>允许</th><td><code>bless</code> <code>register</code> <code>unbless</code> <code>unregister</code> <code>policy</code> <code>set-policy</code> <code>intentional</code> <code>list</code> <code>get</code> <code>ping</code></td></tr>
   <tr><th>禁止</th><td><code>token-set</code> <code>module load/unload</code> <code>service install/stop/uninstall</code> <code>ppl</code></td></tr>
 </table>
 <div class="warn">

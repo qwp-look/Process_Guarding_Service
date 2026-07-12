@@ -36,6 +36,7 @@
 #include <QTextStream>
 #include <QTcpServer>
 #include <QUrl>
+#include <QVariant>
 #include <utility>
 
 #ifdef Q_OS_WIN
@@ -178,22 +179,54 @@ bool normalizeNodeUrl(const QString &input, QString &outUrl)
     {
         return false;
     }
-    QString path = parsed.path();
-    while (path.endsWith(QLatin1Char('/')) && path.size() > 1)
+    if (!parsed.path().isEmpty())
     {
-        path.chop(1);
+        return false;
     }
-    if (path == QLatin1String("/"))
-    {
-        path.clear();
-    }
-    parsed.setPath(path);
+    parsed.setPath(QString());
     outUrl = parsed.toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::RemoveFragment);
     while (outUrl.endsWith(QLatin1Char('/')))
     {
         outUrl.chop(1);
     }
     return true;
+}
+
+int httpStatusCode(const QNetworkReply *reply)
+{
+    bool ok = false;
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(&ok);
+    return ok ? status : 0;
+}
+
+bool isHttpSuccess(int status)
+{
+    return status >= 200 && status < 300;
+}
+
+QString pollFailureMessage(const QString &path, const QNetworkReply *reply, int status)
+{
+    if (status > 0)
+    {
+        QString message = QStringLiteral("%1: HTTP status %2").arg(path).arg(status);
+        const QString reason = reply->attribute(QNetworkRequest::HttpReasonPhraseAttribute).toString().trimmed();
+        if (!reason.isEmpty())
+        {
+            message += QStringLiteral(" ") + reason;
+        }
+        const QString networkError = reply->errorString().trimmed();
+        if (reply->error() != QNetworkReply::NoError && !networkError.isEmpty())
+        {
+            message += QStringLiteral(" (%1)").arg(networkError);
+        }
+        return message;
+    }
+    const QString networkError = reply->errorString().trimmed();
+    if (reply->error() != QNetworkReply::NoError && !networkError.isEmpty())
+    {
+        return QStringLiteral("%1: %2").arg(path, networkError);
+    }
+    return QStringLiteral("%1: missing HTTP status").arg(path);
 }
 
 QString protectNodeCredentials(const QString &plain)
@@ -457,8 +490,10 @@ void ClusterServer::loadNodes()
     QFile f(m_nodesFile);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
         return;
+    int lineNo = 0;
     while (!f.atEnd())
     {
+        ++lineNo;
         const QByteArray line = f.readLine().trimmed();
         if (line.isEmpty() || line.startsWith('#'))
             continue;
@@ -469,10 +504,37 @@ void ClusterServer::loadNodes()
         n.name = QString::fromUtf8(parts[0]);
         QString normalizedUrl;
         if (!normalizeNodeUrl(QString::fromUtf8(parts[1]), normalizedUrl))
+        {
+            QTextStream(stderr) << "PGS cluster skipped node '" << n.name
+                                << "' from " << m_nodesFile << ':' << lineNo
+                                << ": url must be https://host[:port] without path, query, fragment, or embedded credentials\n";
             continue;
+        }
         n.baseHttpsUrl = normalizedUrl;
-        if (!unprotectNodeCredentials(QString::fromUtf8(parts[2]), n.credentials))
+        const QString storedCredentials = QString::fromUtf8(parts[2]);
+        if (!unprotectNodeCredentials(storedCredentials, n.credentials))
+        {
+#ifdef Q_OS_WIN
+            QTextStream(stderr) << "PGS cluster skipped node '" << n.name
+                                << "' from " << m_nodesFile << ':' << lineNo
+                                << ": failed to decrypt DPAPI credentials\n";
+#else
+            if (storedCredentials.startsWith(QStringLiteral("dpapi:")))
+            {
+                QTextStream(stderr) << "PGS cluster skipped node '" << n.name
+                                    << "' from " << m_nodesFile << ':' << lineNo
+                                    << ": DPAPI-protected credentials can only be decrypted on Windows; "
+                                       "re-add this node on the current platform\n";
+            }
+            else
+            {
+                QTextStream(stderr) << "PGS cluster skipped node '" << n.name
+                                    << "' from " << m_nodesFile << ':' << lineNo
+                                    << ": failed to decode credentials\n";
+            }
+#endif
             continue;
+        }
         if (!isSafeRegistryField(n.name) ||
             !isSafeRegistryField(n.baseHttpsUrl) ||
             !isSafeRegistryField(n.credentials))
@@ -554,17 +616,22 @@ void ClusterServer::pollNode(const Node &node)
                 return;
             }
             fieldSerial = serial;
-            if (reply->error() != QNetworkReply::NoError)
+            const int status = httpStatusCode(reply);
+            const bool reachable = reply->error() == QNetworkReply::NoError && isHttpSuccess(status);
+            if (!reachable)
             {
+                const QString error = pollFailureMessage(path, reply, status);
                 if (field == CacheField::Health)
                 {
+                    cache.healthStatus = status;
                     cache.healthReachable = false;
-                    cache.healthError = QStringLiteral("%1: %2").arg(path, reply->errorString());
+                    cache.healthError = error;
                 }
                 else
                 {
+                    cache.guardsStatus = status;
                     cache.guardsReachable = false;
-                    cache.guardsError = QStringLiteral("%1: %2").arg(path, reply->errorString());
+                    cache.guardsError = error;
                 }
                 cache.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
                 return;
@@ -572,12 +639,14 @@ void ClusterServer::pollNode(const Node &node)
             const QString body = QString::fromUtf8(reply->readAll());
             if (field == CacheField::Health)
             {
+                cache.healthStatus = status;
                 cache.healthJson = body;
                 cache.healthReachable = true;
                 cache.healthError.clear();
             }
             else
             {
+                cache.guardsStatus = status;
                 cache.guardsJson = body;
                 cache.guardsReachable = true;
                 cache.guardsError.clear();
@@ -620,7 +689,7 @@ QHttpServerResponse ClusterServer::handleNodeAdd(const PgsHttp::Request &request
         return QHttpServerResponse(QJsonObject{{"ok", false}, {"error", "name and url required"}}, QHttpServerResponse::StatusCode::BadRequest);
     QString normalizedUrl;
     if (!normalizeNodeUrl(url, normalizedUrl))
-        return QHttpServerResponse(QJsonObject{{"ok", false}, {"error", "url must be https://host[:port] without embedded credentials"}}, QHttpServerResponse::StatusCode::BadRequest);
+        return QHttpServerResponse(QJsonObject{{"ok", false}, {"error", "url must be https://host[:port] without path, query, fragment, or embedded credentials"}}, QHttpServerResponse::StatusCode::BadRequest);
     if (!isSafeRegistryField(name) || !isSafeRegistryField(normalizedUrl) || !isSafeRegistryField(creds))
         return QHttpServerResponse(QJsonObject{{"ok", false}, {"error", "name, url, and credentials must not contain control characters or semicolons"}}, QHttpServerResponse::StatusCode::BadRequest);
     Node n;
@@ -669,6 +738,8 @@ QHttpServerResponse ClusterServer::handleSummary() const
         o.insert("name", it.key());
         o.insert("url", it.value().baseHttpsUrl);
         o.insert("reachable", reachable);
+        o.insert("health_status", c.healthStatus);
+        o.insert("guards_status", c.guardsStatus);
         o.insert("last_error", lastError);
 
         int guardCount = 0;
@@ -797,6 +868,10 @@ async function refresh(){
     d.appendChild(el('div','',fmt(n.guard_count)+' guard(s)'));
     const meta=el('div','meta');
     meta.appendChild(document.createTextNode(fmt(n.url)));
+    if(n.health_status||n.guards_status){
+      meta.appendChild(document.createElement('br'));
+      meta.appendChild(document.createTextNode('status: health '+fmt(n.health_status||'--')+', guards '+fmt(n.guards_status||'--')));
+    }
     if(!n.reachable){
       meta.appendChild(document.createElement('br'));
       meta.appendChild(document.createTextNode('error: '+fmt(n.last_error)));

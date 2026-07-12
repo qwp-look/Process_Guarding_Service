@@ -7,7 +7,9 @@ REM ===========================================================================
 REM  package_release.bat - One-shot, self-contained release packaging for PGS.
 REM
 REM  Builds the PGS core+CLI+PPL module, the Qt admin GUI, then assembles a
-REM  release/ folder that runs on a CLEAN machine (no MSYS2 in PATH):
+REM  freshly deleted release/ folder that runs on a CLEAN machine (no MSYS2 in
+REM  PATH). Do not publish an existing release/ tree without rerunning this
+REM  script; it is rebuilt from current build outputs each time:
 REM    - pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe + examples
 REM    - pgs_admin_web.exe + pgs_cluster_web.exe (browser consoles)
 REM    - modules/ppl/{pgs_ppl_module.dll, Sirius.sys, module.html}  (per-folder)
@@ -31,6 +33,7 @@ set "RELEASE=release"
 
 if not exist "%CXX%" ( echo MinGW g++ not found: %CXX% & popd & exit /b 1 )
 if not exist "%CMAKE%" ( echo CMake not found: %CMAKE% & popd & exit /b 1 )
+if not exist "%MINGW%\windeployqt6.exe" ( echo windeployqt6 not found: %MINGW%\windeployqt6.exe & popd & exit /b 1 )
 
 echo [1/6] Build PGS core + CLI + PPL module (build_pgs.bat)...
 call tools\build_pgs.bat
@@ -60,6 +63,8 @@ if exist "%BUILD%\pgs_cluster_web\CMakeFiles\pgs_cluster_web.dir\objects.a" del 
 if errorlevel 1 ( echo ERROR: Qt cluster web build failed & popd & exit /b 1 )
 
 echo [3/6] Assemble release tree...
+REM Always start from a clean release tree so installer and zip artifacts cannot
+REM accidentally include stale binaries from a previous packaging run.
 if exist "%RELEASE%" rmdir /s /q "%RELEASE%"
 mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
@@ -81,10 +86,13 @@ copy /Y "%BUILD%\modules\sched\pgs_sched_module.dll" "%RELEASE%\modules\sched\" 
 copy /Y "%BUILD%\modules\sched\module.html"          "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\modules.allow"        "%RELEASE%\modules\" >nul
 copy /Y "docs\MODULE_SYSTEM.md"       "%RELEASE%\docs\" >nul
+copy /Y "docs\SERVICE_MODE_GUIDE.md"  "%RELEASE%\docs\" >nul
 copy /Y "docs\TECHNICAL_ARCHITECTURE.md" "%RELEASE%\docs\" >nul
+copy /Y "docs\ROBUSTNESS_AND_TESTING.md" "%RELEASE%\docs\" >nul
 copy /Y "docs\SCHEDULER_MODULE.md"     "%RELEASE%\docs\" >nul
 copy /Y "docs\REMOTE_GATEWAY.md"       "%RELEASE%\docs\" >nul
 copy /Y "docs\CLUSTER_DASHBOARD.md"    "%RELEASE%\docs\" >nul
+copy /Y "docs\GUARD_POLICIES.md"       "%RELEASE%\docs\" >nul
 copy /Y "LICENSE"                     "%RELEASE%\" >nul
 copy /Y "LICENSE.ThirdParty.StarlightGUI.txt" "%RELEASE%\" >nul
 copy /Y "NOTICE"                      "%RELEASE%\" >nul
@@ -92,11 +100,13 @@ copy /Y "README.md"                   "%RELEASE%\" >nul
 
 echo [4/6] Deploy Qt6 DLLs + plugins (windeployqt6)...
 "%MINGW%\windeployqt6.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw "%RELEASE%\pgs_admin_qt.exe" >nul 2>&1
+if errorlevel 1 ( echo ERROR: windeployqt6 failed for pgs_admin_qt.exe & popd & exit /b 1 )
 REM pgs_admin_web still links Qt6HttpServer for response/header helpers; HTTP I/O is handled by the local QTcpServer shim.
 "%MINGW%\windeployqt6.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw "%RELEASE%\pgs_admin_web.exe" >nul 2>&1
+if errorlevel 1 ( echo ERROR: windeployqt6 failed for pgs_admin_web.exe & popd & exit /b 1 )
 REM pgs_cluster_web shares the same Qt runtime closure but has its own executable.
 "%MINGW%\windeployqt6.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw "%RELEASE%\pgs_cluster_web.exe" >nul 2>&1
-if errorlevel 1 ( echo WARNING: windeployqt6 reported errors )
+if errorlevel 1 ( echo ERROR: windeployqt6 failed for pgs_cluster_web.exe & popd & exit /b 1 )
 
 echo [5/6] Copy MinGW third-party runtime DLLs (Qt6Core/Gui/TLS transitive deps)...
 REM windeployqt does not deploy these MSYS2 libs. This verified closure is what
