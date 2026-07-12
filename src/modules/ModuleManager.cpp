@@ -63,6 +63,11 @@ namespace ProcessGuard
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return out;
     }
+
+    std::string ModuleManager::allowlistKeyForPath(const std::string &path)
+    {
+        return moduleKeyFromPath(path);
+    }
     // Probe whether a candidate DLL exports the given symbol WITHOUT running its
     // DllMain or loading/initializing its dependencies. We map it with
     // DONT_RESOLVE_DLL_REFERENCES: per MSDN the system maps the image, makes its
@@ -373,21 +378,26 @@ namespace ProcessGuard
         // the per-folder convention so the allowlist matches either shape.
         const auto pos = path.find_last_of("\\/");
         const std::string leaf = (pos == std::string::npos) ? path : path.substr(pos + 1);
-        if (leaf.size() > 4 && leaf.substr(leaf.size() - 4) == ".dll")
+        const std::string leafLower = lower(leaf);
+        if (leafLower.size() > 4 && leafLower.substr(leafLower.size() - 4) == ".dll")
         {
-            // it's a filename; prefer the parent folder when one exists
-            if (pos != std::string::npos)
+            const std::string stem = lower(leaf.substr(0, leaf.size() - 4));
+            if (pos == std::string::npos)
             {
-                const std::string parent = path.substr(0, pos);
-                const auto ppos = parent.find_last_of("\\/");
-                if (ppos != std::string::npos)
-                {
-                    return lower(parent.substr(ppos + 1));
-                }
+                return stem;
             }
-            return lower(leaf.substr(0, leaf.size() - 4));
+
+            const std::string parent = path.substr(0, pos);
+            const auto ppos = parent.find_last_of("\\/");
+            const std::string parentLeaf = (ppos == std::string::npos) ? parent : parent.substr(ppos + 1);
+            const std::string parentKey = lower(parentLeaf);
+            if (parentKey == "modules")
+            {
+                return stem;
+            }
+            return parentKey;
         }
-        return lower(leaf);
+        return leafLower;
     }
 
     const ModuleManager::AllowEntry *ModuleManager::findAllowEntry(const std::string &moduleKey) const

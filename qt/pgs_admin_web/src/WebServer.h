@@ -38,7 +38,7 @@ public:
         QString tlsCertPath;
         QString tlsKeyPath;
         bool tlsAutocert = false; // reserved; remote mode currently requires explicit PEM files
-        QString usersFile;        // RBAC users file (user;role;saltHex;hashHex)
+        QString usersFile;        // RBAC users file; see loadUsers() for supported formats.
         QString auditLogPath;     // append-only audit log for remote API/auth events
     };
 
@@ -100,8 +100,15 @@ private:
     class QSslServer *m_sslServer = nullptr;
     QSslCertificate *m_sslCert = nullptr;
     QSslKey *m_sslKey = nullptr;
-    // RBAC: user -> (role, salt:hashHex). Loaded from usersFile.
-    struct UserRec { QString role; QByteArray saltHash; };
+    // RBAC: user -> password verifier. Loaded from usersFile.
+    struct UserRec
+    {
+        QString role;
+        QString scheme;
+        QByteArray salt;
+        QByteArray hash;
+        int iterations = 0;
+    };
     QHash<QString, UserRec> m_users;
     struct LoginFailure { int count = 0; qint64 blockedUntilMs = 0; };
     QHash<QString, LoginFailure> m_loginFailures;
@@ -113,6 +120,7 @@ private:
     bool authenticateAndAuthorize(const PgsHttp::Request &request, int requiredRole, QString &outUser);
     bool setupTls();
     static QByteArray saltHash(const QByteArray &salt, const QByteArray &password);
+    static QByteArray pbkdf2Hash(const QByteArray &salt, const QByteArray &password, int iterations, quint64 keyLength);
 };
 
 #endif // WEB_SERVER_H

@@ -5,8 +5,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-export PATH="/mingw64/bin:/usr/bin:$PATH"
-GXX="${GXX:-/mingw64/bin/g++.exe}"
+MINGW_ROOT="${MINGW_ROOT:-/mingw64}"
+export PATH="$MINGW_ROOT/bin:/usr/bin:$PATH"
+GXX="${GXX:-$MINGW_ROOT/bin/g++.exe}"
 
 mkdir -p build
 echo "[unit:core] compiling tests/test_pgs_core.cpp ..."

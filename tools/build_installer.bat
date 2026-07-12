@@ -15,7 +15,7 @@ REM ===========================================================================
 
 REM Use the 8.3 short path here. Expanding "Program Files (x86)" inside a
 REM parenthesized batch block can confuse cmd.exe because of the literal ")".
-set "ISCC=C:\Progra~2\Inno Setup 6\ISCC.exe"
+if not defined ISCC set "ISCC=C:\Progra~2\Inno Setup 6\ISCC.exe"
 
 set "PGS_VERSION=3.1.0"
 

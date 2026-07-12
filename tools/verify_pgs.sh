@@ -4,7 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-export PATH="/mingw64/bin:/usr/bin"
+MINGW_ROOT="${MINGW_ROOT:-/mingw64}"
+export PATH="$MINGW_ROOT/bin:/usr/bin:$PATH"
+GXX="${GXX:-$MINGW_ROOT/bin/g++.exe}"
+CMAKE="${CMAKE:-$MINGW_ROOT/bin/cmake.exe}"
 
 # This script is intentionally broader than a plain compile:
 # - verifies critical source files are present
@@ -61,12 +64,12 @@ fi
 echo
 echo "[Qt] Configuring..."
 rm -rf build/pgs_admin_qt
-cmake -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
-  -DCMAKE_PREFIX_PATH=/mingw64 \
-  -DCMAKE_CXX_COMPILER=/mingw64/bin/g++.exe
+"$CMAKE" -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH="$MINGW_ROOT" \
+  -DCMAKE_CXX_COMPILER="$GXX"
 
 echo "[Qt] Building..."
-cmake --build build/pgs_admin_qt -j4
+"$CMAKE" --build build/pgs_admin_qt -j "${PGS_BUILD_JOBS:-4}"
 
 echo
 echo "[Web] Building admin + cluster consoles..."

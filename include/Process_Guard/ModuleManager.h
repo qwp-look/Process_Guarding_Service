@@ -114,6 +114,10 @@ namespace ProcessGuard
         // modules keep working unchanged.
         void setServices(const PGS_Services &s) { m_services = s; m_servicesReady = true; }
 
+        // Return the allowlist key a module path maps to. Exposed for tests and
+        // diagnostics; loading still uses the private helper below.
+        static std::string allowlistKeyForPath(const std::string &path);
+
     private:
         // Resolved function-pointer types and runtime data for one loaded DLL.
         struct Entry

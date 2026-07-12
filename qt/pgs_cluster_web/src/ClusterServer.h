@@ -20,7 +20,8 @@ class ClusterServer : public QObject
 public:
     // One registered PGS node. credentials = "user:password" for Basic auth
     // against the node's remote gateway (HTTPS). The registry file persists
-    // credentials locally, but list/summary APIs intentionally never echo them.
+    // credentials locally with DPAPI when available, and list/summary APIs
+    // intentionally never echo them.
     // generation fences off late replies after delete/re-add of the same name.
     struct Node
     {
@@ -63,6 +64,7 @@ private:
     QString m_nodeCaCertPath;
     bool m_nodeInsecureTls = false;
     bool m_apiTokenGenerated = false;
+    bool m_remoteBind = false;
     bool m_tlsEnabled = false;
     QList<QSslCertificate> m_nodeCaCertificates;
     PgsHttp::Server *m_server = nullptr;

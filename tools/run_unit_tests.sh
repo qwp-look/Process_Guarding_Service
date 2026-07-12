@@ -8,4 +8,5 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
 bash ./tools/test_core_units.sh
+bash ./tools/test_module_manager.sh
 bash ./tools/test_sched_cron.sh

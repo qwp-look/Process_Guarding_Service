@@ -150,6 +150,14 @@ private:
         {
             binPath += " --port " + std::to_string(args.port);
         }
+        if (args.enablePpl)
+        {
+            binPath += " --enable-ppl";
+        }
+        if (args.allowAllModules)
+        {
+            binPath += " --allow-all-modules";
+        }
 
         // v3 G: optional low-privilege service account. LocalSystem (nullptr)
         // is the default and is REQUIRED for full cross-session
@@ -554,6 +562,21 @@ private:
     static bool parseArguments(int argc, char *argv[], ParsedArgs &out)
     {
         out = ParsedArgs{};
+        auto parsePort = [](const std::string &text, int &port) {
+            try
+            {
+                std::size_t consumed = 0;
+                const int parsed = std::stoi(text, &consumed, 10);
+                if (consumed != text.size() || parsed <= 0 || parsed > 65535)
+                    return false;
+                port = parsed;
+                return true;
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+        };
 
         for (int i = 1; i < argc; ++i)
         {
@@ -587,8 +610,8 @@ private:
                 {
                     return false;
                 }
-                const int p = std::stoi(next);
-                if (p <= 0 || p > 65535)
+                int p = 0;
+                if (!parsePort(next, p))
                 {
                     return false;
                 }

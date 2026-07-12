@@ -30,6 +30,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QMessageAuthenticationCode>
+#include <QPasswordDigestor>
 #include <algorithm>
 #include <cstring>
 #include "Process_Guard/PGSClient.h"
@@ -147,12 +148,28 @@ bool constantTimeEquals(const QString &left, const QString &right)
     return diff == 0;
 }
 
+bool constantTimeEquals(const QByteArray &left, const QByteArray &right)
+{
+    const int maxSize = qMax(left.size(), right.size());
+    unsigned char diff = static_cast<unsigned char>(left.size() ^ right.size());
+    for (int i = 0; i < maxSize; ++i)
+    {
+        const unsigned char av = i < left.size() ? static_cast<unsigned char>(left.at(i)) : 0;
+        const unsigned char bv = i < right.size() ? static_cast<unsigned char>(right.at(i)) : 0;
+        diff |= static_cast<unsigned char>(av ^ bv);
+    }
+    return diff == 0;
+}
+
 bool isUnsafeMethod(QHttpServerRequest::Method method)
 {
     using Method = QHttpServerRequest::Method;
     return method == Method::Post || method == Method::Put ||
            method == Method::Patch || method == Method::Delete;
 }
+
+constexpr int kPbkdf2MinIterations = 100000;
+constexpr int kPbkdf2KeyLength = 32;
 
 bool isJsonRequest(const PgsHttp::Request &request)
 {
@@ -647,15 +664,21 @@ QString WebServer::listenUrl() const
              hostWithPort(m_options.bindAddress, m_options.httpPort));
 }
 
-// HMAC-SHA256 over the password using a per-user salt. Stored as hex so the
-// users file never holds plaintext passwords.
+// Legacy HMAC-SHA256 over the password using a per-user salt. New user files
+// should prefer PBKDF2-SHA256; legacy records remain readable for upgrades.
 QByteArray WebServer::saltHash(const QByteArray &salt, const QByteArray &password)
 {
     return QMessageAuthenticationCode::hash(password, salt, QCryptographicHash::Sha256).toHex();
 }
 
-// Load the RBAC user store. File format, one user per line:
-//   user;role;saltHex;hashHex
+QByteArray WebServer::pbkdf2Hash(const QByteArray &salt, const QByteArray &password, int iterations, quint64 keyLength)
+{
+    return QPasswordDigestor::deriveKeyPbkdf2(QCryptographicHash::Sha256, password, salt, iterations, keyLength);
+}
+
+// Load the RBAC user store. File formats, one user per line:
+//   user;role;pbkdf2-sha256;iterations;saltHex;hashHex   (preferred)
+//   user;role;saltHex;hashHex                             (legacy HMAC)
 // role in {viewer, operator, admin}. Blank lines and # comments are skipped.
 bool WebServer::loadUsers()
 {
@@ -675,7 +698,7 @@ bool WebServer::loadUsers()
         if (line.isEmpty() || line.startsWith('#'))
             continue;
         const QList<QByteArray> parts = line.split(';');
-        if (parts.size() != 4)
+        if (parts.size() != 4 && parts.size() != 6)
             continue;
         const QString user = QString::fromUtf8(parts[0]);
         const QString role = QString::fromUtf8(parts[1]).toLower();
@@ -683,11 +706,28 @@ bool WebServer::loadUsers()
             continue;
         UserRec rec;
         rec.role = role;
-        const QByteArray salt = QByteArray::fromHex(parts[2]);
-        const QByteArray hash = parts[3].trimmed().toLower();
-        if (salt.isEmpty() || hash.isEmpty())
+        if (parts.size() == 4)
+        {
+            rec.scheme = QStringLiteral("hmac-sha256-legacy");
+            rec.salt = QByteArray::fromHex(parts[2]);
+            rec.hash = parts[3].trimmed().toLower();
+        }
+        else
+        {
+            rec.scheme = QString::fromUtf8(parts[2]).toLower();
+            if (rec.scheme != QLatin1String("pbkdf2-sha256"))
+                continue;
+            bool ok = false;
+            rec.iterations = QString::fromUtf8(parts[3]).toInt(&ok);
+            if (!ok || rec.iterations < kPbkdf2MinIterations)
+                continue;
+            rec.salt = QByteArray::fromHex(parts[4]);
+            rec.hash = QByteArray::fromHex(parts[5]);
+            if (rec.hash.size() != kPbkdf2KeyLength)
+                continue;
+        }
+        if (rec.salt.isEmpty() || rec.hash.isEmpty())
             continue;
-        rec.saltHash = salt + ':' + hash;
         m_users.insert(user, rec);
     }
     return !m_users.isEmpty();
@@ -732,20 +772,21 @@ bool WebServer::authenticateAndAuthorize(const PgsHttp::Request &request, int re
     if (it == m_users.constEnd())
         return reject(user, QStringLiteral("unknown-user"));
     const UserRec &rec = it.value();
-    const int colon2 = rec.saltHash.indexOf(':');
-    if (colon2 < 0)
-        return reject(user, QStringLiteral("bad-user-record"));
-    const QByteArray salt = rec.saltHash.left(colon2);
-    const QByteArray storedHash = rec.saltHash.mid(colon2 + 1);
-    const QByteArray computed = saltHash(salt, password);
-    if (computed.size() != storedHash.size())
-        return reject(user, QStringLiteral("bad-password"));
-    unsigned char diff = 0;
-    for (int i = 0; i < computed.size(); ++i)
+    QByteArray computed;
+    QByteArray storedHash = rec.hash;
+    if (rec.scheme == QLatin1String("pbkdf2-sha256"))
     {
-        diff |= static_cast<unsigned char>(computed.at(i) ^ storedHash.at(i));
+        computed = pbkdf2Hash(rec.salt, password, rec.iterations, static_cast<quint64>(storedHash.size()));
     }
-    if (diff != 0)
+    else if (rec.scheme == QLatin1String("hmac-sha256-legacy"))
+    {
+        computed = saltHash(rec.salt, password);
+    }
+    else
+    {
+        return reject(user, QStringLiteral("bad-user-record"));
+    }
+    if (!constantTimeEquals(computed, storedHash))
         return reject(user, QStringLiteral("bad-password"));
     int roleVal = (rec.role == "admin") ? static_cast<int>(Role::Admin)
                  : (rec.role == "operator") ? static_cast<int>(Role::Operator)

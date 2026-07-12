@@ -238,7 +238,7 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 - `build/modules/ppl/Sirius.sys`
 - `build/modules/ppl/module.html`
 
-> 注：`build_pgs.bat` 现在会把 `C:\msys64\mingw64\bin` 加入 `PATH`，确保 g++ 能找到 `cc1plus` 等内部组件，因此可从任意终端运行（不必先开 MSYS2 终端）。
+> 注：`build_pgs.bat` 默认使用 `C:\msys64\mingw64` 并把其 `bin` 加入 `PATH`，确保 g++ 能找到 `cc1plus` 等内部组件。工具链不在默认位置时，可用 `MINGW_ROOT`、`MINGW_BIN` 或 `CXX` 覆盖。
 
 ---
 
@@ -374,13 +374,14 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 ```
 
 - `<name>`：模块 `PG_GetName` 返回值，大小写不敏感。
+  目录布局 `modules\foo\foo.dll` 的 allowlist key 为 `foo`；loose 布局 `modules\foo.dll` 的 key 也为 `foo`。
 - 可选 `|<sha256Hex>`：固定该哈希；缺省则不校验哈希。
 - 可选 `|signed`：要求 Authenticode 签名有效；缺省则不强制签名。
 
 ### 14.3 fail-closed 与 `--allow-all-modules`
 
 - **默认 fail-closed**：`modules.allow` 文件缺失（或无可命中条目）→ 拒绝加载任何模块并日志告警。理由：模块可执行任意代码进入 PGS 进程空间，未显式授权即不该加载。
-- **逃生阀 `--allow-all-modules`**：`run`/`install` flag，持久化于归档 `MODULES_PERMISSIVE\t1`，开启旧宽松行为「白名单缺失仍允许加载」用于开发调试。文档明确警告：**生产环境禁用**，等价于关闭模块边界。
+- **逃生阀 `--allow-all-modules`**：`run`/`install` flag，持久化于归档 `MODULES_PERMISSIVE\t1`；`install --allow-all-modules` 还会写入 SCM `binPath`，以后由服务管理器启动仍生效。它会开启旧宽松行为「白名单缺失仍允许加载」用于开发调试。文档明确警告：**生产环境禁用**，等价于关闭模块边界。
 
 ### 14.4 目录 ACL 加固
 

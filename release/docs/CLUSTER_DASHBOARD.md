@@ -27,9 +27,7 @@ pgs_cluster_web.exe ^
   --tls-key key.pem
 ```
 
-远程浏览器访问 API 时可用 `X-API-Token: <dashboard-token>` 或
-`Authorization: Bearer <dashboard-token>`。内置页面会把输入的 token 存在浏览器
-`localStorage`，仅用于访问 cluster dashboard 自身 API，不会发给被管理节点。
+远程浏览器访问首页 `/` 和 API 时都需要 token。API 可用 `X-API-Token: <dashboard-token>`、`Authorization: Bearer <dashboard-token>`，浏览器直开首页时也可使用 Basic challenge：用户名任意，密码填 `<dashboard-token>`。内置页面会把输入的 token 存在浏览器 `localStorage`，仅用于访问 cluster dashboard 自身 API，不会发给被管理节点。
 
 节点 HTTPS 证书默认严格校验。若 PGS 节点使用私有 CA，可给聚合器传入 CA：
 
@@ -42,8 +40,7 @@ pgs_cluster_web.exe --node-ca-cert pgs-node-ca.pem
 
 ## 2. 节点注册表
 
-文件格式，一行一个节点：`name;baseHttpsUrl;user:pass`。`#` 开头为注释。
-凭证即 Stage C 远程网关的 RBAC 用户（Basic auth）。注册表由仪表盘进程持久化到本地文件。
+文件格式一行一个节点。新写入格式为 `name;baseHttpsUrl;dpapi:<protected user:pass>`，旧格式 `name;baseHttpsUrl;user:pass` 仍会读取并在下次保存时迁移。`#` 开头为注释。凭证即 Stage C 远程网关的 RBAC 用户（Basic auth）。注册表由仪表盘进程持久化到本地文件。
 
 URL 规则：
 
@@ -54,7 +51,7 @@ URL 规则：
 
 示例 `pgs_cluster_nodes.txt`：
 ```
-# name;baseHttpsUrl;user:pass
+# name;baseHttpsUrl;user:pass  （旧明文格式，读取后会保存为 dpapi:...）
 node1;https://10.0.0.5:12443;admin:s3cret
 node2;https://10.0.0.6:12443;operator:pass2
 ```
@@ -75,7 +72,7 @@ node2;https://10.0.0.6:12443;operator:pass2
 | POST | `/api/cluster/nodes` | 增加节点 `{name,url,credentials}` |
 | DELETE | `/api/cluster/nodes` | 删除节点 `{name}` |
 
-上述 `/api/cluster/*` 全部需要 token。默认 loopback 且未设置 `--api-token` 时，进程会生成本次运行
+上述 `/api/cluster/*` 全部需要 token；非回环监听时首页 `/` 也需要 token。默认 loopback 且未设置 `--api-token` 时，进程会生成本次运行
 随机 token 并嵌入本地页面；非回环监听必须使用显式 `--api-token`，自动 token 不允许暴露到网络。
 POST/DELETE 还要求 `Content-Type: application/json`。
 
@@ -85,8 +82,7 @@ POST/DELETE 还要求 `Content-Type: application/json`。
 - `--node-insecure-tls` 会退回旧的 `VerifyNone` 行为，仅用于隔离实验环境。
 - 仪表盘默认监听 `127.0.0.1`。非回环监听强制 HTTPS + API token，避免 dashboard token 和节点
   `user:pass` 在网络上明文传输。
-- 节点凭证不会从 list/summary API 回显，但仍以明文存在节点注册表文件中。文件权限应仅运维可读；
-  后续如需更强本机保护，可用 Windows DPAPI 加密第三列凭据。
+- 节点凭证不会从 list/summary API 回显；Windows 上新保存的第三列会使用 DPAPI 保护，旧明文注册表仍兼容读取。文件权限仍应仅运维可读，因为运行该仪表盘的同一 Windows 用户/服务账号可以解密 DPAPI 数据。
 - 轮询缓存按节点 generation 与请求 serial 校验，删除/重加同名节点或旧请求晚返回时不会污染新节点状态。
 
 ## 6. 构建
