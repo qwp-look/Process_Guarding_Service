@@ -80,11 +80,20 @@
 | `const char* PG_GetName(void)` | 是 | 模块短名（UTF-8 静态串），如 `"ppl"`。作为调用键，大小写不敏感。 |
 | `const char* PG_GetVersion(void)` | 否 | 版本串，如 `"1.0.0"`。缺失时为空。 |
 | `unsigned int PG_GetAbiVersion(void)` | 否 | 返回构建时的 `PG_MODULE_ABI_VERSION`，供兼容性检查。 |
-| `int PG_Init(void* reserved)` | 否 | 加载后调用一次。返回 0 成功；非 0 则 PGS 卸载该模块并报错。`reserved` 当前为 `NULL`。 |
+| `const char* PG_GetManifest(void)` | 否 | ABI v2 可选自述清单，返回 `key=value;...` 静态 UTF-8 串。 |
+| `int PG_Init(void* reserved)` | 否 | 加载后调用一次。返回 0 成功；非 0 则 PGS 卸载该模块并报错。ABI v2 下 `reserved` 是 `PGS_Services*`（未配置时为 `NULL`）。 |
 | `void PG_Shutdown(void)` | 否 | 卸载前调用一次。可缺失。 |
 | `int PG_Invoke(const char* request, char* responseBuf, size_t responseBufSize)` | 是 | 执行操作。成功返回 0，失败返回非 0。响应写入 `responseBuf`（NUL 结尾 UTF-8）。 |
 
-**ABI 版本**：`PG_MODULE_ABI_VERSION` 当前为 `1`。不兼容变更时递增。
+**ABI 版本**：`PG_MODULE_ABI_VERSION` 当前为 `2`。v2 在 `PG_Init` 的 `reserved` 参数上传入 `PGS_Services`，允许受信任模块回调 PGS。不兼容变更时递增。
+
+**Manifest / capability 自述**：`PG_GetManifest` 可返回：
+
+```
+name=ppl;version=1.0.0;abi=2;summary=Protected Process Light control;capabilities=ppl.set,ppl.get,ppl.clear
+```
+
+当前识别 `name`、`version`、`abi`、`summary`、`capabilities`。其中 `name` 与 `abi` 若存在，会在加载前与 `PG_GetName` / `PG_GetAbiVersion` 一致性校验；`capabilities` 目前是可审计/可展示的能力标签，是后续宿主强制 capability policy 的基础。
 
 **请求/响应格式**：沿用 PGS 的 `KEY=VALUE;...` KV 风格（UTF-8），不引入 JSON 依赖。
 - 请求示例：`op=set;pid=1234;signer=Antimalware`
@@ -102,13 +111,13 @@
 
 **关键行为**
 
-- `loadFromDirectory(dir)`：用 `FindFirstFileW` 扫描——既加载 `dir\*.dll`（顶层散落 DLL），**也下钻一层子目录**加载 `dir\<文件夹>\*.dll`（推荐的 per-folder 布局）。**单个模块加载失败不会中断整轮扫描**（静默跳过），避免一个坏 DLL 拖垮全部插件。返回本轮成功加载数量。
-- `load(path, err)`：加载单个 DLL。校验必需导出（`PG_GetName` + `PG_Invoke`），查重（按小写名），调 `PG_Init`；任一失败则 `FreeLibrary` 并返回错误。
+- `loadFromDirectory(dir)`：用 `FindFirstFileW` 扫描——既加载 `dir\*.dll`（顶层散落 DLL），**也下钻一层子目录**加载 `dir\<文件夹>\*.dll`（推荐的 per-folder 布局）。**单个模块加载失败不会中断整轮扫描**，但会记录 `path + reason` 诊断，避免一个坏 DLL 拖垮全部插件且便于排查。返回本轮成功加载数量。
+- `load(path, err)`：加载单个 DLL。先用 `DONT_RESOLVE_DLL_REFERENCES` 预探测 `PG_GetName` / `PG_Invoke` / `PG_GetManifest`，再校验模块根目录、allowlist、签名、哈希和 manifest name/ABI，一切通过才 `LoadLibraryW`。随后查重（按小写名），调 `PG_Init`；任一失败则 `FreeLibrary` 并返回错误。
 - `unload(name, err)`：按名（大小写不敏感）卸载，先 `PG_Shutdown` 再 `FreeLibrary`。
 - `list()`：返回 `{name, version}` 快照。
 - `invoke(name, request, response, err)`：按名查找并调 `PG_Invoke`，提供 8 KB 响应缓冲。**模块未找到返回 false**；模块内部业务错误（模块写了 `ERR ...`）仍返回 true，由调用方看响应串。
 
-**线程安全**：所有公开方法持 `std::mutex`。PGS 的工作线程池（4 个）会并发处理客户端请求，模块调用必须可重入——模块自身若维护共享状态需自行加锁。
+**线程安全**：注册表级别使用 `std::shared_mutex`：`list()` / `invoke()` 走共享锁，`load()` / `unload()` / 扫描走独占锁。每个模块还有 `activeInvokes + unloading + condition_variable`，保证调用中不会 `FreeLibrary`。模块自身若维护共享状态仍需自行加锁。
 
 **生命周期**：由 `PGS` 持有成员 `ModuleManager m_modules`。`PGS::initialize()` 总是创建/加固
 `<exe>\modules` 根目录并配置 ABI v2 services；默认不自动扫描加载模块。只有显式启用 PPL/module
@@ -136,6 +145,14 @@ opt-in 时才递归加固 modules tree 并扫描加载。`PGS` 析构时 `Module
 非 opt-in 启动不自动扫描，但显式 `module load` 仍可按同一 allowlist/签名/哈希规则加载指定 DLL；
 其中 `ppl` 模块本身仍要求 `PGS_ENABLE_PPL=1` 或 `--enable-ppl`，避免在未 opt-in 时把内核驱动拉进来。
 
+### 5.1 额外 bundled modules
+
+| 模块 | 作用 |
+|------|------|
+| `health` | 汇总 `stats` / `list` / `events`，给出服务健康摘要 |
+| `profile` | 保存命名的重启策略 profile，并应用到指定 PID |
+| `report` | 导出 stats / guards / events 的 base64 报告，可用于备份或归档 |
+
 **命令分发**（`processMessage`）：在 `ping` 分支前新增：
 
 - `module list` → `OK count=N` + 每行 `name\tversion`
@@ -144,6 +161,9 @@ opt-in 时才递归加固 modules tree 并扫描加载。`PGS` 析构时 `Module
 - `module call <name> <kv请求>` → `ModuleManager::invoke`，透传模块响应
 - `ppl set <pid> <signer>` → 构造 `op=set;pid=N;signer=X` 调 ppl 模块（便利封装，免记模块调用语法）
 - `ppl get <pid>` / `ppl clear <pid>` → 同上
+- `health summary|stats|list|events` → 调 `health` 模块
+- `profile set|get|remove|apply` → 调 `profile` 模块
+- `report snapshot|backup` → 调 `report` 模块
 
 所有命令复用既有 token 认证信封与 `splitByChar`/`parsePid` 等 KV 辅助，风格与原有命令一致。ppl 模块未加载时返回 `ERR ppl module not loaded`。
 
@@ -156,6 +176,7 @@ opt-in 时才递归加固 modules tree 并扫描加载。`PGS` 析构时 `Module
 | 文件 | 说明 | 来源 |
 |------|------|------|
 | `pgs_ppl_module.cpp` | 实现 PGModule ABI，解析 op=set/get/clear | 新增（PGS） |
+| `module.manifest` | 离线安全的模块自述文件，供 `module info` 读取 | 新增（PGS） |
 | `SiriusDriverClient.h` | 驱动加载 + IOCTL 客户端 | 衍生自 StarlightGUI `DriverUtils`/`KernelInstance` |
 | `SiriusIO.h` | Sirius 驱动 IOCTL/结构定义 | 衍生自 StarlightGUI，MinGW 适配 |
 | `Sirius.sys` | 预编译内核驱动二进制 | 复制自 StarlightGUI `Assets/` |
@@ -168,7 +189,7 @@ opt-in 时才递归加固 modules tree 并扫描加载。`PGS` 析构时 `Module
 | `get` | `op=get;pid=N` | 查询当前保护类型与 signer | `OK type=Light signer=X` |
 | `clear` | `op=clear;pid=N` | 清除保护（type=None, signer=None） | `OK cleared` |
 
-**signer 取值**（字符串，大小写不敏感；也接受 0–255 数字）：
+**signer 取值**（字符串，大小写不敏感；明确拒绝 0–255 这类裸数字，避免打开未文档化 enum 面）：
 
 `None` / `Authenticode` / `CodeGen` / `Antimalware` / `Lsa` / `Windows` / `WinTcb` / `WinSystem` / `App`
 
@@ -179,7 +200,7 @@ opt-in 时才递归加固 modules tree 并扫描加载。`PGS` 析构时 `Module
 1. `ensureDevice()` 懒加载：
    - 解析 `Sirius.sys` 路径（优先模块 DLL 同目录，其次主 exe 目录）。
    - `loadSiriusDriver()`：`OpenSCManager` → `OpenService("Sirius for StarlightGUI")`；存在则按需 `StartService`，不存在则 `CreateService` + `StartService`。**服务名沿用 StarlightGUI**，若其已加载驱动则直接复用。
-   - `CreateFileW("\\\\.\\Sirius", ...)` 打开设备。若设备已存在（别处已加载驱动）则即使 SCM 步骤失败也尝试打开。
+   - `CreateFileW("\\\\.\\Sirius", ...)` 打开设备。SCM 装载/复用失败时直接返回错误，不会绕过 SCM 直接打开未知设备。
 2. `setPPL(pid, type, signer)`：填 `SI_PROCESS_PROTECTION{type, signer}`，构造 `SI_PROCESS_INFORMATION{Protection, pid, &prot, 0}`，发 `IOCTL_SIRIUS_SET_PROCESS_INFORMATION`。
 3. `getPPL(pid, outType, outSigner)`：同结构，发 `IOCTL_SIRIUS_QUERY_PROCESS_INFORMATION`，驱动回填 `SI_PROCESS_PROTECTION`。
 
@@ -193,6 +214,8 @@ opt-in 时才递归加固 modules tree 并扫描加载。`PGS` 析构时 `Module
 
 ```
 pgs_bless module list
+pgs_bless module info --path <dll> [--modules-dir <dir>] [--json]
+pgs_bless module trust --path <dll> [--modules-dir <dir>] [--hash auto|none|HEX] [--require-signed]
 pgs_bless module load --path <dll绝对路径>
 pgs_bless module unload --name <模块名>
 pgs_bless module call --name <模块名> --request "op=set;pid=N;signer=X"
@@ -200,9 +223,15 @@ pgs_bless module call --name <模块名> --request "op=set;pid=N;signer=X"
 pgs_bless ppl set --pid <pid> --signer <None|Authenticode|CodeGen|Antimalware|Lsa|Windows|WinTcb|WinSystem>
 pgs_bless ppl get --pid <pid>
 pgs_bless ppl clear --pid <pid>
+pgs_bless health summary
+pgs_bless profile set --name default --max-restarts 3
+pgs_bless profile apply --name default --pid 1234
+pgs_bless report snapshot --limit 25
 ```
 
 通用选项（与既有命令一致）：`--host`、`--port`、`--token`。`ppl` 是 `module call ppl` 的便利封装；`module call` 可用于任意模块。
+
+`module info` 和 `module trust` 是**本地离线工具**：它们不会连接服务，也不需要 token。`module info` 用 `DONT_RESOLVE_DLL_REFERENCES` 读取导出存在性，再结合同目录 `module.manifest`（如果存在）、sha256、签名状态和当前 `modules.allow` 匹配情况；它**不会执行 DLL 导出函数**。`module trust` 计算/写入 `modules.allow` 信任条目，默认 `--hash auto` 固定当前 DLL 的 SHA-256。`--require-signed` 会先验证 Authenticode，然后写出 `signed` 要求。
 
 **典型流程**
 
@@ -223,7 +252,8 @@ pgs_bless ppl clear --pid 1234              # 清除保护
 
 - 编译 `src/modules/ModuleManager.cpp` → `ModuleManager.o`，链入 `pgs_service.exe`。
 - 用 `g++ -shared` 构建 `modules/ppl/pgs_ppl_module.dll`（per-folder 布局）。
-- 复制 `Sirius.sys`、`module.html` 及 MinGW 运行时 DLL 到 `build/modules/ppl/`（模块文件夹自包含）。
+- 复制 `Sirius.sys`、`module.html`、`module.manifest` 及 MinGW 运行时 DLL 到 `build/modules/ppl/`（模块文件夹自包含）。
+- 另外构建 `health` / `profile` / `report` 三个 ABI v2 模块，并把各自的 `module.html` / `module.manifest` 一并拷入 `build/modules/<name>/`。
 
 ```
 cd Process_Guarding_Service
@@ -234,6 +264,9 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 
 - `build/pgs_service.exe`
 - `build/pgs_bless.exe`
+- `build/modules/health/pgs_health_module.dll`
+- `build/modules/profile/pgs_profile_module.dll`
+- `build/modules/report/pgs_report_module.dll`
 - `build/modules/ppl/pgs_ppl_module.dll`
 - `build/modules/ppl/Sirius.sys`
 - `build/modules/ppl/module.html`
@@ -259,6 +292,10 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
    extern "C" PG_MODULE_API const char* PG_GetName(void) { return kName; }
    extern "C" PG_MODULE_API const char* PG_GetVersion(void) { return kVer; }
    extern "C" PG_MODULE_API unsigned int PG_GetAbiVersion(void) { return PG_MODULE_ABI_VERSION; }
+   extern "C" PG_MODULE_API const char* PG_GetManifest(void)
+   {
+       return "name=example;version=1.0.0;abi=2;summary=Example module;capabilities=example.invoke";
+   }
    extern "C" PG_MODULE_API int PG_Init(void*) { return 0; }
    extern "C" PG_MODULE_API void PG_Shutdown(void) {}
 
@@ -274,7 +311,7 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
    ```
 
 3. 在 `build_pgs.bat` / `build_pgs.sh` 仿照 PPL 模块加一行 `-shared` 构建，输出到 `build/modules/<你的模块>/my_module.dll`（per-folder 布局）。
-4.（可选但推荐）在该目录放一个 `module.html`，作为该模块在 Qt 管理端「模块管理」标签页的说明页（见第 13 节）。
+4.（可选但推荐）在该目录放一个 `module.html` 和 `module.manifest`。前者给 Qt/Web 说明页，后者给离线 `module info`、模块目录审计和信任工具使用（见第 13 节与第 14.2 节）。
 5. 运行 `pgs_bless module list` 应见你的模块；`pgs_bless module call --name example --request "op=..."` 调用。
 
 **约定**
@@ -347,7 +384,7 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 
 > 约定提醒：因「文件夹名 = 模块名」，新增模块时务必让目录名与 `PG_GetName()` 返回值一致，否则 Qt 子页面虽能建立，但 `module call --name <文件夹>` 会因名字不匹配而失败。
 
-`module.html` 由各模块自行提供，应放在 `modules/<模块名>/module.html`，构建脚本将其与 `*.dll`、`Sirius.sys` 等一并拷入 `build/modules/<模块名>/` 与 `release/modules/<模块名>/`。
+`module.html` 和 `module.manifest` 由各模块自行提供，应放在 `modules/<模块名>/`，构建脚本将其与 `*.dll`、`Sirius.sys` 等一并拷入 `build/modules/<模块名>/` 与 `release/modules/<模块名>/`。
 ## 14. 模块白名单与 Authenticode 签名（v3）
 
 > v3 起模块加载默认 **fail-closed**：必须命中白名单、（当要求签名时）通过 Authenticode 校验，否则一律拒绝加载。本节为 v3 校验机制的权威说明。
@@ -356,13 +393,15 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 
 `ModuleManager::load` 顺序：
 
-1. 规范化待加载 DLL 的绝对路径，确认其位于 `<exe>\modules\` 之内（`isPathInsideModulesDir`，拒绝逃逸模块目录的绝对路径）。
-2. **白名单命中**：在 `modules.allow` 中按模块名（大小写不敏感，与 `PG_GetName` 比对）查找条目。
-3. （条目要求签名时）**Authenticode 校验**：`WinVerifyTrust` 验证文件签名链。
-4. （条目给出 sha256 时）**哈希校验**：BCrypt(SHA-256) 计算文件哈希与条目比对。
-5. 全过才 `LoadLibrary`；任何一步失败记录明确原因并跳过。
+1. 用 `DONT_RESOLVE_DLL_REFERENCES` 预探测 `PG_GetName` / `PG_Invoke` / `PG_GetManifest` 导出是否存在，不运行 `DllMain`。
+2. 规范化待加载 DLL 的绝对路径，确认其位于已配置的 modules root 之内。外部 `module load` 仍先在 `PGSProtocol::isPathInsideModulesDir` 做同样的真实路径检查；`ModuleManager` 现在也会二次校验，防未来内部直接调用绕过。
+3. **manifest 一致性**：`PG_GetManifest` 如声明 `name` / `abi`，必须与 `PG_GetName` / `PG_GetAbiVersion` 一致。
+4. **白名单命中**：在 `modules.allow` 中按模块名（大小写不敏感，与 `PG_GetName` 比对）查找条目；重复条目以后出现者为准，便于 `module trust` 追加/更新。
+5. （条目要求签名时）**Authenticode 校验**：`WinVerifyTrust` 验证文件签名链。
+6. （条目给出 sha256 时）**哈希校验**：BCrypt(SHA-256) 计算文件哈希与条目比对。
+7. 全过才 `LoadLibraryW`；任何一步失败记录明确原因并跳过或返回。
 
-错误串扩容：`"module not in allowlist"` / `"signature verification failed"` / `"hash mismatch"` / `"module path outside modules dir"`。
+典型错误串：`"module not in allowlist"` / `"signature verification failed"` / `"hash mismatch"` / `"module path outside modules dir"` / `"module manifest ABI mismatch"`。
 
 ### 14.2 白名单文件格式
 
@@ -370,13 +409,22 @@ tools\build_pgs.bat      # 或在 MSYS2 MinGW64 终端: tools/build_pgs.sh
 
 ```
 # 注释行、空行忽略；# 必须在行首
-<name>[|<sha256Hex>][|signed]]
+<name>[|<sha256Hex>][|signed]
 ```
 
 - `<name>`：模块 `PG_GetName` 返回值，大小写不敏感。
   目录布局 `modules\foo\foo.dll` 的 allowlist key 为 `foo`；loose 布局 `modules\foo.dll` 的 key 也为 `foo`。
 - 可选 `|<sha256Hex>`：固定该哈希；缺省则不校验哈希。
-- 可选 `|signed`：要求 Authenticode 签名有效；缺省则不强制签名。
+- 可选 `|signed`：要求 Authenticode 签名有效；缺省则不强制签名。无 hash 但要求签名可写 `name||signed` 或 `name|signed`。
+- 同名重复条目以后出现者为准。`pgs_bless module trust` 会更新最后一个同名条目，或在文件末尾追加新条目。
+
+本地生成/更新条目：
+
+```bash
+pgs_bless module info --path build/modules/ppl/pgs_ppl_module.dll
+pgs_bless module trust --path build/modules/ppl/pgs_ppl_module.dll --hash auto
+pgs_bless module trust --path build/modules/custom/custom.dll --hash auto --require-signed
+```
 
 ### 14.3 fail-closed 与 `--allow-all-modules`
 

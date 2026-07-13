@@ -12,7 +12,7 @@ GXX="${GXX:-$MINGW_ROOT/bin/g++.exe}"
 mkdir -p build
 echo "[unit:modules] compiling tests/test_module_manager.cpp ..."
 "$GXX" -std=c++17 -Wall -Wextra -O2 -Iinclude \
-    tests/test_module_manager.cpp src/modules/ModuleManager.cpp \
+    tests/test_module_manager.cpp src/modules/ModuleManager.cpp src/common/PGLogger.cpp \
     -o build/test_module_manager.exe \
     -lwintrust -lole32 -lbcrypt
 

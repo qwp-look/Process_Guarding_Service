@@ -597,6 +597,12 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD reason, LPVOID /*reserv
 PG_MODULE_API const char *PG_GetName(void) { return "sched"; }
 PG_MODULE_API const char *PG_GetVersion(void) { return "1.0.0"; }
 PG_MODULE_API unsigned int PG_GetAbiVersion(void) { return PG_MODULE_ABI_VERSION; }
+PG_MODULE_API const char *PG_GetManifest(void)
+{
+    return "name=sched;version=1.0.0;abi=2;"
+           "summary=Cron, one-shot, and interval scheduling for restricted guard commands;"
+           "capabilities=sched.add,sched.list,sched.remove,sched.enable,sched.disable,guard.register,guard.policy";
+}
 
 PG_MODULE_API int PG_Init(void *reserved)
 {

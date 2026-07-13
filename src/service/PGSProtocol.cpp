@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -101,33 +102,47 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
         // All default to legacy behaviour (Win32, lifetime restart count).
         int restartWindowSec = 0;
         {
-            DWORD v = 0;
-            if (fields.size() >= 6 && util::parseDwordValue(trim(fields[5]), v))
+            if (fields.size() >= 6)
             {
+                DWORD v = 0;
+                const std::string text = trim(fields[5]);
+                if (text.empty() || !util::parseDwordValue(text, v) ||
+                    v > static_cast<DWORD>(std::numeric_limits<int>::max()))
+                {
+                    return "ERR invalid restart-window";
+                }
                 restartWindowSec = static_cast<int>(v);
             }
         }
         int restartDelayMs = 0;
         {
-            DWORD v = 0;
-            if (fields.size() >= 7 && util::parseDwordValue(trim(fields[6]), v))
+            if (fields.size() >= 7)
             {
+                DWORD v = 0;
+                const std::string text = trim(fields[6]);
+                if (text.empty() || !util::parseDwordValue(text, v) ||
+                    v > static_cast<DWORD>(std::numeric_limits<int>::max()))
+                {
+                    return "ERR invalid restart-delay";
+                }
                 restartDelayMs = static_cast<int>(v);
             }
         }
         bool backoff = false;
         if (fields.size() >= 8)
         {
-            const std::string bv = trim(fields[7]);
-            backoff = (bv == "1" || bv == "true" || bv == "yes");
+            if (!util::parseBoolFlag(fields[7], backoff))
+            {
+                return "ERR invalid restart-backoff";
+            }
         }
         int hangTimeoutMs = 0;
         {
-            DWORD v = 0;
-            const std::string hv = (fields.size() >= 9) ? trim(fields[8]) : std::string();
-            if (!hv.empty())
+            if (fields.size() >= 9)
             {
-                if (!util::parseDwordValue(hv, v) || v > static_cast<DWORD>(kMaxHangTimeoutMs))
+                DWORD v = 0;
+                const std::string hv = trim(fields[8]);
+                if (hv.empty() || !util::parseDwordValue(hv, v) || v > static_cast<DWORD>(kMaxHangTimeoutMs))
                 {
                     return "ERR invalid hang-timeout";
                 }
@@ -137,8 +152,10 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
         bool killOnExit = false;
         if (fields.size() >= 10)
         {
-            const std::string bv = trim(fields[9]);
-            killOnExit = (bv == "1" || bv == "true" || bv == "yes");
+            if (!util::parseBoolFlag(fields[9], killOnExit))
+            {
+                return "ERR invalid kill-on-exit";
+            }
         }
         AppKind appKind = AppKind::Win32;
         if (fields.size() >= 11)
@@ -148,11 +165,23 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
             {
                 appKind = AppKind::WinApp;
             }
+            else if (low == "0" || low == "win32" || low.empty())
+            {
+                appKind = AppKind::Win32;
+            }
+            else
+            {
+                return "ERR invalid app-kind";
+            }
         }
         std::string aumid;
         if (fields.size() >= 12)
         {
             aumid = base64Decode(fields[11]);
+            if (appKind == AppKind::WinApp && aumid.empty())
+            {
+                return "ERR missing AUMID for winapp";
+            }
         }
 
         return handleRegister(pid, trim(fields[1]), maxRestarts, restartArgs, declaredHash,
@@ -234,6 +263,11 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
     if (command == "ppl")
     {
         return handlePplCommand(args);
+    }
+
+    if (command == "events")
+    {
+        return handleEventsCommand(args);
     }
 
     if (command == "ping")
@@ -453,6 +487,11 @@ std::string PGS::handleRegister(
                     ", path=" + actualPath +
                     ", max-restarts=" + maxRestartsLabel(maxRestarts) +
                     ", hash=" + (storedHash.empty() ? std::string("<none>") : storedHash));
+    recordEvent("guard.register",
+                "pid=" + std::to_string(pid) +
+                ";path=" + actualPath +
+                ";max=" + maxRestartsLabel(maxRestarts) +
+                ";app=" + (appKind == AppKind::WinApp ? std::string("winapp") : std::string("win32")));
 
     return "OK registered pid=" + std::to_string(pid);
 }
@@ -478,6 +517,7 @@ std::string PGS::handleIntentionalExit(DWORD pid)
 
     persistState();
     Logger::warning("PGS: marked intentional exit for pid=" + std::to_string(pid));
+    recordEvent("guard.intentional", "pid=" + std::to_string(pid));
     return "OK intentional marked pid=" + std::to_string(pid);
 }
 
@@ -508,6 +548,7 @@ std::string PGS::handleUnregister(DWORD pid)
 
     persistState();
     Logger::warning("PGS: unregistered pid=" + std::to_string(pid));
+    recordEvent("guard.unregister", "pid=" + std::to_string(pid));
     return "OK unregistered pid=" + std::to_string(pid);
 }
 
@@ -536,6 +577,10 @@ std::string PGS::handleSetPolicy(DWORD pid, int maxRestarts, const std::string &
     persistState();
     Logger::warning("PGS: updated policy pid=" + std::to_string(pid) +
                     ", max=" + maxRestartsLabel(maxRestarts));
+    recordEvent("guard.policy",
+                "pid=" + std::to_string(pid) +
+                ";max=" + maxRestartsLabel(maxRestarts) +
+                ";restart_args_b64=" + base64Encode(restartArgs));
     return "OK policy updated pid=" + std::to_string(pid);
 }
 
@@ -562,6 +607,7 @@ std::string PGS::handleSetToken(const std::string &encodedOldToken, const std::s
 
     persistState();
     Logger::warning("PGS: auth token updated in-memory and persisted");
+    recordEvent("auth.token-set", "result=updated");
     return "OK token updated";
 }
 
@@ -715,8 +761,10 @@ std::string PGS::handleModuleCommand(const std::string &args)
         std::string err;
         if (m_modules.load(path, err))
         {
+            recordEvent("module.load", "path=" + path + ";name=" + allowKey);
             return "OK loaded";
         }
+        recordEvent("module.load-failed", "path=" + path + ";name=" + allowKey + ";error=" + err);
         return "ERR " + err;
     }
 
@@ -729,8 +777,10 @@ std::string PGS::handleModuleCommand(const std::string &args)
         std::string err;
         if (m_modules.unload(rest, err))
         {
+            recordEvent("module.unload", "name=" + rest);
             return "OK unloaded " + rest;
         }
+        recordEvent("module.unload-failed", "name=" + rest + ";error=" + err);
         return "ERR " + err;
     }
 
@@ -748,8 +798,11 @@ std::string PGS::handleModuleCommand(const std::string &args)
         std::string err;
         if (m_modules.invoke(name, request, response, err))
         {
+            recordEvent("module.call", "name=" + name + ";request_b64=" + base64Encode(request) +
+                                       ";response_b64=" + base64Encode(response));
             return response;
         }
+        recordEvent("module.call-failed", "name=" + name + ";error=" + err);
         return "ERR " + err;
     }
 
@@ -793,8 +846,13 @@ std::string PGS::handlePplCommand(const std::string &args)
         std::string err;
         if (m_modules.invoke("ppl", request, response, err))
         {
+            recordEvent("ppl.set",
+                        "pid=" + std::to_string(pid) +
+                        ";signer=" + signer +
+                        ";response_b64=" + base64Encode(response));
             return response;
         }
+        recordEvent("ppl.set-failed", "pid=" + std::to_string(pid) + ";error=" + err);
         return "ERR ppl module not loaded";
     }
 
@@ -810,12 +868,74 @@ std::string PGS::handlePplCommand(const std::string &args)
         std::string err;
         if (m_modules.invoke("ppl", request, response, err))
         {
+            recordEvent("ppl." + sub,
+                        "pid=" + std::to_string(pid) +
+                        ";response_b64=" + base64Encode(response));
             return response;
         }
+        recordEvent("ppl." + sub + "-failed", "pid=" + std::to_string(pid) + ";error=" + err);
         return "ERR ppl module not loaded";
     }
 
     return "ERR unknown ppl subcommand";
+}
+
+void PGS::recordEvent(const std::string &type, const std::string &detail)
+{
+    const std::uint64_t id = m_nextEventId.fetch_add(1);
+    const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string line = "ID=" + std::to_string(id) +
+                       ";TS=" + std::to_string(nowMs) +
+                       ";TYPE=" + type +
+                       ";DETAIL_B64=" + base64Encode(detail);
+    std::lock_guard<std::mutex> lock(m_eventsMutex);
+    m_events.push_back(std::move(line));
+    while (m_events.size() > kMaxEventHistory)
+    {
+        m_events.pop_front();
+    }
+}
+
+std::string PGS::handleEventsCommand(const std::string &args)
+{
+    const std::vector<std::string> parts = splitByChar(trim(args), ' ');
+    const std::string sub = parts.empty() ? std::string() : trim(parts[0]);
+    if (!sub.empty() && sub != "list")
+    {
+        return "ERR unknown events subcommand";
+    }
+
+    std::size_t limit = kMaxEventHistory;
+    if (parts.size() >= 2)
+    {
+        std::uint64_t parsed = 0;
+        if (!parseUnsignedLongLong(parts[1], parsed) || parsed == 0)
+        {
+            return "ERR invalid events limit";
+        }
+        limit = static_cast<std::size_t>(std::min<std::uint64_t>(
+            parsed, static_cast<std::uint64_t>(kMaxEventHistory)));
+    }
+
+    std::vector<std::string> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(m_eventsMutex);
+        const std::size_t count = std::min(limit, m_events.size());
+        snapshot.reserve(count);
+        const auto start = m_events.end() - static_cast<std::ptrdiff_t>(count);
+        for (auto it = start; it != m_events.end(); ++it)
+        {
+            snapshot.push_back(*it);
+        }
+    }
+
+    std::string out = "OK count=" + std::to_string(snapshot.size());
+    for (const std::string &line : snapshot)
+    {
+        out += "\n" + line;
+    }
+    return out;
 }
 
 } // namespace ProcessGuard

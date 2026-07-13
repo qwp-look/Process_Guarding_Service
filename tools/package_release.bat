@@ -12,7 +12,7 @@ REM  PATH). Do not publish an existing release/ tree without rerunning this
 REM  script; it is rebuilt from current build outputs each time:
 REM    - pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe + examples
 REM    - pgs_admin_web.exe + pgs_cluster_web.exe (browser consoles)
-REM    - modules/ppl/{pgs_ppl_module.dll, Sirius.sys, module.html}  (per-folder)
+REM    - modules/{ppl,sched,health,profile,report}/ per-folder module payloads
 REM    - Qt6 DLLs + plugins via windeployqt6
 REM    - MinGW third-party runtime DLLs that Qt6Core/Qt6Gui transitively depend
 REM      on (windeployqt does NOT deploy these MSYS2 libs; without them the Qt
@@ -66,7 +66,7 @@ echo [3/6] Assemble release tree...
 REM Always start from a clean release tree so installer and zip artifacts cannot
 REM accidentally include stale binaries from a previous packaging run.
 if exist "%RELEASE%" rmdir /s /q "%RELEASE%"
-mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
+mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_bless.exe"       "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_admin_qt\pgs_admin_qt.exe" "%RELEASE%\" >nul
@@ -82,8 +82,19 @@ copy /Y "%MINGW%\libwinpthread-1.dll" "%RELEASE%\examples\" >nul
 copy /Y "%BUILD%\modules\ppl\pgs_ppl_module.dll" "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\Sirius.sys"         "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\module.html"        "%RELEASE%\modules\ppl\" >nul
+copy /Y "%BUILD%\modules\ppl\module.manifest"     "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\sched\pgs_sched_module.dll" "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.html"          "%RELEASE%\modules\sched\" >nul
+copy /Y "%BUILD%\modules\sched\module.manifest"      "%RELEASE%\modules\sched\" >nul
+copy /Y "%BUILD%\modules\health\pgs_health_module.dll" "%RELEASE%\modules\health\" >nul
+copy /Y "%BUILD%\modules\health\module.html"           "%RELEASE%\modules\health\" >nul
+copy /Y "%BUILD%\modules\health\module.manifest"       "%RELEASE%\modules\health\" >nul
+copy /Y "%BUILD%\modules\profile\pgs_profile_module.dll" "%RELEASE%\modules\profile\" >nul
+copy /Y "%BUILD%\modules\profile\module.html"            "%RELEASE%\modules\profile\" >nul
+copy /Y "%BUILD%\modules\profile\module.manifest"        "%RELEASE%\modules\profile\" >nul
+copy /Y "%BUILD%\modules\report\pgs_report_module.dll" "%RELEASE%\modules\report\" >nul
+copy /Y "%BUILD%\modules\report\module.html"           "%RELEASE%\modules\report\" >nul
+copy /Y "%BUILD%\modules\report\module.manifest"       "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\modules.allow"        "%RELEASE%\modules\" >nul
 copy /Y "docs\MODULE_SYSTEM.md"       "%RELEASE%\docs\" >nul
 copy /Y "docs\SERVICE_MODE_GUIDE.md"  "%RELEASE%\docs\" >nul
@@ -119,8 +130,9 @@ copy /Y "%MINGW_ROOT%\share\qt6\plugins\tls\qopensslbackend.dll" "%RELEASE%\tls\
 
 echo [6/6] Done. Release layout:
 echo   %RELEASE%\pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe / pgs_admin_web.exe / pgs_cluster_web.exe
-echo   %RELEASE%\modules\ppl\{pgs_ppl_module.dll, Sirius.sys, module.html}
-echo   %RELEASE%\modules\sched\{pgs_sched_module.dll, module.html}
+echo   %RELEASE%\modules\ppl\{pgs_ppl_module.dll, Sirius.sys, module.html, module.manifest}
+echo   %RELEASE%\modules\sched\{pgs_sched_module.dll, module.html, module.manifest}
+echo   %RELEASE%\modules\{health,profile,report}\{module dll, module.html, module.manifest}
 echo   Qt6 + MinGW runtime DLLs (self-contained)
 
 popd

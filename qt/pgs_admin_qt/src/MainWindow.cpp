@@ -463,6 +463,18 @@ void MainWindow::setupUi()
         QSettings settings("OpenStarlight", "PGSAdminQt");
         settings.setValue("theme", idx);
     });
+    connect(m_toolPathEdit, &QLineEdit::editingFinished, this, [this]() {
+        QSettings settings("OpenStarlight", "PGSAdminQt");
+        settings.setValue("blessToolPath", m_toolPathEdit->text().trimmed());
+    });
+    connect(m_servicePathEdit, &QLineEdit::editingFinished, this, [this]() {
+        QSettings settings("OpenStarlight", "PGSAdminQt");
+        settings.setValue("serviceToolPath", m_servicePathEdit->text().trimmed());
+    });
+    connect(m_tableToolPathEdit, &QLineEdit::editingFinished, this, [this]() {
+        QSettings settings("OpenStarlight", "PGSAdminQt");
+        settings.setValue("tableToolPath", m_tableToolPathEdit->text().trimmed());
+    });
 
     connect(m_btnPing, &QPushButton::clicked, this, [this]() {
         runBlessCommand({"ping"});
@@ -669,6 +681,8 @@ void MainWindow::setupUi()
         if (ms > 0)
         {
             m_tableRefreshTimer->setInterval(ms);
+            QSettings settings("OpenStarlight", "PGSAdminQt");
+            settings.setValue("tableRefreshIntervalMs", ms);
         }
     });
 
@@ -745,6 +759,12 @@ void MainWindow::loadSavedPrefs()
     QSettings settings("OpenStarlight", "PGSAdminQt");
     const int theme = settings.value("theme", 0).toInt();
     const int lang = settings.value("language", 0).toInt();
+    const QString blessTool = settings.value("blessToolPath").toString().trimmed();
+    const QString serviceTool = settings.value("serviceToolPath").toString().trimmed();
+    const QString tableTool = settings.value("tableToolPath").toString().trimmed();
+    const QString moduleTool = settings.value("moduleToolPath").toString().trimmed();
+    const QString moduleDir = settings.value("moduleDir").toString().trimmed();
+    const int tableIntervalMs = settings.value("tableRefreshIntervalMs", 1000).toInt();
     if (m_themeCombo)
     {
         m_themeCombo->blockSignals(true);
@@ -759,6 +779,45 @@ void MainWindow::loadSavedPrefs()
         m_languageCombo->blockSignals(false);
         applyLanguage();
     }
+    if (m_toolPathEdit && !blessTool.isEmpty())
+    {
+        m_toolPathEdit->setText(blessTool);
+    }
+    if (m_servicePathEdit && !serviceTool.isEmpty())
+    {
+        m_servicePathEdit->setText(serviceTool);
+    }
+    if (m_tableToolPathEdit && !tableTool.isEmpty())
+    {
+        m_tableToolPathEdit->setText(tableTool);
+    }
+    if (m_moduleToolPathEdit)
+    {
+        const QString savedModuleTool = moduleTool.isEmpty() ? blessTool : moduleTool;
+        if (!savedModuleTool.isEmpty())
+        {
+            m_moduleToolPathEdit->setText(savedModuleTool);
+        }
+    }
+    if (m_moduleDirEdit && !moduleDir.isEmpty())
+    {
+        m_moduleDirEdit->setText(moduleDir);
+    }
+    if (m_tableIntervalCombo)
+    {
+        const int idx = m_tableIntervalCombo->findData(tableIntervalMs);
+        if (idx >= 0)
+        {
+            m_tableIntervalCombo->blockSignals(true);
+            m_tableIntervalCombo->setCurrentIndex(idx);
+            m_tableIntervalCombo->blockSignals(false);
+            if (m_tableRefreshTimer && tableIntervalMs > 0)
+            {
+                m_tableRefreshTimer->setInterval(tableIntervalMs);
+            }
+        }
+    }
+    refreshModuleTabs();
 }
 
 void MainWindow::applyLanguage()
@@ -878,6 +937,14 @@ void MainWindow::setupModuleTab(QWidget *page)
     });
     connect(m_moduleToolPathEdit, &QLineEdit::textChanged, this, [this](const QString &) {
         syncModulePageSettings();
+    });
+    connect(m_moduleToolPathEdit, &QLineEdit::editingFinished, this, [this]() {
+        QSettings settings("OpenStarlight", "PGSAdminQt");
+        settings.setValue("moduleToolPath", m_moduleToolPathEdit->text().trimmed());
+    });
+    connect(m_moduleDirEdit, &QLineEdit::editingFinished, this, [this]() {
+        QSettings settings("OpenStarlight", "PGSAdminQt");
+        settings.setValue("moduleDir", m_moduleDirEdit->text().trimmed());
     });
 }
 

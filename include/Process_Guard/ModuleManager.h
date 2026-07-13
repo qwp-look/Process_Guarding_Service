@@ -58,7 +58,7 @@ namespace ProcessGuard
 
         /*
          * Load every *.dll found under dir as a module. Files that fail to
-         * load or initialise are skipped without aborting the scan. Modules
+         * load or initialise are logged and skipped without aborting the scan. Modules
          * already loaded (by name) are skipped and not counted. Returns the
          * number of modules successfully loaded during this scan.
          */
@@ -83,11 +83,59 @@ namespace ProcessGuard
          * Returns true on success; false + err if not found. */
         bool unload(const std::string &name, std::string &err);
 
+        /* Optional advisory metadata parsed from PG_GetManifest. The manifest
+         * uses the same UTF-8 "key=value;..." style as module requests:
+         *   name=ppl;version=1.0.0;abi=2;summary=...;capabilities=a,b,c
+         * Capabilities are groundwork for future host-enforced policy; current
+         * loading only validates name/ABI consistency when present. */
+        struct ModuleManifest
+        {
+            std::string raw;
+            std::string name;
+            std::string version;
+            unsigned int abiVersion = 0;
+            bool hasAbiVersion = false;
+            std::string summary;
+            std::vector<std::string> capabilities;
+        };
+
+        /* One parsed line from modules.allow. */
+        struct AllowEntry
+        {
+            std::string name;           // module key (folder/name, ASCII lower)
+            std::string sha256;         // optional pinned file hash (hex)
+            bool requireSigned = false; // require a valid Authenticode signature
+        };
+
+        /* Offline inspection result for a candidate module DLL. Used by the
+         * CLI module info/trust commands and by tests; it maps the image
+         * without running DllMain. */
+        struct ModuleInspection
+        {
+            std::string path;
+            std::string allowlistKey;
+            std::string name;
+            std::string version;
+            unsigned int abiVersion = 0;
+            bool hasAbiVersion = false;
+            bool hasNameExport = false;
+            bool hasInvokeExport = false;
+            bool hasManifestExport = false;
+            ModuleManifest manifest;
+            std::string sha256;
+            bool signatureChecked = false;
+            bool signatureValid = false;
+        };
+
         /* Snapshot of a loaded module. */
         struct ModuleInfo
         {
             std::string name;
             std::string version;
+            std::string path;
+            unsigned int abiVersion = 0;
+            bool hasAbiVersion = false;
+            ModuleManifest manifest;
         };
         /* Snapshot of currently loaded modules (name, version). */
         std::vector<ModuleInfo> list() const;
@@ -110,6 +158,11 @@ namespace ProcessGuard
         // here before loadFromDirectory().
         void setPermissive(bool v) { m_permissive = v; }
 
+        // Defense-in-depth for all future direct callers: once the manager has
+        // a modules root, load() refuses DLLs that resolve outside it. PGS
+        // supplies this implicitly via loadFromDirectory()/ensureAllowlistLoaded().
+        void setModulesRoot(const std::string &dir);
+
         // ABI v2: services struct handed to every module's PG_Init. PGS sets
         // this before loadFromDirectory() so modules receive callbacks. When
         // not ready (m_servicesReady false), PG_Init receives NULL and v1
@@ -120,6 +173,16 @@ namespace ProcessGuard
         // diagnostics; loading still uses the private helper below.
         static std::string allowlistKeyForPath(const std::string &path);
 
+        // Module manifest / trust helpers shared by the service, CLI and tests.
+        static ModuleManifest parseManifest(const std::string &text);
+        static bool parseAllowlistLine(const std::string &line, AllowEntry &entry);
+        static std::string formatAllowlistLine(const AllowEntry &entry);
+        static std::vector<AllowEntry> loadAllowlistEntries(
+            const std::string &filePath,
+            std::vector<std::string> *diagnostics = nullptr);
+        static std::string modulesRootForPath(const std::string &path);
+        static bool inspectModulePath(const std::string &path, ModuleInspection &out, std::string &err);
+
     private:
         // Resolved function-pointer types and runtime data for one loaded DLL.
         struct Entry
@@ -127,10 +190,14 @@ namespace ProcessGuard
             std::string name;     // from PG_GetName
             std::string version;  // from PG_GetVersion (may be empty)
             std::string path;     // original DLL path; useful for diagnostics
+            unsigned int abiVersion = 0;
+            bool hasAbiVersion = false;
+            ModuleManifest manifest;
             HMODULE handle = nullptr;
             const char *(*getName)(void) = nullptr;
             const char *(*getVersion)(void) = nullptr;
             unsigned int (*getAbiVersion)(void) = nullptr;
+            const char *(*getManifest)(void) = nullptr;
             int (*init)(void *) = nullptr;
             void (*shutdown)(void) = nullptr;
             int (*invoke)(const char *, char *, size_t) = nullptr;
@@ -154,21 +221,17 @@ namespace ProcessGuard
         static std::string lower(const std::string &s); // ASCII lowercase for name keys
         // v3: module allowlist (one entry per allowed module name). Loaded from
         // <modules-dir>\modules.allow. Empty + non-permissive => fail-closed.
-        struct AllowEntry
-        {
-            std::string name;          // module key (folder name, ASCII lower)
-            std::string sha256;        // optional pinned file hash (hex); empty = any
-            bool requireSigned = false; // require a valid Authenticode signature
-        };
         std::vector<AllowEntry> m_allowlist;
         bool m_allowlistLoaded = false;
         bool m_permissive = false;
+        std::string m_modulesRoot;
         PGS_Services m_services{};
         bool m_servicesReady = false;
         void loadAllowlist(const std::string &dir);
         const AllowEntry *findAllowEntry(const std::string &moduleKey) const;
         static std::string moduleKeyFromPath(const std::string &path);
         static bool verifySignature(const std::wstring &path);
+        bool isInsideConfiguredModulesRoot(const std::string &path) const;
 
         // Probe a candidate DLL for an export via an image-resource map (no DllMain).
         static bool hasExportByName(const std::wstring &path, const char *exportName);

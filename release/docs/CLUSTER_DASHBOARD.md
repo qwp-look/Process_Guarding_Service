@@ -59,15 +59,17 @@ node2;https://10.0.0.6:12443;operator:pass2
 ## 3. 展示与告警
 
 - 顶部汇总：节点数 / 离线数 / 守护总数 / 死亡守护数。
-- 节点卡片网格：每节点名称、UP/DOWN 标签、guard 数、URL、离线时的错误信息。
+- 节点卡片网格：每节点名称、UP/DOWN 标签、guard 数、URL、最近一次轮询年龄、离线时的错误信息。
+- 节点详情：点击节点卡片会在下方显示该节点的 URL、HTTP 状态、PGS 状态、最近轮询时间和最近一次 `/api/guards` 的守护明细。
 - 告警：节点离线（卡片红框）、guard 死亡（汇总红色计数）。
-- 下钻：点节点卡片可由运维自行打开该节点单机 Web 页（复用 Stage C 网关地址）。
+- 下钻：节点卡片和详情区提供 `Open Node` 入口，直接打开该节点单机 Web 页（复用 Stage C 网关地址）。
+- 删除节点：页面删除按钮会先弹出确认框，避免误删注册表条目。
 
 ## 4. API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/cluster/summary` | 全集群汇总 + 各节点状态（JSON） |
+| GET | `/api/cluster/summary` | 全集群汇总 + 各节点状态、最近轮询时间、节点 guard 明细（JSON） |
 | GET | `/api/cluster/nodes` | 节点列表 |
 | POST | `/api/cluster/nodes` | 增加节点 `{name,url,credentials}` |
 | DELETE | `/api/cluster/nodes` | 删除节点 `{name}` |

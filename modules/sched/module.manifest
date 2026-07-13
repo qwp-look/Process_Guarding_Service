@@ -1,0 +1,1 @@
+name=sched;version=1.0.0;abi=2;summary=Cron, one-shot, and interval scheduling for restricted guard commands;capabilities=sched.add,sched.list,sched.remove,sched.enable,sched.disable,guard.register,guard.policy
