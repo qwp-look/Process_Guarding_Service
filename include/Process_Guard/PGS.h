@@ -17,6 +17,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <mutex>
@@ -167,6 +168,7 @@ namespace ProcessGuard
         // command-oriented; dynamic thread-per-connection would be unnecessary.
         static constexpr std::size_t kClientWorkerCount = 4;
         static constexpr std::size_t kMaxClientQueueSize = 64;
+        static constexpr std::size_t kMaxEventHistory = 512;
         static constexpr int kDefaultMaxRestarts = 3;
         // v3 policy defaults (all preserve legacy behaviour when untouched).
         static constexpr int kDefaultRestartWindowSec = 0; // 0 = lifetime count
@@ -228,6 +230,10 @@ namespace ProcessGuard
         // The persisted archive path. Derived from the host log root so console-
         // mode test runs and installed-service runs keep their archives separate.
         std::string m_stateFilePath;
+        // Serializes persistState() writes. Multiple client workers and the
+        // monitor thread can all decide to persist near-simultaneously; without
+        // a dedicated write lock they would share the same .tmp path.
+        std::mutex m_persistMutex;
 
         // The listener thread only accepts sockets and pushes them into a queue.
         // A small fixed worker pool performs recv/process/send so that a slow or
@@ -236,6 +242,10 @@ namespace ProcessGuard
         std::condition_variable m_clientQueueCv;
         std::queue<SOCKET> m_clientQueue;
         std::vector<std::thread> m_clientWorkers;
+
+        std::mutex m_eventsMutex;
+        std::deque<std::string> m_events;
+        std::atomic<std::uint64_t> m_nextEventId{1};
 
         void listenerLoop();
         void monitorLoop();
@@ -251,6 +261,9 @@ namespace ProcessGuard
         std::string handleModuleCommand(const std::string &args);
         // "ppl set|get|clear" convenience wrapper that routes to the ppl module.
         std::string handlePplCommand(const std::string &args);
+        // "events list [limit]" returns a bounded in-memory action timeline.
+        std::string handleEventsCommand(const std::string &args);
+        void recordEvent(const std::string &type, const std::string &detail);
         // Resolve <pgs_service.exe dir>\modules for the plugin scan.
         static std::string moduleDirectoryOfSelf();
         // ABI v2 thunks: let modules call back into PGS via PGS_Services.

@@ -216,6 +216,104 @@ QString auditField(QString value)
     return out;
 }
 
+int auditHexValue(QChar ch)
+{
+    const ushort u = ch.unicode();
+    if (u >= '0' && u <= '9')
+        return static_cast<int>(u - '0');
+    if (u >= 'a' && u <= 'f')
+        return static_cast<int>(u - 'a' + 10);
+    if (u >= 'A' && u <= 'F')
+        return static_cast<int>(u - 'A' + 10);
+    return -1;
+}
+
+QString auditQuotedValue(const QString &line, const QString &key)
+{
+    const QString prefix = key + QStringLiteral("=\"");
+    const int start = line.indexOf(prefix);
+    if (start < 0)
+        return QString();
+
+    QString out;
+    bool escaped = false;
+    for (int i = start + prefix.size(); i < line.size(); ++i)
+    {
+        const QChar ch = line.at(i);
+        if (escaped)
+        {
+            switch (ch.unicode())
+            {
+            case '\\':
+            case '"':
+                out += ch;
+                break;
+            case 'r':
+                out += QLatin1Char('\r');
+                break;
+            case 'n':
+                out += QLatin1Char('\n');
+                break;
+            case 't':
+                out += QLatin1Char('\t');
+                break;
+            case 'u':
+                if (i + 4 < line.size())
+                {
+                    int code = 0;
+                    bool ok = true;
+                    for (int j = 1; j <= 4; ++j)
+                    {
+                        const int v = auditHexValue(line.at(i + j));
+                        if (v < 0)
+                        {
+                            ok = false;
+                            break;
+                        }
+                        code = (code << 4) | v;
+                    }
+                    if (ok)
+                    {
+                        out += QChar(static_cast<ushort>(code));
+                        i += 4;
+                        break;
+                    }
+                }
+                out += ch;
+                break;
+            default:
+                out += ch;
+                break;
+            }
+            escaped = false;
+            continue;
+        }
+        if (ch == QLatin1Char('\\'))
+        {
+            escaped = true;
+            continue;
+        }
+        if (ch == QLatin1Char('"'))
+        {
+            break;
+        }
+        out += ch;
+    }
+    return out;
+}
+
+QJsonObject parseAuditLine(const QString &line)
+{
+    QJsonObject obj;
+    const int space = line.indexOf(QLatin1Char(' '));
+    obj.insert(QStringLiteral("time"), space > 0 ? line.left(space) : QString());
+    obj.insert(QStringLiteral("user"), auditQuotedValue(line, QStringLiteral("user")));
+    obj.insert(QStringLiteral("action"), auditQuotedValue(line, QStringLiteral("action")));
+    obj.insert(QStringLiteral("from"), auditQuotedValue(line, QStringLiteral("from")));
+    obj.insert(QStringLiteral("raw"), line);
+    return obj;
+}
+
 QString expectedOriginFromHost(const PgsHttp::Request &request, bool https)
 {
     const QString host = request.value("Host").trimmed();
@@ -344,6 +442,7 @@ button.secondary{background:#dae8dc;color:var(--ink)}button.warn{background:#8b3
 .card{padding:14px;border-radius:14px;background:#e0ece2}.card b{display:block;font-size:24px}.hint{color:var(--muted);font-size:13px}
 table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px 12px;border-bottom:1px solid #efe6d8;text-align:left;vertical-align:top}th{background:#f1eadb}
 .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:14px}.log{min-height:240px;background:#1c221f;color:#d6f3dd;border-radius:14px;padding:12px;white-space:pre-wrap;overflow:auto;font-family:Consolas,monospace}
+.timeline{display:grid;gap:8px;max-height:300px;overflow:auto}.event{border:1px solid var(--border);border-radius:12px;background:#fff;padding:10px}.event .time{font-size:12px;color:var(--muted)}.event .action{font-weight:700;margin-top:4px}.event .meta{font-size:12px;color:var(--muted);margin-top:4px}
 @media (max-width:1100px){.layout,.cards,.grid2{grid-template-columns:1fr}}
 </style>
 </head>
@@ -359,19 +458,22 @@ table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px 12p
 <section class="panel"><h2>Guard Actions</h2><div class="grid grid2"><label>PID<input id="guard-pid" placeholder="1234"></label><label>Path For Unbless-Path<input id="guard-path" placeholder="optional"></label><label>Max Restarts<input id="guard-max" value="3"></label><label>Restart Args<input id="guard-restart-args" placeholder="optional"></label></div><div class="actions"><button onclick="blessPid()">Bless PID</button><button class="secondary" onclick="setPolicy()">Set Policy</button><button class="secondary" onclick="intentionalExit()">Intentional</button><button class="warn" onclick="unblessGuard()">Unbless</button></div></section>
 <section class="panel"><h2>Service</h2><div class="actions"><button class="secondary" onclick="serviceAction('install')">Install</button><button class="secondary" onclick="serviceAction('start')">Start</button><button class="secondary" onclick="serviceAction('stop')">Stop</button><button class="secondary" onclick="serviceAction('status')">Status</button><button class="warn" onclick="serviceAction('uninstall')">Uninstall</button></div></section>
 <section class="panel"><h2>Token</h2><div class="grid grid2"><label>Old Token<input id="token-old" type="password" autocomplete="off" placeholder="optional"></label><label>New Token<input id="token-new" type="password" autocomplete="off" placeholder="new token"></label></div><div class="actions"><button onclick="updateToken()">Update Token</button></div></section>
+<section class="panel"><h2>Audit Timeline</h2><div class="actions"><button class="secondary" onclick="refreshAudit()">Refresh Audit</button></div><div class="timeline" id="audit-list"></div></section>
 <section class="panel"><h2>Activity Log</h2><pre class="log" id="log-box"></pre></section>
 </div>
 </div>
 <script>
 window.PGS_API_TOKEN="__PGS_API_TOKEN__";
 window.PGS_CSRF_TOKEN="__PGS_CSRF_TOKEN__";
-const logBox=document.getElementById('log-box');const guardBody=document.getElementById('guard-body');
+const logBox=document.getElementById('log-box');const guardBody=document.getElementById('guard-body');const auditList=document.getElementById('audit-list');
 function logLine(m){const t=new Date().toLocaleTimeString();logBox.textContent+=`[${t}] ${m}\n`;logBox.scrollTop=logBox.scrollHeight}
 async function api(path,options={}){const hdrs=Object.assign({'Content-Type':'application/json'},options.headers||{});if(window.PGS_API_TOKEN){hdrs['X-PGS-Token']=window.PGS_API_TOKEN}if(window.PGS_CSRF_TOKEN){hdrs['X-PGS-CSRF']=window.PGS_CSRF_TOKEN}const r=await fetch(path,Object.assign({},options,{headers:hdrs,credentials:'same-origin'}));const text=await r.text();let data={};try{data=text?JSON.parse(text):{}}catch{data={ok:false,message:text}}if(!r.ok||data.ok===false){throw new Error(data.message||text||`request failed: ${r.status}`)}return data}
 function guardPayload(){return{pid:document.getElementById('guard-pid').value.trim(),path:document.getElementById('guard-path').value.trim(),max_restarts:document.getElementById('guard-max').value.trim(),restart_args:document.getElementById('guard-restart-args').value.trim()}}
 function appendCell(row,value){const cell=document.createElement('td');cell.textContent=value==null?'':String(value);row.appendChild(cell)}
 function renderGuards(items){const rows=[];for(const i of items){const row=document.createElement('tr');appendCell(row,i.pid);appendCell(row,i.path);appendCell(row,i.restart_args);appendCell(row,i.restart_count||'0');appendCell(row,i.max_restarts);appendCell(row,i.alive);appendCell(row,i.session);appendCell(row,i.hash);rows.push(row)}guardBody.replaceChildren(...rows)}
-async function refreshAll(){await Promise.allSettled([pingPgs(),serviceStatus(),refreshGuards()])}
+function renderAudit(events,enabled){if(!enabled){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:'Audit log is not configured for this server.'}));return}if(!events.length){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:'No audit events yet.'}));return}const nodes=[];for(const e of events.slice().reverse()){const item=document.createElement('div');item.className='event';const time=document.createElement('div');time.className='time';time.textContent=e.time||'';const action=document.createElement('div');action.className='action';action.textContent=e.action||e.raw||'';const meta=document.createElement('div');meta.className='meta';meta.textContent=`user ${e.user||'-'} from ${e.from||'-'}`;item.append(time,action,meta);nodes.push(item)}auditList.replaceChildren(...nodes)}
+async function refreshAudit(){try{const d=await api('/api/audit?limit=80',{headers:{'Content-Type':'application/json'}});renderAudit(Array.isArray(d.events)?d.events:[],d.enabled!==false)}catch(e){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:`audit unavailable: ${e.message}`}))}}
+async function refreshAll(){await Promise.allSettled([pingPgs(),serviceStatus(),refreshGuards(),refreshAudit()])}
 async function pingPgs(){try{const d=await api('/api/ping');document.getElementById('metric-ping').textContent='ok';logLine(d.message||'ping ok')}catch(e){document.getElementById('metric-ping').textContent='down';logLine(`ping failed: ${e.message}`)}}
 async function serviceStatus(){try{const d=await api('/api/service/status');document.getElementById('metric-service').textContent=d.state||'unknown';logLine(`service status: ${d.state||d.message}`)}catch(e){document.getElementById('metric-service').textContent='error';logLine(`service status failed: ${e.message}`)}}
 async function refreshGuards(){try{const d=await api('/api/guards');const items=Array.isArray(d.guards)?d.guards:[];document.getElementById('metric-guards').textContent=String(items.length);renderGuards(items)}catch(e){logLine(`guard refresh failed: ${e.message}`)}}
@@ -382,7 +484,7 @@ async function unblessGuard(){try{const d=await api('/api/unbless',{method:'POST
 async function intentionalExit(){try{const d=await api('/api/intentional',{method:'POST',body:JSON.stringify(guardPayload())});logLine(d.message||'intentional marked');refreshGuards()}catch(e){logLine(`intentional failed: ${e.message}`)}}
 async function updateToken(){const body={old_token:document.getElementById('token-old').value.trim(),new_token:document.getElementById('token-new').value.trim()};try{const d=await api('/api/token',{method:'POST',body:JSON.stringify(body)});logLine(d.message||'token updated')}catch(e){logLine(`token update failed: ${e.message}`)}}
 async function serviceAction(action){try{const d=await api(`/api/service/${action}`,{method:action==='status'?'GET':'POST'});logLine(d.message||`${action} ok`);serviceStatus()}catch(e){logLine(`service ${action} failed: ${e.message}`)}}
-setInterval(refreshGuards,2000);refreshAll();
+setInterval(refreshGuards,2000);setInterval(refreshAudit,5000);refreshAll();
 </script>
 </body></html>
 )HTML");
@@ -394,7 +496,8 @@ setInterval(refreshGuards,2000);refreshAll();
 int WebServer::roleRequired(const QString &route)
 {
     // admin-only: token rotation + service lifecycle
-    if (route == "/api/token" || route.startsWith("/api/service/install") ||
+    if (route == "/api/audit" ||
+        route == "/api/token" || route.startsWith("/api/service/install") ||
         route.startsWith("/api/service/uninstall") ||
         route.startsWith("/api/service/start") ||
         route.startsWith("/api/service/stop"))
@@ -620,6 +723,11 @@ bool WebServer::start()
             {
                 if (!authorizeApi(request, "/api/token")) return jsonUnauthorized();
                 return handleTokenUpdate(request);
+            }
+            if (path == QStringLiteral("/api/audit") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/audit")) return jsonUnauthorized();
+                return handleAudit(request);
             }
             if (path == QStringLiteral("/api/service/status") && request.method() == Method::Get)
             {
@@ -1105,6 +1213,70 @@ QHttpServerResponse WebServer::handleServiceStatus()
 QHttpServerResponse WebServer::handleServiceAction(const QString &action)
 {
     return jsonCommandResult(runTool(resolvedServiceToolPath(), {action}), "service action completed");
+}
+
+QHttpServerResponse WebServer::handleAudit(const PgsHttp::Request &request) const
+{
+    bool ok = false;
+    int limit = request.query().queryItemValue(QStringLiteral("limit")).toInt(&ok);
+    if (!ok)
+    {
+        limit = 100;
+    }
+    if (limit < 1)
+    {
+        limit = 1;
+    }
+    if (limit > 500)
+    {
+        limit = 500;
+    }
+
+    QJsonObject obj;
+    obj.insert("ok", true);
+    obj.insert("limit", limit);
+    obj.insert("enabled", !m_options.auditLogPath.trimmed().isEmpty());
+
+    QJsonArray events;
+    if (m_options.auditLogPath.trimmed().isEmpty())
+    {
+        obj.insert("events", events);
+        obj.insert("message", QStringLiteral("audit log is not configured"));
+        return QHttpServerResponse(obj);
+    }
+
+    QFile file(m_options.auditLogPath);
+    if (!file.exists())
+    {
+        obj.insert("events", events);
+        obj.insert("message", QStringLiteral("audit log has no events yet"));
+        return QHttpServerResponse(obj);
+    }
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        return jsonError(QStringLiteral("failed to read audit log"), 500);
+    }
+
+    QStringList tail;
+    while (!file.atEnd())
+    {
+        const QString line = QString::fromUtf8(file.readLine()).trimmed();
+        if (line.isEmpty())
+        {
+            continue;
+        }
+        tail.append(line);
+        while (tail.size() > limit)
+        {
+            tail.removeFirst();
+        }
+    }
+    for (const QString &line : tail)
+    {
+        events.append(parseAuditLine(line));
+    }
+    obj.insert("events", events);
+    return QHttpServerResponse(obj);
 }
 
 QHttpServerResponse WebServer::handleIndex() const

@@ -249,16 +249,25 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         std::filesystem::path root = stateDir.parent_path();
         if (!root.empty())
         {
-            util::secureCreateDirectory(root.string());
+            if (!util::secureCreateDirectory(root.string()))
+            {
+                Logger::warning("PGS: failed to secure data root directory: " + root.string());
+            }
         }
         if (!stateDir.empty())
         {
-            util::secureCreateDirectory(stateDir.string());
+            if (!util::secureCreateDirectory(stateDir.string()))
+            {
+                Logger::warning("PGS: failed to secure state directory: " + stateDir.string());
+            }
         }
         std::filesystem::path logRoot = std::filesystem::path(logFilePath).parent_path();
         if (!logRoot.empty() && logRoot.filename() == "logs")
         {
-            util::secureCreateDirectory(logRoot.string());
+            if (!util::secureCreateDirectory(logRoot.string()))
+            {
+                Logger::warning("PGS: failed to secure log directory: " + logRoot.string());
+            }
         }
     }
 
@@ -784,6 +793,7 @@ void PGS::persistState()
     // under lock, then write outside the lock, then atomically replace the
     // old file. That keeps the runtime hot path short and avoids half-written
     // files when the service is interrupted mid-write.
+    std::lock_guard<std::mutex> persistLock(m_persistMutex);
     std::string authHash;
     {
         std::lock_guard<std::mutex> authLock(m_authMutex);
@@ -989,6 +999,10 @@ bool PGS::restorePersistedGuards()
             }
             Logger::warning("PGS: restored persisted live guard pid=" + std::to_string(restored.pid) +
                             ", guard-id=" + std::to_string(restored.guardId));
+            recordEvent("guard.restore-attach",
+                        "pid=" + std::to_string(restored.pid) +
+                        ";guard_id=" + std::to_string(restored.guardId) +
+                        ";path=" + restored.path);
             changed = true;
             continue;
         }
@@ -1076,6 +1090,10 @@ bool PGS::restorePersistedGuards()
                             std::to_string(persisted.guardId) +
                             ", max=" + maxRestartsLabel(persisted.maxRestarts) +
                             (windowed ? " (sliding window)" : ""));
+            recordEvent("guard.restore-limit",
+                        "guard_id=" + std::to_string(persisted.guardId) +
+                        ";path=" + persisted.path +
+                        ";max=" + maxRestartsLabel(persisted.maxRestarts));
             changed = true;
             continue;
         }
@@ -1108,6 +1126,10 @@ bool PGS::restorePersistedGuards()
             stored.killOnExit = restarted.killOnExit;
             Logger::warning("PGS: restored persisted missing guard by restart pid=" + std::to_string(restarted.pid) +
                             ", guard-id=" + std::to_string(restarted.guardId));
+            recordEvent("guard.restore-restart",
+                        "pid=" + std::to_string(restarted.pid) +
+                        ";guard_id=" + std::to_string(restarted.guardId) +
+                        ";path=" + restarted.path);
             changed = true;
             continue;
         }
@@ -1119,6 +1141,9 @@ bool PGS::restorePersistedGuards()
         }
         Logger::error("PGS: failed to restore persisted guard guard-id=" + std::to_string(persisted.guardId) +
                       ", guard removed path=" + persisted.path);
+        recordEvent("guard.restore-failed",
+                    "guard_id=" + std::to_string(persisted.guardId) +
+                    ";path=" + persisted.path);
         allRestored = false;
         changed = true;
     }
@@ -1309,6 +1334,10 @@ void PGS::monitorLoop()
                 }
                 persistState();
                 Logger::warning("PGS: auto-attached restarted guard pid=" + std::to_string(restarted.pid));
+                recordEvent("guard.restart",
+                            "pid=" + std::to_string(restarted.pid) +
+                            ";guard_id=" + std::to_string(restarted.guardId) +
+                            ";path=" + restarted.path);
             }
             else
             {
@@ -1320,6 +1349,9 @@ void PGS::monitorLoop()
                 persistState();
                 closeGuardJob(pit->guard.guardId);
                 Logger::error("PGS: restart failed permanently, guard removed path=" + pit->guard.path);
+                recordEvent("guard.restart-failed",
+                            "guard_id=" + std::to_string(pit->guard.guardId) +
+                            ";path=" + pit->guard.path);
             }
             if (pit->guard.handle)
             {
@@ -1347,21 +1379,16 @@ void PGS::monitorLoop()
         }
 
         std::vector<GuardInfo> deadGuards;
+        std::vector<GuardInfo> hangCandidates;
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             for (auto it = m_guards.begin(); it != m_guards.end();)
             {
                 if (isGuardAlive(it->second))
                 {
-                    if (it->second.hangTimeoutMs > 0 && isGuardHung(it->second))
+                    if (it->second.hangTimeoutMs > 0)
                     {
-                        Logger::warning("PGS: guard hung (unresponsive GUI), pid=" +
-                                        std::to_string(it->second.pid) +
-                                        ", hang-timeout=" + std::to_string(it->second.hangTimeoutMs) + "ms");
-                        terminateGuardFamily(it->second.guardId);
-                        deadGuards.push_back(it->second);
-                        it = m_guards.erase(it);
-                        continue;
+                        hangCandidates.push_back(it->second);
                     }
                     ++it;
                     continue;
@@ -1369,6 +1396,30 @@ void PGS::monitorLoop()
 
                 deadGuards.push_back(it->second);
                 it = m_guards.erase(it);
+            }
+        }
+        for (const GuardInfo &candidate : hangCandidates)
+        {
+            if (!isGuardHung(candidate))
+            {
+                continue;
+            }
+
+            Logger::warning("PGS: guard hung (unresponsive GUI), pid=" +
+                            std::to_string(candidate.pid) +
+                            ", hang-timeout=" + std::to_string(candidate.hangTimeoutMs) + "ms");
+            recordEvent("guard.hung",
+                        "pid=" + std::to_string(candidate.pid) +
+                        ";guard_id=" + std::to_string(candidate.guardId) +
+                        ";path=" + candidate.path);
+            terminateGuardFamily(candidate.guardId);
+
+            std::lock_guard<std::mutex> lock(m_guardsMutex);
+            auto it = m_guards.find(candidate.pid);
+            if (it != m_guards.end() && it->second.guardId == candidate.guardId)
+            {
+                deadGuards.push_back(it->second);
+                m_guards.erase(it);
             }
         }
 
@@ -1390,6 +1441,10 @@ void PGS::monitorLoop()
                 closeGuardJob(guard.guardId);
                 persistState();
                 Logger::warning("PGS: guard exited intentionally, pid=" + std::to_string(guard.pid));
+                recordEvent("guard.intentional-exit",
+                            "pid=" + std::to_string(guard.pid) +
+                            ";guard_id=" + std::to_string(guard.guardId) +
+                            ";path=" + guard.path);
                 continue;
             }
 
@@ -1436,6 +1491,11 @@ void PGS::monitorLoop()
                 }
                 closeGuardJob(guard.guardId);
                 persistState();
+                recordEvent("guard.restart-limit",
+                            "pid=" + std::to_string(guard.pid) +
+                            ";guard_id=" + std::to_string(guard.guardId) +
+                            ";path=" + guard.path +
+                            ";max=" + maxRestartsLabel(maxRestarts));
                 continue;
             }
 
@@ -1472,6 +1532,10 @@ void PGS::monitorLoop()
 
             Logger::warning("PGS: guard died unexpectedly, pid=" + std::to_string(guard.pid) +
                             (guard.appKind == AppKind::WinApp ? " (winapp)" : ""));
+            recordEvent("guard.died",
+                        "pid=" + std::to_string(guard.pid) +
+                        ";guard_id=" + std::to_string(guard.guardId) +
+                        ";path=" + guard.path);
             Logger::warning("PGS: restart count " + std::to_string(currentRestarts) + "/" +
                             maxRestartsLabel(maxRestarts) +
                             ", path=" + guard.path +
@@ -1533,6 +1597,10 @@ void PGS::monitorLoop()
                 }
                 persistState();
                 Logger::warning("PGS: auto-attached restarted guard pid=" + std::to_string(newGuard.pid));
+                recordEvent("guard.restart",
+                            "pid=" + std::to_string(newGuard.pid) +
+                            ";guard_id=" + std::to_string(newGuard.guardId) +
+                            ";path=" + newGuard.path);
             }
             else
             {
@@ -1544,6 +1612,10 @@ void PGS::monitorLoop()
                 persistState();
                 closeGuardJob(guard.guardId);
                 Logger::error("PGS: restart failed permanently, guard removed pid=" + std::to_string(guard.pid));
+                recordEvent("guard.restart-failed",
+                            "pid=" + std::to_string(guard.pid) +
+                            ";guard_id=" + std::to_string(guard.guardId) +
+                            ";path=" + guard.path);
             }
             if (guard.handle)
             {
@@ -1713,13 +1785,30 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
     CloseHandle(userToken);
     if (!dupOk)
     {
+        Logger::warning("PGS: DuplicateTokenEx failed for restart session=" +
+                        std::to_string(targetSessionId) +
+                        ", error=" + std::to_string(GetLastError()));
         return false;
     }
 
-    SetTokenInformation(primaryToken, TokenSessionId, &targetSessionId, sizeof(targetSessionId));
+    if (!SetTokenInformation(primaryToken, TokenSessionId, &targetSessionId, sizeof(targetSessionId)))
+    {
+        Logger::warning("PGS: SetTokenInformation(TokenSessionId) failed for restart session=" +
+                        std::to_string(targetSessionId) +
+                        ", error=" + std::to_string(GetLastError()));
+        CloseHandle(primaryToken);
+        return false;
+    }
 
     LPVOID envBlock = nullptr;
-    CreateEnvironmentBlock(&envBlock, primaryToken, FALSE);
+    if (!CreateEnvironmentBlock(&envBlock, primaryToken, FALSE))
+    {
+        Logger::warning("PGS: CreateEnvironmentBlock failed for restart session=" +
+                        std::to_string(targetSessionId) +
+                        ", error=" + std::to_string(GetLastError()));
+        CloseHandle(primaryToken);
+        return false;
+    }
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -1772,6 +1861,9 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
 
     if (!ok)
     {
+        Logger::warning("PGS: CreateProcessAsUserW failed for restart path=" + info.path +
+                        ", session=" + std::to_string(targetSessionId) +
+                        ", error=" + std::to_string(GetLastError()));
         return false;
     }
 
@@ -2093,11 +2185,15 @@ bool PGS::writeInitialTokenFile(const std::string &stateDir, const std::string &
     // Ensure the directory exists with a restrictive ACL before writing.
     if (!stateDir.empty())
     {
-        util::secureCreateDirectory(stateDir);
+        if (!util::secureCreateDirectory(stateDir))
+        {
+            Logger::warning("PGS: failed to secure bootstrap token directory ACL: " + stateDir);
+        }
     }
     std::ofstream out(filePath, std::ios::out | std::ios::binary | std::ios::trunc);
     if (!out.is_open())
     {
+        Logger::warning("PGS: failed to open bootstrap token file for write: " + filePath.string());
         return false;
     }
     out << token;
@@ -2356,14 +2452,22 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
     ProcessIdToSessionId(GetCurrentProcessId(), &mySession);
     if (mySession != 0xFFFFFFFF && mySession == targetSessionId)
     {
-        OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &userToken);
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &userToken))
+        {
+            Logger::warning("PGS: winapp restart could not open current process token, error=" +
+                            std::to_string(GetLastError()));
+        }
     }
     if (!userToken && !queryUserTokenForSession(targetSessionId, userToken))
     {
         const DWORD activeSession = WTSGetActiveConsoleSessionId();
         if (mySession != 0xFFFFFFFF && mySession == activeSession)
         {
-            OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &userToken);
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &userToken))
+            {
+                Logger::warning("PGS: winapp restart could not open active-session process token, error=" +
+                                std::to_string(GetLastError()));
+            }
         }
         if (!userToken && !queryUserTokenForSession(activeSession, userToken))
         {

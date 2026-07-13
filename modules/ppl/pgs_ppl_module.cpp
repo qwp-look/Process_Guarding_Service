@@ -177,6 +177,13 @@ PG_MODULE_API unsigned int PG_GetAbiVersion(void)
     return PG_MODULE_ABI_VERSION;
 }
 
+PG_MODULE_API const char *PG_GetManifest(void)
+{
+    return "name=ppl;version=1.0.0;abi=2;"
+           "summary=Protected Process Light control backed by Sirius.sys;"
+           "capabilities=ppl.set,ppl.get,ppl.clear,driver.sirius.load";
+}
+
 // PG_Init: store the module's own HMODULE (set in DllMain) on the driver
 // client so it can locate Sirius.sys beside the DLL. We deliberately do NOT
 // open the device here: the driver may not be loadable yet (test-signing off),

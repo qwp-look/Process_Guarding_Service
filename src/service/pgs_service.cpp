@@ -24,6 +24,7 @@ namespace
 constexpr DWORD kServiceRecoveryResetSeconds = 24 * 60 * 60;
 constexpr DWORD kServiceRecoveryDelayMs = 5000;
 constexpr DWORD kConsolePollIntervalMs = 200;
+constexpr DWORD kServiceStopTimeoutMs = 30000;
 
 // This host intentionally stays thin:
 // - SCM / console lifecycle lives here
@@ -289,7 +290,7 @@ private:
             return false;
         }
 
-        SC_HANDLE service = OpenServiceA(scm, m_serviceName.c_str(), SERVICE_STOP);
+        SC_HANDLE service = OpenServiceA(scm, m_serviceName.c_str(), SERVICE_STOP | SERVICE_QUERY_STATUS);
         if (!service)
         {
             std::cerr << "OpenService failed: " << GetLastError() << "\n";
@@ -298,19 +299,57 @@ private:
         }
 
         SERVICE_STATUS status{};
-        const bool ok = ControlService(service, SERVICE_CONTROL_STOP, &status) == TRUE;
-        if (!ok)
+        if (!QueryServiceStatus(service, &status))
         {
-            std::cerr << "ControlService(STOP) failed: " << GetLastError() << "\n";
-        }
-        else
-        {
-            std::cout << "Service stopped\n";
+            std::cerr << "QueryServiceStatus failed: " << GetLastError() << "\n";
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            return false;
         }
 
+        if (status.dwCurrentState != SERVICE_STOPPED)
+        {
+            const bool ok = ControlService(service, SERVICE_CONTROL_STOP, &status) == TRUE;
+            if (!ok)
+            {
+                std::cerr << "ControlService(STOP) failed: " << GetLastError() << "\n";
+                CloseServiceHandle(service);
+                CloseServiceHandle(scm);
+                return false;
+            }
+        }
+
+        const ULONGLONG deadline = GetTickCount64() + kServiceStopTimeoutMs;
+        while (status.dwCurrentState != SERVICE_STOPPED)
+        {
+            DWORD waitMs = status.dwWaitHint / 10;
+            if (waitMs < 250)
+                waitMs = 250;
+            if (waitMs > 2000)
+                waitMs = 2000;
+            Sleep(waitMs);
+
+            if (!QueryServiceStatus(service, &status))
+            {
+                std::cerr << "QueryServiceStatus failed while stopping: " << GetLastError() << "\n";
+                CloseServiceHandle(service);
+                CloseServiceHandle(scm);
+                return false;
+            }
+
+            if (GetTickCount64() > deadline)
+            {
+                std::cerr << "Timed out waiting for service to stop\n";
+                CloseServiceHandle(service);
+                CloseServiceHandle(scm);
+                return false;
+            }
+        }
+
+        std::cout << "Service stopped\n";
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
-        return ok;
+        return true;
     }
 
     int printStatus()

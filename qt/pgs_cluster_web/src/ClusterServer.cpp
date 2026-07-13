@@ -725,10 +725,13 @@ QHttpServerResponse ClusterServer::handleSummary() const
     int totalGuards = 0;
     int offlineCount = 0;
     int deadGuards = 0;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it)
     {
         const NodeCache &c = m_cache.value(it.key());
         const bool reachable = c.generation == it.value().generation && c.healthReachable && c.guardsReachable;
+        const bool currentCache = c.generation == it.value().generation;
+        const qint64 lastUpdatedMs = currentCache ? c.lastUpdatedMs : 0;
         QString lastError;
         if (!c.healthError.isEmpty())
             lastError = c.healthError;
@@ -741,6 +744,8 @@ QHttpServerResponse ClusterServer::handleSummary() const
         o.insert("health_status", c.healthStatus);
         o.insert("guards_status", c.guardsStatus);
         o.insert("last_error", lastError);
+        o.insert("last_updated_ms", static_cast<double>(lastUpdatedMs));
+        o.insert("poll_age_ms", static_cast<double>(lastUpdatedMs > 0 ? nowMs - lastUpdatedMs : -1));
 
         int guardCount = 0;
         if (c.healthReachable && !c.healthJson.isEmpty())
@@ -748,14 +753,20 @@ QHttpServerResponse ClusterServer::handleSummary() const
             QJsonParseError pe;
             const QJsonDocument hd = QJsonDocument::fromJson(c.healthJson.toUtf8(), &pe);
             if (pe.error == QJsonParseError::NoError && hd.isObject())
-                guardCount = hd.object().value("guard_count").toInt(0);
+            {
+                const QJsonObject health = hd.object();
+                guardCount = health.value("guard_count").toInt(0);
+                o.insert("pgs_ok", health.value("pgs_ok").toBool(false));
+                o.insert("health_message", health.value("message").toString());
+                o.insert("node_listen_url", health.value("listen_url").toString());
+            }
         }
         if (!reachable)
             ++offlineCount;
-        o.insert("guard_count", guardCount);
-        totalGuards += guardCount;
 
         // Count dead guards from the guards JSON.
+        QJsonArray guardRows;
+        int nodeDeadGuards = 0;
         if (c.guardsReachable && !c.guardsJson.isEmpty())
         {
             QJsonParseError pe;
@@ -765,12 +776,30 @@ QHttpServerResponse ClusterServer::handleSummary() const
                 const QJsonArray gs = gd.object().value("guards").toArray();
                 for (const QJsonValue &gv : gs)
                 {
-                    const QString alive = gv.toObject().value("alive").toString();
+                    const QJsonObject guard = gv.toObject();
+                    const QString alive = guard.value("alive").toString();
                     if (alive != "1" && alive.compare("true", Qt::CaseInsensitive) != 0)
+                    {
                         ++deadGuards;
+                        ++nodeDeadGuards;
+                    }
+                    QJsonObject row;
+                    row.insert("pid", guard.value("pid").toString());
+                    row.insert("path", guard.value("path").toString());
+                    row.insert("restart_count", guard.value("restart_count").toString());
+                    row.insert("max_restarts", guard.value("max_restarts").toString());
+                    row.insert("alive", alive);
+                    row.insert("session", guard.value("session").toString());
+                    guardRows.append(row);
                 }
+                if (guardCount == 0)
+                    guardCount = guardRows.size();
             }
         }
+        o.insert("guard_count", guardCount);
+        o.insert("dead_guard_count", nodeDeadGuards);
+        o.insert("guards", guardRows);
+        totalGuards += guardCount;
         nodes.append(o);
     }
     QJsonObject obj;
@@ -791,20 +820,32 @@ QHttpServerResponse ClusterServer::handleDashboard() const
 <style>
 body{font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0f1115;color:#d6dbe2;margin:0;padding:20px}
 h1{font-size:20px;margin:0 0 12px}
-.summary{display:flex;gap:16px;margin-bottom:16px}
+.summary{display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap}
 .card{background:#1e2024;border:1px solid #3a3f47;border-radius:8px;padding:14px 18px;min-width:120px}
 .card .v{font-size:24px;font-weight:700}
 .card .l{font-size:12px;color:#9aa3b0;margin-top:4px}
-.bad{color:#d43a3a}.ok{color:#3cc66a}.warn{color#d9a410}
+.bad{color:#d43a3a}.ok{color:#3cc66a}.warn{color:#d9a410}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
-.node{background:#25282e;border:1px solid #3a3f47;border-radius:8px;padding:14px}
+.node{background:#25282e;border:1px solid #3a3f47;border-radius:8px;padding:14px;cursor:pointer}
 .node.offline{border-color:#d43a3a}
+.node.selected{border-color:#3b6fd8;box-shadow:0 0 0 1px #3b6fd8}
 .node h3{margin:0 0 8px;font-size:15px}
 .node .meta{font-size:12px;color:#9aa3b0;margin-top:6px}
 .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;margin-right:6px}
 .tag.up{background:#1f3d28;color:#3cc66a}.tag.down{background:#3d1f1f;color:#d43a3a}
-button{background:#3b6fd8;color:#fff;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;margin-right:8px}
+.node-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+button,.button-link{background:#3b6fd8;color:#fff;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;margin-right:8px;text-decoration:none;font:inherit}
+button.remove{background:#7f2d2d}
 input{background:#2b2f36;border:1px solid #444a54;color:#e6e9ef;border-radius:4px;padding:5px 8px;margin-right:6px}
+.detail{margin-top:18px;background:#1b1e24;border:1px solid #3a3f47;border-radius:8px;padding:16px}
+.detail h2{font-size:16px;margin:0 0 10px}
+.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:10px 0}
+.detail-item{background:#25282e;border:1px solid #343944;border-radius:6px;padding:10px}
+.detail-item .k{font-size:11px;color:#9aa3b0;text-transform:uppercase}.detail-item .v{margin-top:4px;word-break:break-all}
+.guard-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12px}
+.guard-table th,.guard-table td{border-bottom:1px solid #343944;padding:7px 8px;text-align:left;vertical-align:top}
+.guard-table th{color:#9aa3b0;font-weight:600}
+.empty{color:#9aa3b0}
 </style></head><body>
 <h1>PGS Cluster Dashboard</h1>
 <div class="summary" id="summary"></div>
@@ -816,10 +857,25 @@ input{background:#2b2f36;border:1px solid #444a54;color:#e6e9ef;border-radius:4p
 <button id="addNode">Add Node</button>
 </div>
 <div class="grid" id="grid"></div>
+<section class="detail" id="detail"></section>
 <script>
-function fmt(s){return s||'--';}
+function fmt(s){return s===0?'0':(s||'--');}
+function fmtAge(ms){
+  if(ms===undefined||ms===null||Number(ms)<0)return 'never';
+  const total=Math.floor(Number(ms)/1000);
+  if(total<2)return 'just now';
+  if(total<60)return total+'s ago';
+  const mins=Math.floor(total/60);
+  if(mins<60)return mins+'m ago';
+  const hours=Math.floor(mins/60);
+  if(hours<24)return hours+'h ago';
+  return Math.floor(hours/24)+'d ago';
+}
 const tokenInput=document.getElementById('apiToken');
+const detail=document.getElementById('detail');
 const embeddedApiToken='__PGS_CLUSTER_API_TOKEN__';
+let latestNodes=[];
+let selectedNodeName='';
 try{localStorage.removeItem('pgsClusterApiToken')}catch(e){}
 tokenInput.value=sessionStorage.getItem('pgsClusterApiToken')||embeddedApiToken;
 tokenInput.addEventListener('input',()=>sessionStorage.setItem('pgsClusterApiToken',tokenInput.value));
@@ -842,6 +898,26 @@ function metric(value,label,cls){
   card.appendChild(el('div','l',label));
   return card;
 }
+function detailItem(label,value,cls){
+  const item=el('div','detail-item');
+  item.appendChild(el('div','k',label));
+  item.appendChild(el('div','v'+(cls?' '+cls:''),fmt(value)));
+  return item;
+}
+function appendCell(row,value,cls){
+  const cell=document.createElement('td');
+  if(cls)cell.className=cls;
+  cell.textContent=fmt(value);
+  row.appendChild(cell);
+}
+function selectNode(name){
+  selectedNodeName=name;
+  renderCards(latestNodes);
+  renderDetail();
+}
+function selectedNode(){
+  return latestNodes.find(n=>n.name===selectedNodeName)||latestNodes[0]||null;
+}
 async function refresh(){
   const s=document.getElementById('summary');
   const g=document.getElementById('grid');
@@ -849,6 +925,7 @@ async function refresh(){
   if(!r.ok){
     s.replaceChildren(metric(r.status,'API Error','bad'));
     g.replaceChildren(el('div','node offline',r.status===401?'unauthorized':'request failed'));
+    detail.replaceChildren(el('div','empty','No node details available.'));
     return;
   }
   const j=await r.json();
@@ -857,17 +934,31 @@ async function refresh(){
     metric(j.offline_count,'Offline',j.offline_count?'bad':'ok'),
     metric(j.total_guards,'Guards'),
     metric(j.dead_guards,'Dead Guards',j.dead_guards?'bad':'ok'));
+  latestNodes=Array.isArray(j.nodes)?j.nodes:[];
+  if(selectedNodeName&&!latestNodes.some(n=>n.name===selectedNodeName))selectedNodeName='';
+  if(!selectedNodeName&&latestNodes.length)selectedNodeName=latestNodes[0].name;
+  renderCards(latestNodes);
+  renderDetail();
+}
+function renderCards(nodes){
+  const g=document.getElementById('grid');
   g.replaceChildren();
-  (j.nodes||[]).forEach(n=>{
+  nodes.forEach(n=>{
     const d=document.createElement('div');
-    d.className='node'+(n.reachable?'':' offline');
+    d.className='node'+(n.reachable?'':' offline')+(n.name===selectedNodeName?' selected':'');
+    d.addEventListener('click',()=>selectNode(n.name));
     const title=el('h3');
     title.appendChild(document.createTextNode(fmt(n.name)+' '));
     title.appendChild(el('span','tag '+(n.reachable?'up':'down'),n.reachable?'UP':'DOWN'));
     d.appendChild(title);
     d.appendChild(el('div','',fmt(n.guard_count)+' guard(s)'));
+    if(n.dead_guard_count){
+      d.appendChild(el('div','warn',fmt(n.dead_guard_count)+' dead guard(s)'));
+    }
     const meta=el('div','meta');
     meta.appendChild(document.createTextNode(fmt(n.url)));
+    meta.appendChild(document.createElement('br'));
+    meta.appendChild(document.createTextNode('last poll: '+fmtAge(n.poll_age_ms)));
     if(n.health_status||n.guards_status){
       meta.appendChild(document.createElement('br'));
       meta.appendChild(document.createTextNode('status: health '+fmt(n.health_status||'--')+', guards '+fmt(n.guards_status||'--')));
@@ -877,11 +968,72 @@ async function refresh(){
       meta.appendChild(document.createTextNode('error: '+fmt(n.last_error)));
     }
     d.appendChild(meta);
+    const actions=el('div','node-actions');
+    const open=document.createElement('a');
+    open.className='button-link';
+    open.href=n.url;
+    open.target='_blank';
+    open.rel='noopener';
+    open.textContent='Open Node';
+    open.addEventListener('click',ev=>ev.stopPropagation());
+    actions.appendChild(open);
     const remove=el('button','remove','Remove');
-    remove.addEventListener('click',()=>removeNode(n.name));
-    d.appendChild(remove);
+    remove.addEventListener('click',ev=>{ev.stopPropagation();removeNode(n.name);});
+    actions.appendChild(remove);
+    d.appendChild(actions);
     g.appendChild(d);
   });
+}
+function renderDetail(){
+  const n=selectedNode();
+  if(!n){
+    detail.replaceChildren(el('div','empty','No nodes registered.'));
+    return;
+  }
+  const title=el('h2',null,fmt(n.name));
+  const open=document.createElement('a');
+  open.className='button-link';
+  open.href=n.url;
+  open.target='_blank';
+  open.rel='noopener';
+  open.textContent='Open Node';
+  const status=n.reachable?'UP':'DOWN';
+  const grid=el('div','detail-grid');
+  grid.appendChild(detailItem('URL',n.url));
+  grid.appendChild(detailItem('Status',status,n.reachable?'ok':'bad'));
+  grid.appendChild(detailItem('Last Poll',fmtAge(n.poll_age_ms)));
+  grid.appendChild(detailItem('HTTP',`health ${fmt(n.health_status||'--')} / guards ${fmt(n.guards_status||'--')}`));
+  grid.appendChild(detailItem('PGS',n.pgs_ok===true?'ok':(n.pgs_ok===false?'not ok':'unknown'),n.pgs_ok===true?'ok':(n.pgs_ok===false?'bad':'')));
+  grid.appendChild(detailItem('Message',n.last_error||n.health_message||'--',n.last_error?'bad':''));
+  const parts=[title,open,grid];
+  const guards=Array.isArray(n.guards)?n.guards:[];
+  if(guards.length){
+    const table=document.createElement('table');
+    table.className='guard-table';
+    const head=document.createElement('thead');
+    const hr=document.createElement('tr');
+    ['PID','Alive','Restarts','Max','Session','Path'].forEach(h=>{const th=document.createElement('th');th.textContent=h;hr.appendChild(th);});
+    head.appendChild(hr);
+    table.appendChild(head);
+    const body=document.createElement('tbody');
+    guards.forEach(g=>{
+      const row=document.createElement('tr');
+      const alive=String(g.alive||'');
+      const dead=alive!=='1'&&alive.toLowerCase()!=='true';
+      appendCell(row,g.pid);
+      appendCell(row,g.alive,dead?'bad':'ok');
+      appendCell(row,g.restart_count);
+      appendCell(row,g.max_restarts);
+      appendCell(row,g.session);
+      appendCell(row,g.path);
+      body.appendChild(row);
+    });
+    table.appendChild(body);
+    parts.push(table);
+  }else{
+    parts.push(el('div','empty','No guard rows in the latest poll.'));
+  }
+  detail.replaceChildren(...parts);
 }
 async function addNode(){
   const name=document.getElementById('nname').value.trim();
@@ -894,8 +1046,14 @@ async function addNode(){
   refresh();
 }
 async function removeNode(name){
-  await fetch('/api/cluster/nodes',{method:'DELETE',headers:apiHeaders({'Content-Type':'application/json'}),
+  if(!confirm(`Remove node "${name}" from this dashboard?`))return;
+  const r=await fetch('/api/cluster/nodes',{method:'DELETE',headers:apiHeaders({'Content-Type':'application/json'}),
     body:JSON.stringify({name})});
+  if(!r.ok){
+    alert('Remove failed: '+r.status);
+    return;
+  }
+  if(selectedNodeName===name)selectedNodeName='';
   refresh();
 }
 refresh();setInterval(refresh,1000);

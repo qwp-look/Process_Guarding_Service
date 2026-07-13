@@ -55,7 +55,7 @@ Qt 桌面管理端继续保留 Qt Widgets 是合理的；Web/Cluster 后端若�
 - `pgs_admin_web`：浏览器控制端（独立 Web 管理进程）
 
 > **新增：模块系统 + PPL 模块**
-> PGS 现支持可加载模块（插件）：把功能写成 DLL 放入 `<exe>/modules/`，启动自动加载，通过 `pgs_bless` 的 `module` / `ppl` 子命令调用。首个模块 **pgs_ppl_module** 复用 StarlightGUI 的 `Sirius.sys` 内核驱动，对进程设置/查询/清除 PPL 保护。
+> PGS 现支持可加载模块（插件）：把功能写成 DLL 放入 `<exe>/modules/`，启动自动加载，通过 `pgs_bless` 的 `module` / `ppl` / `health` / `profile` / `report` 子命令调用。首个模块 **pgs_ppl_module** 复用 StarlightGUI 的 `Sirius.sys` 内核驱动，对进程设置/查询/清除 PPL 保护。
 > 详见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
 
 ## 1. 环境要求
@@ -102,10 +102,13 @@ tools\build_pgs.bat
 - `build/quick_start.exe`
 - `build/smoke_worker.exe`
 - `build/modules/sched/pgs_sched_module.dll`
+- `build/modules/health/pgs_health_module.dll`
+- `build/modules/profile/pgs_profile_module.dll`
+- `build/modules/report/pgs_report_module.dll`
 - `build/modules/ppl/pgs_ppl_module.dll`
 - `build/modules/modules.allow`
 
-当前 C++ 主线还会编译 `src/modules/ModuleManager.cpp`、`src/service/PGSProtocol.cpp`、`src/common/PGSClient.cpp` 以及 bundled `sched`/`ppl` 模块，并链接 `bcrypt`、`wintrust`、`ole32`、`shell32` 等 Windows 库；逐条手工命令请以 `tools/build_pgs.sh` 和 `tools/build_pgs.bat` 为准。
+当前 C++ 主线还会编译 `src/modules/ModuleManager.cpp`、`src/service/PGSProtocol.cpp`、`src/common/PGSClient.cpp` 以及 bundled `sched`/`health`/`profile`/`report`/`ppl` 模块，并链接 `bcrypt`、`wintrust`、`ole32`、`shell32` 等 Windows 库；逐条手工命令请以 `tools/build_pgs.sh` 和 `tools/build_pgs.bat` 为准。
 
 示例程序连接 PGS 时也需要 token（与服务当前 token 一致）：
 

@@ -16,17 +16,27 @@ function Invoke-Pgs {
         [switch]$AllowError
     )
 
-    $oldErrorAction = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $output = & $BlessExe --token $Token --port $Port @CommandArgs 2>&1
-        $code = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $oldErrorAction
+    $attempts = if ($AllowError) { 1 } else { 8 }
+    $text = ''
+    $code = 1
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        $oldErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & $BlessExe --token $Token --port $Port @CommandArgs 2>&1
+            $code = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $oldErrorAction
+        }
+
+        $text = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+        if ($code -eq 0 -or $text -notmatch 'Failed to connect to PGS') {
+            break
+        }
+        Start-Sleep -Milliseconds 300
     }
 
-    $text = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
     if (-not $AllowError -and $code -ne 0) {
         throw "pgs_bless failed ($($CommandArgs -join ' ')): $text"
     }
@@ -74,8 +84,11 @@ if (-not (Test-Path -LiteralPath $worker)) {
 }
 $schedPath = Join-Path $Release 'modules\sched\pgs_sched_module.dll'
 $pplPath = Join-Path $Release 'modules\ppl\pgs_ppl_module.dll'
+$healthPath = Join-Path $Release 'modules\health\pgs_health_module.dll'
+$profilePath = Join-Path $Release 'modules\profile\pgs_profile_module.dll'
+$reportPath = Join-Path $Release 'modules\report\pgs_report_module.dll'
 
-foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $pplPath)) {
+foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $pplPath, $healthPath, $profilePath, $reportPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "required release artifact missing: $required"
     }
@@ -95,6 +108,7 @@ $serviceErr = Join-Path (Split-Path $ProgramDataRoot -Parent) 'release_smoke_ser
 
 $oldProgramData = $env:ProgramData
 $oldServiceToken = $env:PGS_SERVICE_TOKEN
+$oldEnablePpl = $env:PGS_ENABLE_PPL
 $serviceProc = $null
 $guardPid = $null
 
@@ -104,6 +118,7 @@ try {
 
     $env:ProgramData = $ProgramDataRoot
     $env:PGS_SERVICE_TOKEN = $Token
+    Remove-Item Env:PGS_ENABLE_PPL -ErrorAction SilentlyContinue
     $serviceProc = Start-Process -FilePath $serviceExe `
         -ArgumentList @('run', '--port', "$Port") `
         -WorkingDirectory $Release `
@@ -153,6 +168,32 @@ try {
     }
     Write-Host '[release-smoke] sched call ok'
 
+    foreach ($modulePath in @($healthPath, $profilePath, $reportPath)) {
+        $load = Invoke-PgsOk @('module', 'load', '--path', $modulePath)
+        if ($load -notmatch '^OK loaded') {
+            throw "unexpected module load response for ${modulePath}: $load"
+        }
+    }
+    Write-Host '[release-smoke] health/profile/report load ok'
+
+    $health = Invoke-PgsOk @('health', 'summary')
+    if ($health -notmatch '^OK status=') {
+        throw "health summary failed: $health"
+    }
+    $profileSet = Invoke-PgsOk @('profile', 'set', '--name', 'release', '--max-restarts', '2')
+    if ($profileSet -notmatch '^OK profile saved') {
+        throw "profile set failed: $profileSet"
+    }
+    $profileList = Invoke-PgsOk @('profile', 'list')
+    if ($profileList -notmatch 'NAME=release') {
+        throw "profile list missing release profile: $profileList"
+    }
+    $report = Invoke-PgsOk @('report', 'snapshot', '--limit', '5')
+    if ($report -notmatch '^OK mode=snapshot') {
+        throw "report snapshot failed: $report"
+    }
+    Write-Host '[release-smoke] health/profile/report call ok'
+
     $blessStart = Invoke-PgsOk @(
         'bless-start',
         '--path', $worker,
@@ -198,5 +239,11 @@ finally {
         Remove-Item Env:PGS_SERVICE_TOKEN -ErrorAction SilentlyContinue
     } else {
         $env:PGS_SERVICE_TOKEN = $oldServiceToken
+    }
+
+    if ($null -eq $oldEnablePpl) {
+        Remove-Item Env:PGS_ENABLE_PPL -ErrorAction SilentlyContinue
+    } else {
+        $env:PGS_ENABLE_PPL = $oldEnablePpl
     }
 }

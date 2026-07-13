@@ -205,7 +205,7 @@
 - 生成 `pgs_service.exe`
 - 生成 `pgs_bless.exe`
 - 生成示例程序
-- 生成 sched / ppl 模块产物
+- 生成 sched / health / profile / report / ppl 模块产物
 
 不覆盖：
 

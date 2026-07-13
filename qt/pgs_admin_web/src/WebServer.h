@@ -74,6 +74,7 @@ private:
     QHttpServerResponse handleTokenUpdate(const PgsHttp::Request &request);
     QHttpServerResponse handleServiceStatus();
     QHttpServerResponse handleServiceAction(const QString &action);
+    QHttpServerResponse handleAudit(const PgsHttp::Request &request) const;
     QHttpServerResponse handleIndex() const;
     QHttpServerResponse handleIndexHtml() const;
     bool isRequestAuthorized(const PgsHttp::Request &request) const;

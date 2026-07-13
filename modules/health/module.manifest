@@ -1,0 +1,1 @@
+name=health;version=1.0.0;abi=2;summary=Service health summaries from stats/list/events;capabilities=health.summary,health.stats,guard.list,event.read

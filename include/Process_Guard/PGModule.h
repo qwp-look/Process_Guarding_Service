@@ -15,9 +15,10 @@
  *    that can produce a Windows DLL with these exports are compatible.
  *  - Request/response use the same "KEY=VALUE;..." UTF-8 KV style as the rest
  *    of the PGS management protocol, so no JSON/extra dependency is needed.
- *  - Functions are split into metadata (Name/Version/AbiVersion), lifecycle
- *    (Init/Shutdown), and the workhorse (Invoke). Only Name + Invoke are
- *    strictly required; the others are optional and NULL-safe on the PGS side.
+ *  - Functions are split into metadata (Name/Version/AbiVersion/Manifest),
+ *    lifecycle (Init/Shutdown), and the workhorse (Invoke). Only Name + Invoke
+ *    are strictly required; the others are optional and NULL-safe on the PGS
+ *    side.
  *
  * @section contract Invocation contract
  *  - PGS calls PG_Invoke with a NUL-terminated UTF-8 request and a response
@@ -109,6 +110,18 @@ PG_MODULE_API const char *PG_GetVersion(void);
 /* ABI version the module was built against. Should equal
  * PG_MODULE_ABI_VERSION. Optional but recommended for compatibility checks. */
 PG_MODULE_API unsigned int PG_GetAbiVersion(void);
+
+/* Optional ABI v2 manifest string (UTF-8, static storage). The format is the
+ * same lightweight KV style used by module requests:
+ *
+ *   name=ppl;version=1.0.0;abi=2;summary=...;capabilities=ppl.set,ppl.get
+ *
+ * Recognized keys today are name, version, abi, summary and capabilities.
+ * Capabilities are comma-separated advisory tags used for inspection and for
+ * future host-enforced policy. If name or abi is present, PGS validates it
+ * against PG_GetName / PG_GetAbiVersion before accepting the module. Modules
+ * that omit PG_GetManifest remain fully compatible with ABI v2. */
+PG_MODULE_API const char *PG_GetManifest(void);
 
 /*
  * Called once right after the DLL is loaded, before any PG_Invoke.
