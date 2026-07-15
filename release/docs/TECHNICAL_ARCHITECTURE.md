@@ -14,14 +14,16 @@
 
 - `include/Process_Guard/PGS.h`：核心类型与接口
 - `src/service/PGS.cpp`：生命周期、监控、持久化、socket 传输
-- `src/service/PGSProtocol.cpp`：管理协议分发、命令处理、模块 / PPL 路由
+- `src/service/PGSProtocol.cpp`：管理协议分发、命令处理、模块 JSON-RPC / 兼容 PPL 路由
 - `src/service/pgs_service.cpp`：服务安装/启动/停止/状态
 - `tools/pgs_bless.cpp`：CLI 命令解析与协议调用（共享 `PGSClient`）
 - `src/common/PGSClient.cpp`：共享 TCP 行协议客户端（CLI / Qt / Web 复用）
 - `src/common/PGLogger.cpp` + `include/Process_Guard/PGLogger.h`：日志
-- `include/Process_Guard/PGModule.h`：模块 C ABI（PG_GetName/Init/Invoke 等）
+- `include/Process_Guard/PGModule.h`：模块 C ABI（ABI v2 `PG_Invoke`，ABI v3 `PG_InvokeJson` 与 `PGS_ServicesV3`）
 - `include/Process_Guard/ModuleManager.h` + `src/modules/ModuleManager.cpp`：模块注册表（加载/卸载/调用）
-- `modules/ppl/`：PPL 模块（pgs_ppl_module.cpp + Sirius 驱动客户端 + Sirius.sys）
+- `include/Process_Guard/PGModuleManager.h`：模块管理器扩展 ABI（只产出计划/信任建议，不直接加载普通模块）
+- `modules/ppl/`：PPL 高危普通模块（pgs_ppl_module.cpp + Sirius 驱动客户端 + Sirius.sys）
+- `module_managers/official/`：官方 bundled manager manifest；核心 loader 不可插件化
 - `qt/pgs_admin_qt/`：Qt GUI
 
 模块边界的设计原则是：
@@ -46,6 +48,7 @@
 - `handle`
 - `intentional`
 - `guardId`
+- v3/Phase 8：`appKind`、`aumid`、`restartWindowSec`、`restartDelayMs`、`backoff`、`hangTimeoutMs`、`killOnExit`、`jobHandle`、`healthCheckJson`、`groupName`、`paused`、`createdAtMs`、`lastStartMs`、`lastExitMs`、`lastExitCode`、`cumulativeRunMs`、`restartIntervalSumMs`、`restartIntervalCount`、`crashLoop`、`restartHookJson`
 
 其中 `guardId` 是当前实现里的关键字段：
 
@@ -75,6 +78,7 @@
 - `fileHash`
 - `intentional`
 - `hashVerified`
+- v3/Phase 8 持久镜像：`appKind`、`aumid`、restart policy 字段、health check、group、paused、运行画像、crash-loop、restart hook JSON
 
 它的作用是：
 
@@ -128,9 +132,13 @@
 | `intentional` | `<pid>` | 标记本次退出为有意，不再重启 |
 | `set-policy` | `<pid>\|<maxRestarts>[\|<restartArgs>]` | 改策略 |
 | `set-token` | `<b64old>\|<b64new>` | 在线切换 token |
-| `stats` | — | `OK guards=N` |
-| `module` | `list` / `load <b64path>` / `unload <name>` / `call <name> <kv>` | 模块系统 |
-| `ppl` | `set <pid> <signer>` / `get <pid>` / `clear <pid>` | PPL 便利封装（路由到 ppl 模块） |
+| `stats` | — | 守护数量、active、重启统计、uptime、protocol、JOB/IOCP 状态 |
+| `module` | `list/load/unload/call/invoke/invoke-json/verify/install/reload/disable/rollback/op-status/artifact` | 模块系统；`invoke` 为 JSON-RPC 主线，`call` 为 KV 兼容 |
+| `ppl` | `set <pid> <signer>` / `get <pid>` / `clear <pid>` | 兼容便捷封装，内部路由到 `module invoke ppl ppl.*` |
+| `start-register` | `<b64path>\|<b64args>\|...` | 服务端创建 suspended 进程、挂 Job、注册、恢复线程 |
+| `health-check` | `set/get/clear <pid> [config-json-b64]` | 保存每个 guard 的健康检查 schema |
+| `restart-hook` | `set/get/clear <pid> [config-json-b64]` | 保存 restart hook 配置；当前只存结构化配置，执行关闭 |
+| `group` | `list/create/add/remove/pause/resume/restart` | guard group 元数据与组级操作 |
 
 返回：
 
@@ -196,12 +204,13 @@
 
 ### 5.1 `bless-start` 的原子化思路
 
-当前 `bless-start` 不是“先启动再赌注册成功”，而是：
+当前 `bless-start` 优先走服务端 `start-register`，不是“先启动再赌注册成功”，而是：
 
-1. CLI 用 `CREATE_SUSPENDED` 启动目标进程
-2. 计算 hash、准备注册消息
-3. 若服务端注册成功，则 `ResumeThread`
-4. 若注册失败，则回滚并终止这个尚未恢复的子进程
+1. CLI 解析路径/参数/hash 策略并发送 `start-register`
+2. PGS 服务端创建 suspended 进程，立即挂接 Job Object 并注册 guard
+3. 注册成功后由服务端 `ResumeThread`
+4. 注册失败则服务端回滚并终止尚未恢复的子进程
+5. 旧 CLI 本地 suspended 流程保留为兼容路径
 
 这样做的目的，是避免出现“进程已经跑起来，但其实没有被守护”的半成品状态。
 
@@ -212,6 +221,7 @@
 - 提供且匹配：通过
 - 提供且不匹配：拒绝注册
 - 不提供：按兼容模式注册
+- CLI `--hash none`：不提交、不持久化 `fileHash`，服务重启后也不会做 hash 拦截
 
 ## 7. 图形控制端实现要点
 
@@ -367,12 +377,13 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 ## 模块系统（插件）
 
-PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染守护核心。PPL 模块是首个实例，复用 StarlightGUI 的 `Sirius.sys` 内核驱动设置进程 PPL。
+PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染守护核心。PPL 已从核心解耦为高危普通模块，复用 StarlightGUI 的 `Sirius.sys` 内核驱动设置进程 PPL。
 
-- **ABI**：`PGModule.h` 定义 `extern "C"` 导出（Name/Version/Init/Shutdown/Invoke），请求/响应用 KV 文本，零依赖。
-- **注册表**：`ModuleManager` 线程安全地扫描 `<exe>/modules/*.dll` 自动加载，并提供 `load/unload/list/invoke`。
-- **协议接入**：`PGS::processMessage` 新增 `module list|load|unload|call` 与 `ppl set|get|clear` 命令，复用既有 token 认证信封。
-- **CLI**：`pgs_bless` 的 `module` / `ppl` 子命令通过同一 TCP 协议调用。
+- **ABI**：ABI v2 继续支持 `PG_Invoke(const char*, char*, size_t)` KV 调用；ABI v3 优先探测 `PG_InvokeJson(const char*, char*, size_t)`，使用 JSON-RPC envelope。
+- **Services**：`PGS_ServicesV3` 增加 `call_json`、`emit_event`、`now_ms`、`get_data_dir`、`log`；模块反调核心命令时按 capability 拦截。
+- **注册表**：`ModuleManager` 线程安全地扫描 `<exe>/modules/<name>/`，读取 `module.manifest.json`/旧 `module.manifest`，校验 `modules.lock`/兼容 `modules.allow` 后加载。
+- **协议接入**：`module invoke` 是新主线；`module call`、旧 KV、旧 `ppl` CLI 保持兼容。
+- **Manager 扩展**：`module_managers/<name>/manager.dll` 只能返回安装计划、索引解析和 trust 建议，不能替换核心 loader，也不能直接执行 PGS 管理命令。
 
 详细架构、ABI 规格、如何编写新模块、排错与版权见 [`MODULE_SYSTEM.md`](MODULE_SYSTEM.md)。
 
@@ -385,6 +396,7 @@ PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染�
 - 认证信封：`token <token> <command> <args>`（`stripAuthEnvelope` 剥离并校验 token 哈希）。
 - 命令体：`<verb> <args>`，`verb` 与 `args` 以首个空格分隔；`args` 内部按命令约定用 `|` 或空格再切分。
 - 路径/token 等二进制不安全字段用 base64 编码（`register` 的 path、`set-token` 的新旧 token、`module load` 的 DLL 路径）。
+- JSON-RPC 模块调用中，`module invoke <name> <method> <params-json-b64>` 只承载小 JSON；默认请求/响应限制 64 KB，长任务返回 operation id，大结果返回 artifact id。
 - 单条消息上限 `kMaxMessageSize = 64 KB`，超长直接拒绝，防止无界增长。
 
 **并发模型**：
@@ -401,11 +413,9 @@ PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染�
 
 > 完整说明见 [`MODULE_SYSTEM.md`](MODULE_SYSTEM.md)，此处补架构视角。
 
-- **加载时机**：`PGS::initialize()` 总是创建/加固 `<pgs_service.exe 目录>\modules` 根目录并设置 ABI v2 services；
-  默认不自动扫描加载模块。PPL/module opt-in 时才递归加固 modules tree 并扫描加载；显式 `module load`
-  会先读取 `modules.allow`，再按同一白名单/签名/哈希链路加载单个 DLL。
-- **调用链**：`processMessage` → `handleModuleCommand` / `handlePplCommand` → `ModuleManager::invoke` → 模块 `PG_Invoke`。`ppl` 命令是 `module call ppl` 的语法糖，PGS 内部构造 `op=...;pid=...` KV 再调 ppl 模块。
-- **线程安全**：模块 `PG_Invoke` 必须可重入（worker 池并发调用）。模块自身共享状态自行加锁。
+- **加载时机**：`PGS::initialize()` 总是创建/加固 `<pgs_service.exe 目录>\modules` 根目录并设置 ABI v3 services；默认不自动扫描加载。`--enable-modules` 扫描普通模块；PPL 还要求 `--enable-kernel-modules`、`--enable-risk critical`、`PGS_ENABLE_KERNEL_MODULES=1` 或兼容 `--enable-ppl`。显式 `module load/install` 仍走同一 trust 链。
+- **调用链**：`processMessage` → `handleModuleCommand` → `ModuleManager::invokeJson` → 模块 `PG_InvokeJson`；无 v3 导出时降级到 `PG_Invoke` KV shim。`handlePplCommand` 是兼容层，构造 `module invoke ppl ppl.*`。
+- **线程安全**：模块 `PG_Invoke`/`PG_InvokeJson` 必须可重入（worker 池并发调用）。模块自身共享状态自行加锁。
 - **延迟初始化**：PPL 模块 `PG_Init` 不打开驱动（驱动可能尚未可加载），首次 `PG_Invoke` 才 `ensureDevice`，失败返回清晰错误而非拖垮模块加载。
 - **卸载**：`module unload` 或服务退出时调 `PG_Shutdown` + `FreeLibrary`。
 
@@ -446,8 +456,8 @@ PGS 内置可加载模块系统，能力以 DLL 插件形式叠加，不污染�
 
 **PPL 模块额外依赖**：
 
-- `modules\pgs_ppl_module.dll`（与 `pgs_service.exe` 同进程加载）
-- `modules\Sirius.sys`（内核驱动，复用自 StarlightGUI）
+- `modules\ppl\pgs_ppl_module.dll`（与 `pgs_service.exe` 同进程加载）
+- `modules\ppl\Sirius.sys`（内核驱动，复用自 StarlightGUI）
 - 加载 `Sirius.sys` 需：管理员/SYSTEM 权限 + 测试签名模式（`bcdedit /set testsigning on`）或驱动已具备有效签名。
 
 **状态/日志位置**（服务模式默认）：
@@ -467,8 +477,13 @@ release\
 ├─ libstdc++-6.dll
 ├─ libwinpthread-1.dll
 ├─ modules\
-│  ├─ pgs_ppl_module.dll    PPL 模块（启动自动加载）
-│  └─ Sirius.sys            内核驱动（PPL 模块加载）
+│  ├─ modules.lock          主信任文件（构建时从 bundled DLL hash 生成）
+│  ├─ modules.allow         兼容 allowlist
+│  ├─ ppl\                 PPL 高危模块（需显式 kernel/risk 开关）
+│  ├─ sched\ health\ profile\ report\
+├─ module_managers\official\
+│  └─ manager.manifest.json
+├─ modules_staging\         安装/回滚 staging 区
 ├─ examples\                示例（可选）
 │  ├─ guard_example.exe
 │  ├─ quick_start.exe
@@ -478,7 +493,7 @@ release\
 └─ LICENSE                  Apache 2.0
 ```
 
-运行：以管理员开终端，`PGS_SERVICE_TOKEN=<你的token> pgs_service.exe run`，另开终端 `PGS_AUTH_TOKEN=<你的token> pgs_bless.exe ping`。
+运行：以管理员开终端，普通模块用 `PGS_SERVICE_TOKEN=<你的token> pgs_service.exe run --enable-modules`；PPL/驱动再加 `--enable-kernel-modules --enable-risk critical`。另开终端 `PGS_AUTH_TOKEN=<你的token> pgs_bless.exe ping`。发布来源只信任 CI artifact / GitHub Release，发布脚本会从源码重建 release，避免误发旧二进制。
 ## 8. CI 与验证
 
 - GitHub Actions 会在 Windows runner 上用 MSYS2 MinGW64 构建 C++ 主线，并把 core unit、sched cron unit、smoke test 拆成独立步骤。
@@ -496,10 +511,11 @@ release\
 
 `PGDefines.h` 新增 `AppKind { Win32 = 0, WinApp = 1 }`。以下结构全部向后兼容扩展，缺省即旧语义：
 
-- **`GuardInfo`** 增：`appKind`、`aumid`（WindowsApps 的 ApplicationUserModelId）、`restartWindowSec`、`restartDelayMs`、`backoff`(bool)、`hangTimeoutMs`、`killOnExit`(bool)、`jobHandle`( HANDLE, 命名 Job)、`recentRestartMs`（向量，滑动窗口内重启时间戳）。
+- **`GuardInfo`** 增：`appKind`、`aumid`（WindowsApps 的 ApplicationUserModelId）、`restartWindowSec`、`restartDelayMs`、`backoff`(bool)、`hangTimeoutMs`、`killOnExit`(bool)、`jobHandle`(HANDLE, 命名 Job)、Phase 8 的 `healthCheckJson`、`groupName`、`paused`、运行画像字段、`crashLoop`、`restartHookJson`。窗口内重启时间戳在 `RestartPolicyState::recentRestartMs` 中维护。
 - **`RestartPolicyState`** 按 `guardId` 持有 `maxRestarts`、`restartCount` 与 `recentRestartMs`。
   `window>0` 时 `restartCount` 由窗口内 `recentRestartMs` 裁剪后长度得出；`window=0` 时退化为生命周期累计，兼容旧 `maxRestarts` 语义。
-- **`PersistedGuardState`** 增：`appKind`、`aumid`、`restartWindowSec`、`restartDelayMs`、`backoff`、`hangTimeoutMs`、`killOnExit`。
+- **`PersistedGuardState`** 持久镜像上述 v3/Phase 8 字段，保证服务被 SCM 拉起后能恢复 health check、group、paused、运行画像、crash-loop 和 restart hook 配置。
+- **`GuardGroupState`** 保存 group name、paused、startup order 与依赖列表，支持组级 pause/resume/restart。
 
 `fileHash` 字段注释更正：实际为 **SHA-256 hex（经 CNG/BCrypt 计算）**，而非早先文档误写的 FNV-1a。
 
@@ -542,23 +558,25 @@ GUARD\t<guardId>\t<lastKnownPid>\t<sessionId>\t<maxRestartsLabel>\t<pathB64>\t<r
   但加载后以裁剪后的 `RESTART` 时间戳数量为准。
 - `SERVER_PORT\t<port>`：恢复监听端口；缺省 12345。
 - `MODULES_PERMISSIVE\t1`：恢复 `--allow-all-modules` 宽松开关。
+- `GROUP_COUNT` / `GROUP`：恢复 guard group 元数据。
+- `GUARD` 尾部扩展字段：health check、group、paused、created/last start/last exit、last exit code、累计运行时间、平均重启间隔采样、crash-loop、restart hook。
 
 恢复语义：若归档 PID 仍活且路径匹配，则复接管且不消耗预算；若缺失进程需要重新拉起，则这次 restore restart
 也计入 `restartCount`/窗口。例外是 delayed/backoff restart 已经在进入 pending 队列前记账并把
 `lastKnownPid=0` 持久化；若服务在 delay 期间重启，restore 会完成这次已记账的 relaunch，不再二次扣预算。
 达到上限或 restore relaunch 失败的 guard 会从归档删除，避免服务下次启动再次复活。
 
-**迁移**：`version==2` 走保持迁移（老记录字段补默认：Win32/无 aumid/window=0=生命周期累计/delay=0/no backoff/hang=0/killOnExit=0），日志提示一次升级；`version<2` 沿用现有 v1→v2 重置 token 哈希的迁移链。旧客户端协议动词（register/unregister/...）保持不变，`bless`/`unbless` 作为协议层别名加入；`bless-start` 仍是 CLI 侧“启动后注册”的原子流程。
+**迁移**：`version==2` 走保持迁移（老记录字段补默认：Win32/无 aumid/window=0=生命周期累计/delay=0/no backoff/hang=0/killOnExit=0，Phase 8 字段为空/关闭），日志提示一次升级；`version<2` 沿用现有 v1→v2 重置 token 哈希的迁移链。旧客户端协议动词（register/unregister/...）保持不变，`bless`/`unbless` 作为协议层别名加入；`bless-start` 优先走服务端 `start-register`，旧 CLI 本地 suspended 流程保留兼容。
 
 ### 16.5 协议版本与 stats
 
 - 新增 `version` 命令返回 `OK protocol=3 min=2`；`ping`/`stats` 响应追加 `protocol=3`。
-- `stats` 升级为：`OK guards=<N> active=<N> totalRestarts=<N> restartsInWindow=<N> uptime=<S>`。
-- `stats` / `list --json` / `get` 均补 `appKind`/`aumid`/`restartWindow`/`recentRestarts`。
+- `stats` 升级为：`OK guards=<N> active=<N> totalRestarts=<N> restartsInWindow=<N> uptime=<S> paused=<N> crashLoops=<N> JOB_ATTACHED=<0|1>` 等可观测字段；日志明确 Job/IOCP 模式或轮询降级。
+- `stats` / `list --json` / `get` 均补 `appKind`/`aumid`/`restartWindow`/`recentRestarts` 以及 v3 CLI JSON 字段：`restart_delay`、`backoff`、`hang_timeout`、`kill_on_exit`、`job_attached`、group/paused/health/restart-hook/运行画像。
 
 ### 16.6 模块白名单 + Authenticode（架构视角）
 
-`ModuleManager::load` 校验链：命中白名单 → （签名要求开启时）`WinVerifyTrust` 验 Authenticode → 哈希校验 → 全过才 `LoadLibrary`。白名单文件 `<exe>\modules\modules.allow`，逐行 `name[|sha256Hex[|signed]]`。**默认 fail-closed**：白名单缺失即拒绝加载任何模块并告警；`--allow-all-modules`（持久化于 `MODULES_PERMISSIVE\t1`）开启旧宽松行为用于开发。PPL opt-in 时会递归加固 modules tree 的子目录和文件 ACL，任一失败即拒绝加载 PPL 模块。详见 `MODULE_SYSTEM.md`。
+`ModuleManager::load` 校验链：真实路径必须在 modules 根目录内 → 目录/manifest 名称匹配 → ABI v2/v3 匹配 → `modules.lock` 主信任文件或兼容 `modules.allow` 命中 → （签名要求开启时）`WinVerifyTrust` 验 Authenticode → SHA-256 哈希校验 → capability/risk gate 通过 → `LoadLibrary`。`--allow-all-modules`（持久化于 `MODULES_PERMISSIVE\t1`）仅用于开发。PPL 作为高危普通模块，需要 kernel/risk 开关；模块管理器扩展只能提供计划，核心 loader 拥有最终拒绝权。详见 `MODULE_SYSTEM.md`。
 
 ### 16.7 `--port` 与服务身份
 
@@ -567,3 +585,9 @@ GUARD\t<guardId>\t<lastKnownPid>\t<sessionId>\t<maxRestartsLabel>\t<pathB64>\t<r
 ### 16.8 节流说明
 
 本轮 token 仍走环境变量 `PGS_AUTH_TOKEN`（继承风险与后续 named-pipe 演进建议记录于 `SERVICE_MODE_GUIDE.md`，本轮不重设计）。
+
+### 16.9 Doctor / Guard 能力补充
+
+`pgs_bless doctor [--json]` 与 Web/Qt doctor 页是只读诊断入口，覆盖 PGS 连通、token、服务状态、管理员权限、ProgramData ACL、state/log 可写、modules ACL、`modules.lock`/`modules.allow`、Qt/OpenSSL DLL、PPL 测试签名、`Sirius.sys` 和 Job attach 能力。
+
+Phase 8 guard 能力包括 `health-check set|get|clear`、`restart-hook set|get|clear`、`group create|add|remove|pause|resume|restart|list`。restart hook 当前只保存结构化配置并返回 `execution=disabled`，不会执行任意脚本。

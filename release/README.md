@@ -54,8 +54,8 @@ Qt 桌面管理端继续保留 Qt Widgets 是合理的；Web/Cluster 后端若�
 - `pgs_admin_qt`：Qt 图形管理端（调用 `pgs_bless`）
 - `pgs_admin_web`：浏览器控制端（独立 Web 管理进程）
 
-> **新增：模块系统 + PPL 模块**
-> PGS 现支持可加载模块（插件）：把功能写成 DLL 放入 `<exe>/modules/`，启动自动加载，通过 `pgs_bless` 的 `module` / `ppl` / `health` / `profile` / `report` 子命令调用。首个模块 **pgs_ppl_module** 复用 StarlightGUI 的 `Sirius.sys` 内核驱动，对进程设置/查询/清除 PPL 保护。
+> **新增：模块生态 + PPL 高危模块**
+> PGS 现支持可加载模块（插件）：功能 DLL 放入 `<exe>/modules/<name>/`，通过 `module.manifest.json` 与 `modules.lock` 进入信任链，再由核心 loader 统一校验后加载。普通模块用 `--enable-modules` 启用扫描；PPL 是高危普通模块，复用 StarlightGUI 的 `Sirius.sys` 内核驱动，只有显式 `--enable-kernel-modules` / `--enable-risk critical`（或兼容 `--enable-ppl`）后才允许加载和调用。
 > 详见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
 
 ## 1. 环境要求
@@ -107,6 +107,7 @@ tools\build_pgs.bat
 - `build/modules/report/pgs_report_module.dll`
 - `build/modules/ppl/pgs_ppl_module.dll`
 - `build/modules/modules.allow`
+- `build/modules/modules.lock`
 
 当前 C++ 主线还会编译 `src/modules/ModuleManager.cpp`、`src/service/PGSProtocol.cpp`、`src/common/PGSClient.cpp` 以及 bundled `sched`/`health`/`profile`/`report`/`ppl` 模块，并链接 `bcrypt`、`wintrust`、`ole32`、`shell32` 等 Windows 库；逐条手工命令请以 `tools/build_pgs.sh` 和 `tools/build_pgs.bat` 为准。
 
@@ -420,14 +421,14 @@ Qt 管理端：
   - `守护管理 / Bless Console`：专门调用 `pgs_bless.exe`
   - `服务管理 / Service Console`：专门调用 `pgs_service.exe`
   - `守护表格 / Guard Table`：调用 `pgs_bless list --json` 并表格化显示
-  - 模块管理 / Module Management：扫描 <pgs_service 目录>/modules 子目录，每个模块一个动态子页面（QTextBrowser 渲染该模块的 module.html），可执行 module call 与 ppl set/get/clear。
+  - 模块管理 / Module Management：扫描 `<pgs_service 目录>/modules` 子目录，每个模块一个动态子页面（QTextBrowser 渲染该模块的 `module.html`），可执行 `module call`、`module invoke` 与 `ppl set/get/clear` 兼容入口，并显示 trust/risk/rollback 等状态。
 - 守护管理页支持：`Ping/List/Get/Bless/Bless-Start/Unbless/Policy/Intentional/Token-Set`。
 - 服务管理页支持：`Install/Status/Start/Stop/Uninstall/Run Console`。
 - 服务管理页支持：`Stop Console`（终止当前 `run` 控制台进程）。
 - 服务管理页新增 `Reset Service`：顺序执行 `stop -> uninstall -> install -> start`。
 - `install` 现在会同时配置 Windows SCM 故障恢复动作，服务异常退出时由系统负责自动重启。
 - 两个页面各自独立日志输出，并支持单独 `Clear Log`。
-- 表格页展示字段：PID、路径、hash、已重启次数、最大重启次数、存活状态、会话、hash校验状态。
+- 表格页展示字段：PID、路径、hash、已重启次数、最大重启次数、存活状态、会话、hash 校验、AppKind/AUMID、Job attached、restart window/delay/backoff、hang/kill-on-exit 等 v3 字段。
 - 表格页默认自动刷新降为 `1000 ms`，自动刷新时不再每轮重排列表宽；刷新失败时保留旧表格并在状态栏提示。
 - 语言切换：支持 `中文 / English`。
 
@@ -462,7 +463,7 @@ Qt 管理端：
 - `--max-restarts N|no`：最大重启次数，`no` 表示无限
 - `--restart-args "..."`：PGS 重启目标进程时使用的参数
 - `--hash auto|none|HEX`：文件哈希策略  
-  `auto`=自动计算；`none`=不提交；`HEX`=提交指定值
+  `auto`=自动计算并持久化；`none`=不提交也不持久化 hash，后续重启不做 hash 拦截；`HEX`=提交指定 SHA-256 值
 
 其它命令参数：
 
@@ -488,12 +489,17 @@ Qt 管理端：
 # 构建（产物含 build/modules/ppl/pgs_ppl_module.dll + Sirius.sys + module.html，per-folder 布局）
 tools\build_pgs.bat
 
-# 以管理员运行服务（需测试签名模式以加载 Sirius.sys）
+# 以管理员运行服务：普通模块扫描
 set PGS_SERVICE_TOKEN=<your-token>
-pgs_service.exe run
+pgs_service.exe run --enable-modules
+
+# 仅当确实需要 PPL/驱动能力时，再显式打开高危开关
+pgs_service.exe run --enable-modules --enable-kernel-modules --enable-risk critical
 
 # 模块与 PPL 操作
 pgs_bless.exe module list
+pgs_bless.exe module verify
+pgs_bless.exe module invoke --name health --method health.summary --params-json "{}"
 pgs_bless.exe ppl get --pid <pid>
 pgs_bless.exe ppl set --pid <pid> --signer Antimalware
 pgs_bless.exe ppl clear --pid <pid>
@@ -516,8 +522,8 @@ pgs_bless.exe ppl clear --pid <pid>
 - **重启策略**：`--restart-window`/`--restart-delay`/`--restart-backoff`/`--hang-timeout`/`--kill-on-exit`
   详见 [`docs/GUARD_POLICIES.md`](docs/GUARD_POLICIES.md)。
 - **WindowsApps**：`--winapp --aumid <id>` 或自动探测 `WindowsApps\` 路径，经 AUMID 激活重启。
-- **模块安全**：`modules.allow` 白名单 + 可选 Authenticode；默认 fail-closed，
-  `pgs_service run --allow-all-modules` 为开发逃生阀，见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
+- **模块安全**：`modules.lock` 是主信任文件，`modules.allow` 仅保留兼容；核心 loader 按真实路径、manifest 名称、ABI、hash/signature、capability/risk 校验后才 `LoadLibrary`。`pgs_service run --allow-all-modules` 仅作开发逃生阀，见 [`docs/MODULE_SYSTEM.md`](docs/MODULE_SYSTEM.md)。
+- **Doctor 诊断**：`pgs_bless doctor [--json]` 与 Web/Qt doctor 页只读检查 PGS 连通、token、ACL、state/log、模块 trust 文件、Qt/OpenSSL DLL、PPL 驱动环境和 Job attach 能力。
 - **Web/Cluster 远程暴露**：`pgs_admin_web --remote` 必须 TLS + RBAC + audit；
   `pgs_cluster_web` 非回环监听必须 TLS + 显式 `--api-token`，节点 TLS 默认校验。
 - **端口可配**：`pgs_service run|install --port <p>`，归档 `SERVER_PORT` 自动恢复。

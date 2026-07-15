@@ -40,8 +40,8 @@
 <p>
   <b>功能：</b>对目标进程设置 / 查询 / 清除 <b>PPL（Protected Process Light）</b>保护级别。
   内部复用 <code>Sirius.sys</code> 内核驱动（源自 StarlightGUI，Apache-2.0，作者 Stars），
-  通过统一的 IOCTL 协议与驱动通信。本模块是 PGS 模块系统的<b>首个模块</b>，演示了
-  「模块插入」机制：PGS 服务进程在启动时自动加载本目录下的 DLL，并通过 C ABI 调用。
+  通过统一的 IOCTL 协议与驱动通信。本模块现在是 PGS 模块生态里的<b>高危普通模块</b>：
+  只有通过 <code>modules.lock</code>/<code>modules.allow</code> 信任校验，并显式开启 kernel/risk 开关后，核心 loader 才会加载和调用它。
 </p>
 
 <h2>支持的操作 (op)</h2>
@@ -71,13 +71,14 @@
 </table>
 
 <h2>便捷命令 (pgs_bless ppl)</h2>
-<p>无需记忆 module-call 语法，可直接使用 ppl 子命令（内部自动路由到本模块）：</p>
+<p>无需记忆 module invoke 语法，可直接使用 ppl 子命令（内部自动路由到本模块的 JSON-RPC 方法）：</p>
 <pre>pgs_bless ppl set   --pid 1234 --signer Antimalware
 pgs_bless ppl get   --pid 1234
 pgs_bless ppl clear --pid 1234</pre>
 
 <p>或通过通用模块调用：</p>
-<pre>pgs_bless module call --name ppl --request "op=set;pid=1234;signer=Antimalware"</pre>
+<pre>pgs_bless module invoke --name ppl --method ppl.set --params-json "{&quot;pid&quot;:1234,&quot;signer&quot;:&quot;Antimalware&quot;}"
+pgs_bless module call --name ppl --request "op=set;pid=1234;signer=Antimalware"  # 兼容 KV</pre>
 
 <h2>响应格式</h2>
 <p>成功返回 <span class="tag-ok">OK ...</span>，失败返回 <span class="tag-warn">ERR ...</span>。例如：</p>
@@ -91,6 +92,7 @@ ERR invalid pid</pre>
   <ul>
     <li>机器需能加载 <code>Sirius.sys</code> 内核驱动（测试签名模式，或其既有签名；StarlightGUI 能跑即满足）。</li>
     <li>PGS 服务需以 <b>SYSTEM</b> 权限运行，否则无权操作进程 PPL。</li>
+    <li>PGS 服务需显式开启 <code>--enable-kernel-modules</code> / <code>--enable-risk critical</code>（或兼容 <code>--enable-ppl</code>）。普通 <code>--enable-modules</code> 不会单独放行 PPL。</li>
     <li>若驱动未加载，<code>set</code> 会返回驱动错误（不崩溃），<code>get</code> 仍可查询已存在的保护。</li>
   </ul>
 </div>
@@ -98,7 +100,7 @@ ERR invalid pid</pre>
 <h2>文件清单 (本目录 modules/ppl/)</h2>
 <table>
   <tr><th>文件</th><th>作用</th></tr>
-  <tr><td><code>pgs_ppl_module.dll</code></td><td>模块本体（实现 PGModule ABI，PGS 启动时自动加载）</td></tr>
+  <tr><td><code>pgs_ppl_module.dll</code></td><td>模块本体（实现 PGModule ABI v3，trust 与高危开关通过后加载）</td></tr>
   <tr><td><code>Sirius.sys</code></td><td>内核驱动二进制（StarlightGUI 提供，Apache-2.0）</td></tr>
   <tr><td><code>module.html</code></td><td>本说明页（Qt 端动态渲染）</td></tr>
 </table>

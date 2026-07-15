@@ -66,7 +66,7 @@ echo [3/6] Assemble release tree...
 REM Always start from a clean release tree so installer and zip artifacts cannot
 REM accidentally include stale binaries from a previous packaging run.
 if exist "%RELEASE%" rmdir /s /q "%RELEASE%"
-mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
+mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_bless.exe"       "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_admin_qt\pgs_admin_qt.exe" "%RELEASE%\" >nul
@@ -83,20 +83,30 @@ copy /Y "%BUILD%\modules\ppl\pgs_ppl_module.dll" "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\Sirius.sys"         "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\module.html"        "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\module.manifest"     "%RELEASE%\modules\ppl\" >nul
+copy /Y "%BUILD%\modules\ppl\module.manifest.json" "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\sched\pgs_sched_module.dll" "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.html"          "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.manifest"      "%RELEASE%\modules\sched\" >nul
+copy /Y "%BUILD%\modules\sched\module.manifest.json" "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\health\pgs_health_module.dll" "%RELEASE%\modules\health\" >nul
 copy /Y "%BUILD%\modules\health\module.html"           "%RELEASE%\modules\health\" >nul
 copy /Y "%BUILD%\modules\health\module.manifest"       "%RELEASE%\modules\health\" >nul
+copy /Y "%BUILD%\modules\health\module.manifest.json" "%RELEASE%\modules\health\" >nul
 copy /Y "%BUILD%\modules\profile\pgs_profile_module.dll" "%RELEASE%\modules\profile\" >nul
 copy /Y "%BUILD%\modules\profile\module.html"            "%RELEASE%\modules\profile\" >nul
 copy /Y "%BUILD%\modules\profile\module.manifest"        "%RELEASE%\modules\profile\" >nul
+copy /Y "%BUILD%\modules\profile\module.manifest.json" "%RELEASE%\modules\profile\" >nul
 copy /Y "%BUILD%\modules\report\pgs_report_module.dll" "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\report\module.html"           "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\report\module.manifest"       "%RELEASE%\modules\report\" >nul
+copy /Y "%BUILD%\modules\report\module.manifest.json" "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\modules.allow"        "%RELEASE%\modules\" >nul
+copy /Y "%BUILD%\modules\modules.lock"         "%RELEASE%\modules\" >nul
+copy /Y "module_managers\official\manager.manifest.json" "%RELEASE%\module_managers\official\" >nul
+copy /Y "modules_staging\README.md" "%RELEASE%\modules_staging\" >nul
 copy /Y "docs\MODULE_SYSTEM.md"       "%RELEASE%\docs\" >nul
+copy /Y "docs\MODULE_ECOSYSTEM.md"    "%RELEASE%\docs\" >nul
+copy /Y "docs\REMAINING_UPGRADE_PLAN.md" "%RELEASE%\docs\" >nul
 copy /Y "docs\SERVICE_MODE_GUIDE.md"  "%RELEASE%\docs\" >nul
 copy /Y "docs\TECHNICAL_ARCHITECTURE.md" "%RELEASE%\docs\" >nul
 copy /Y "docs\ROBUSTNESS_AND_TESTING.md" "%RELEASE%\docs\" >nul
@@ -104,6 +114,8 @@ copy /Y "docs\SCHEDULER_MODULE.md"     "%RELEASE%\docs\" >nul
 copy /Y "docs\REMOTE_GATEWAY.md"       "%RELEASE%\docs\" >nul
 copy /Y "docs\CLUSTER_DASHBOARD.md"    "%RELEASE%\docs\" >nul
 copy /Y "docs\GUARD_POLICIES.md"       "%RELEASE%\docs\" >nul
+if not exist "%RELEASE%\docs\schemas" mkdir "%RELEASE%\docs\schemas" >nul 2>&1
+copy /Y "docs\schemas\*.json"          "%RELEASE%\docs\schemas\" >nul
 copy /Y "LICENSE"                     "%RELEASE%\" >nul
 copy /Y "LICENSE.ThirdParty.StarlightGUI.txt" "%RELEASE%\" >nul
 copy /Y "NOTICE"                      "%RELEASE%\" >nul

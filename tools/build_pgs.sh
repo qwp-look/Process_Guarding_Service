@@ -64,6 +64,7 @@ cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" build/modules/sched/ 2>/dev/null || t
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" build/modules/sched/ 2>/dev/null || true
 cp -f modules/sched/module.html build/modules/sched/module.html
 cp -f modules/sched/module.manifest build/modules/sched/module.manifest
+cp -f modules/sched/module.manifest.json build/modules/sched/module.manifest.json
 
 # Health module: lightweight service status wrapper around stats/list/events.
 echo "[12/15] Building pgs_health_module.dll..."
@@ -74,6 +75,7 @@ cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" build/modules/health/ 2>/dev/null || 
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" build/modules/health/ 2>/dev/null || true
 cp -f modules/health/module.html build/modules/health/module.html
 cp -f modules/health/module.manifest build/modules/health/module.manifest
+cp -f modules/health/module.manifest.json build/modules/health/module.manifest.json
 
 # Profile module: named restart-policy profiles, persisted beside the module.
 echo "[13/15] Building pgs_profile_module.dll..."
@@ -84,6 +86,7 @@ cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" build/modules/profile/ 2>/dev/null ||
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" build/modules/profile/ 2>/dev/null || true
 cp -f modules/profile/module.html build/modules/profile/module.html
 cp -f modules/profile/module.manifest build/modules/profile/module.manifest
+cp -f modules/profile/module.manifest.json build/modules/profile/module.manifest.json
 
 # Report module: base64 snapshots/backup exports from stats/list/events.
 echo "[14/15] Building pgs_report_module.dll..."
@@ -94,6 +97,7 @@ cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" build/modules/report/ 2>/dev/null || 
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" build/modules/report/ 2>/dev/null || true
 cp -f modules/report/module.html build/modules/report/module.html
 cp -f modules/report/module.manifest build/modules/report/module.manifest
+cp -f modules/report/module.manifest.json build/modules/report/module.manifest.json
 
 # Default module allowlist: approve the bundled modules.
 mkdir -p build/modules
@@ -109,6 +113,7 @@ mkdir -p build/modules/ppl
 cp -f modules/ppl/Sirius.sys build/modules/ppl/Sirius.sys
 cp -f modules/ppl/module.html build/modules/ppl/module.html
 cp -f modules/ppl/module.manifest build/modules/ppl/module.manifest
+cp -f modules/ppl/module.manifest.json build/modules/ppl/module.manifest.json
 # MinGW runtime DLLs: copy into build/ (process dir) and build/modules/ppl/
 # (module folder, self-contained) so binaries run without MSYS2 in PATH. The
 # module DLL inherits libstdc++/libgcc from the already-loaded pgs_service.exe,
@@ -119,6 +124,28 @@ cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" build/ 2>/dev/null || true
 cp -f "$MINGW_ROOT/bin/libstdc++-6.dll" build/modules/ppl/ 2>/dev/null || true
 cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" build/modules/ppl/ 2>/dev/null || true
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" build/modules/ppl/ 2>/dev/null || true
+
+{
+  echo '{"version":1,"generated_at":"build","modules":['
+  first=1
+  for name in sched health profile report ppl; do
+    dll="build/modules/$name/pgs_${name}_module.dll"
+    hash="$(sha256sum "$dll" | awk '{print $1}')"
+    [ $first -eq 1 ] || echo ','
+    first=0
+    risk="low"; [ "$name" = "ppl" ] && risk="critical"; [ "$name" = "sched" ] && risk="medium"; [ "$name" = "profile" ] && risk="medium"
+    caps='[]'
+    case "$name" in
+      sched) caps='["sched.add","sched.list","sched.remove","sched.enable","sched.disable","guard.register","guard.unregister","guard.intentional","guard.policy","guard.list"]' ;;
+      health) caps='["health.summary","health.stats","guard.list","event.read"]' ;;
+      profile) caps='["profile.set","profile.list","profile.apply","guard.policy"]' ;;
+      report) caps='["report.snapshot","report.backup","event.read","guard.list","health.stats"]' ;;
+      ppl) caps='["driver.kernel","driver.sirius.load","process.ppl.set","process.ppl.clear","ppl.set","ppl.get","ppl.clear"]' ;;
+    esac
+    printf '{"name":"%s","version":"1.0.0","sha256":"%s","publisher":"PGS bundled","source":"bundled","capabilities":%s,"risk":"%s","trustedAt":"build","signature_policy":"hash","require_signed":false}' "$name" "$hash" "$caps" "$risk"
+  done
+  echo ']}'
+} > build/modules/modules.lock
 
 echo
 echo "Build completed:"

@@ -61,4 +61,4 @@ v2 模块必须在解引用前检查 reserved != NULL。详见 include/Process_G
 ## 6. 构建
 
 tools/build_pgs.bat 与 tools/build_pgs.sh 已包含 pgs_sched_module.dll 的构建，
-并将 sched 写入默认 modules.allow 白名单。需开启模块加载（PGS_ENABLE_PPL=1 或 --enable-ppl）才会被 PGS 扫描加载。
+并将 sched 写入默认 modules.lock 信任文件（同时保留 modules.allow 兼容）。需开启普通模块加载（PGS_ENABLE_MODULES=1 或 --enable-modules）才会被 PGS 扫描加载；PPL/驱动开关与本模块无关。

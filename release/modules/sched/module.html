@@ -120,8 +120,8 @@ ERR invalid cron expression</pre>
 <div class="note">
   <b>运行前提：</b>
   <ul>
-    <li>PGS 需开启模块加载（<code>PGS_ENABLE_PPL=1</code> 或 <code>--enable-ppl</code>）才会扫描加载 <code>modules/</code>。</li>
-    <li>本模块已写入默认 <code>modules.allow</code> 白名单（<code>sched</code>）。</li>
+    <li>PGS 需开启普通模块加载（<code>PGS_ENABLE_MODULES=1</code> 或 <code>--enable-modules</code>）才会扫描加载 <code>modules/</code>。</li>
+    <li>本模块已写入默认 <code>modules.lock</code> 信任文件，并保留 <code>modules.allow</code> 兼容项（<code>sched</code>）。</li>
     <li>本目录的 MinGW 运行时 DLL（<code>libstdc++-6.dll</code> 等）随模块分发，供独立运行。</li>
   </ul>
 </div>
@@ -129,7 +129,7 @@ ERR invalid cron expression</pre>
 <h2>文件清单 (本目录 modules/sched/)</h2>
 <table>
   <tr><th>文件</th><th>作用</th></tr>
-  <tr><td><code>pgs_sched_module.dll</code></td><td>模块本体（实现 PGModule ABI v2，PGS 启动时自动加载）</td></tr>
+  <tr><td><code>pgs_sched_module.dll</code></td><td>模块本体（实现 PGModule ABI v2，PGS 启用模块扫描且 trust 校验通过后加载）</td></tr>
   <tr><td><code>SchedCron.h</code> / <code>SchedCron.cpp</code></td><td>cron 解析与下次触发计算（编译进 DLL）</td></tr>
   <tr><td><code>pgs_sched_module.cpp</code></td><td>模块主逻辑（源码，随仓库分发）</td></tr>
   <tr><td><code>module.html</code></td><td>本说明页（Qt 端动态渲染）</td></tr>

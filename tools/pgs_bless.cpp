@@ -326,7 +326,7 @@ bool resumeLaunch(LaunchResult &launch, std::string &outError)
     return true;
 }
 
-bool startProcessFromPath(
+[[maybe_unused]] bool startProcessFromPath(
     const std::string &pathInput,
     const std::string &startArgsInput,
     LaunchResult &outLaunch,
@@ -553,6 +553,9 @@ void printSummaries(const std::vector<std::string> &lines, bool jsonOutput)
 
             const std::string path = base64Decode(get("PATH_B64"));
             const std::string args = base64Decode(get("RESTART_ARGS_B64"));
+            const std::string aumid = base64Decode(get("AUMID_B64"));
+            const std::string healthCheck = base64Decode(get("HEALTH_CHECK_B64"));
+            const std::string restartHook = base64Decode(get("RESTART_HOOK_B64"));
             std::cout << "{"
                       << "\"pid\":\"" << jsonEscape(get("PID")) << "\","
                       << "\"session\":\"" << jsonEscape(get("SESSION")) << "\","
@@ -562,6 +565,27 @@ void printSummaries(const std::vector<std::string> &lines, bool jsonOutput)
                       << "\"restart_count\":\"" << jsonEscape(get("RESTART_COUNT")) << "\","
                       << "\"hash_verified\":\"" << jsonEscape(get("HASH_VERIFIED")) << "\","
                       << "\"hash\":\"" << jsonEscape(get("HASH")) << "\","
+                      << "\"app_kind\":\"" << jsonEscape(get("APP_KIND")) << "\","
+                      << "\"aumid\":\"" << jsonEscape(aumid) << "\","
+                      << "\"restart_window\":\"" << jsonEscape(get("RESTART_WINDOW")) << "\","
+                      << "\"restart_delay\":\"" << jsonEscape(get("RESTART_DELAY")) << "\","
+                      << "\"backoff\":\"" << jsonEscape(get("BACKOFF")) << "\","
+                      << "\"hang_timeout\":\"" << jsonEscape(get("HANG_TIMEOUT")) << "\","
+                      << "\"kill_on_exit\":\"" << jsonEscape(get("KILL_ON_EXIT")) << "\","
+                      << "\"job_attached\":\"" << jsonEscape(get("JOB_ATTACHED")) << "\","
+                      << "\"health_check\":\"" << jsonEscape(healthCheck) << "\","
+                      << "\"group\":\"" << jsonEscape(get("GROUP")) << "\","
+                      << "\"group_paused\":\"" << jsonEscape(get("GROUP_PAUSED")) << "\","
+                      << "\"paused\":\"" << jsonEscape(get("PAUSED")) << "\","
+                      << "\"guard_paused\":\"" << jsonEscape(get("GUARD_PAUSED")) << "\","
+                      << "\"created_at\":\"" << jsonEscape(get("CREATED_AT")) << "\","
+                      << "\"last_start\":\"" << jsonEscape(get("LAST_START")) << "\","
+                      << "\"last_exit\":\"" << jsonEscape(get("LAST_EXIT")) << "\","
+                      << "\"last_exit_code\":\"" << jsonEscape(get("LAST_EXIT_CODE")) << "\","
+                      << "\"cumulative_run_ms\":\"" << jsonEscape(get("CUMULATIVE_RUN_MS")) << "\","
+                      << "\"avg_restart_interval_ms\":\"" << jsonEscape(get("AVG_RESTART_INTERVAL_MS")) << "\","
+                      << "\"crash_loop\":\"" << jsonEscape(get("CRASH_LOOP")) << "\","
+                      << "\"restart_hook\":\"" << jsonEscape(restartHook) << "\","
                       << "\"path\":\"" << jsonEscape(path) << "\","
                       << "\"restart_args\":\"" << jsonEscape(args) << "\""
                       << "}";
@@ -583,11 +607,37 @@ void printSummaries(const std::vector<std::string> &lines, bool jsonOutput)
             << " intentional=" << get("INTENTIONAL")
             << " max=" << get("MAX_RESTARTS")
             << " restarts=" << get("RESTART_COUNT")
+            << " app=" << get("APP_KIND")
+            << " job=" << get("JOB_ATTACHED")
+            << " group=" << get("GROUP")
+            << " paused=" << get("PAUSED")
+            << " crash_loop=" << get("CRASH_LOOP")
             << " hash_verified=" << get("HASH_VERIFIED")
             << " hash=" << get("HASH")
             << "\n"
             << "  path: " << base64Decode(get("PATH_B64")) << "\n"
-            << "  args: " << base64Decode(get("RESTART_ARGS_B64")) << "\n";
+            << "  args: " << base64Decode(get("RESTART_ARGS_B64")) << "\n"
+            << "  policy: window=" << get("RESTART_WINDOW")
+            << " delay=" << get("RESTART_DELAY")
+            << " backoff=" << get("BACKOFF")
+            << " hang=" << get("HANG_TIMEOUT")
+            << " kill_on_exit=" << get("KILL_ON_EXIT") << "\n"
+            << "  profile: created=" << get("CREATED_AT")
+            << " last_start=" << get("LAST_START")
+            << " last_exit=" << get("LAST_EXIT")
+            << " exit_code=" << get("LAST_EXIT_CODE")
+            << " run_ms=" << get("CUMULATIVE_RUN_MS")
+            << " avg_restart_ms=" << get("AVG_RESTART_INTERVAL_MS") << "\n";
+        const std::string healthCheck = base64Decode(get("HEALTH_CHECK_B64"));
+        const std::string restartHook = base64Decode(get("RESTART_HOOK_B64"));
+        if (!healthCheck.empty())
+        {
+            std::cout << "  health-check: " << healthCheck << "\n";
+        }
+        if (!restartHook.empty())
+        {
+            std::cout << "  restart-hook: " << restartHook << " (execution disabled)\n";
+        }
     }
 }
 
@@ -783,6 +833,7 @@ void printModuleInspection(
                   << "\"name_matches_key\":" << (nameMatchesKey ? "true" : "false") << ","
                   << "\"has_name_export\":" << (info.hasNameExport ? "true" : "false") << ","
                   << "\"has_invoke_export\":" << (info.hasInvokeExport ? "true" : "false") << ","
+                  << "\"has_invoke_json_export\":" << (info.hasInvokeJsonExport ? "true" : "false") << ","
                   << "\"has_manifest_export\":" << (info.hasManifestExport ? "true" : "false") << ","
                   << "\"version\":\"" << jsonEscape(info.version) << "\","
                   << "\"has_abi\":" << (info.hasAbiVersion ? "true" : "false") << ","
@@ -815,6 +866,7 @@ void printModuleInspection(
               << "  name: " << nameDisplay << nameSuffix << "\n"
               << "  exports: name=" << (info.hasNameExport ? "yes" : "no")
               << " invoke=" << (info.hasInvokeExport ? "yes" : "no")
+              << " invoke_json=" << (info.hasInvokeJsonExport ? "yes" : "no")
               << " manifest=" << (info.hasManifestExport ? "yes" : "no") << "\n"
               << "  version: " << (info.version.empty() ? "-" : info.version) << "\n"
               << "  abi: " << (info.hasAbiVersion ? std::to_string(info.abiVersion) : std::string("-")) << "\n"
@@ -947,6 +999,162 @@ int runModuleTrust(
     return 0;
 }
 
+struct DoctorCheck
+{
+    std::string id;
+    std::string status;
+    std::string message;
+};
+
+bool isProcessElevated()
+{
+    BOOL isAdmin = FALSE;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    PSID adminGroup = nullptr;
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup))
+    {
+        CheckTokenMembership(nullptr, adminGroup, &isAdmin);
+        FreeSid(adminGroup);
+    }
+    return isAdmin == TRUE;
+}
+
+std::filesystem::path executableDir()
+{
+    wchar_t buffer[MAX_PATH] = {0};
+    DWORD len = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH)
+    {
+        return std::filesystem::current_path();
+    }
+    return std::filesystem::path(std::wstring(buffer, len)).parent_path();
+}
+
+std::string serviceStateText()
+{
+    SC_HANDLE scm = OpenSCManagerA(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm)
+    {
+        return "unknown: OpenSCManager failed " + std::to_string(GetLastError());
+    }
+    SC_HANDLE service = OpenServiceA(scm, "PGS", SERVICE_QUERY_STATUS);
+    if (!service)
+    {
+        const DWORD err = GetLastError();
+        CloseServiceHandle(scm);
+        return err == ERROR_SERVICE_DOES_NOT_EXIST ? "not-installed" : ("unknown: OpenService failed " + std::to_string(err));
+    }
+    SERVICE_STATUS status{};
+    const BOOL ok = QueryServiceStatus(service, &status);
+    CloseServiceHandle(service);
+    CloseServiceHandle(scm);
+    if (!ok)
+    {
+        return "unknown: QueryServiceStatus failed " + std::to_string(GetLastError());
+    }
+    switch (status.dwCurrentState)
+    {
+    case SERVICE_RUNNING: return "running";
+    case SERVICE_STOPPED: return "stopped";
+    case SERVICE_START_PENDING: return "starting";
+    case SERVICE_STOP_PENDING: return "stopping";
+    default: return "state=" + std::to_string(status.dwCurrentState);
+    }
+}
+
+bool canWriteProbe(const std::filesystem::path &dir)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+    {
+        return false;
+    }
+    const std::filesystem::path probe = dir / L".pgs_doctor_probe";
+    HANDLE h = CreateFileW(probe.wstring().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+    CloseHandle(h);
+    DeleteFileW(probe.wstring().c_str());
+    return true;
+}
+
+int runDoctor(const std::string &host, unsigned short port, const std::string &token, bool jsonOutput)
+{
+    std::vector<DoctorCheck> checks;
+    auto add = [&](std::string id, std::string status, std::string message) {
+        checks.push_back({std::move(id), std::move(status), std::move(message)});
+    };
+
+    std::string response;
+    const std::string pingCommand = ProcessGuard::client::withAuthToken(token, "ping");
+    if (sendToPGS(host, port, pingCommand, response) && response.rfind("OK", 0) == 0)
+    {
+        add("pgs_connect", "ok", response);
+        add("token", "ok", "management token accepted");
+    }
+    else
+    {
+        add("pgs_connect", "fail", response.empty() ? "could not connect to PGS" : response);
+        add("token", token.empty() ? "warn" : "fail", token.empty() ? "no token supplied" : "token rejected or service unavailable");
+    }
+
+    add("service", "info", serviceStateText());
+    const bool elevated = isProcessElevated();
+    add("administrator", elevated ? "ok" : "warn", elevated ? "running elevated" : "not running as administrator");
+
+    const std::filesystem::path exeDir = executableDir();
+    const std::filesystem::path modules = exeDir / L"modules";
+    const wchar_t *programDataEnv = _wgetenv(L"ProgramData");
+    const std::filesystem::path programDataRoot = (programDataEnv && programDataEnv[0]) ? std::filesystem::path(programDataEnv) : std::filesystem::path(L"C:\\ProgramData");
+    const std::filesystem::path programData = programDataRoot / L"ProcessGuard";
+    const std::filesystem::path stateDir = programData / L"state";
+    add("programdata_acl", canWriteProbe(programData) ? "ok" : "warn", wideToUtf8(programData.wstring()));
+    add("state_acl", canWriteProbe(stateDir) ? "ok" : "warn", wideToUtf8(stateDir.wstring()));
+    add("modules_acl", canWriteProbe(modules) ? "ok" : "warn", wideToUtf8(modules.wstring()));
+    add("modules_staging", canWriteProbe(exeDir / L"modules_staging") ? "ok" : "warn", wideToUtf8((exeDir / L"modules_staging").wstring()));
+    add("modules_allow", std::filesystem::exists(modules / L"modules.allow") ? "ok" : "warn", wideToUtf8((modules / L"modules.allow").wstring()));
+    add("modules_lock", std::filesystem::exists(modules / L"modules.lock") ? "ok" : "warn", wideToUtf8((modules / L"modules.lock").wstring()));
+    add("ppl_driver", std::filesystem::exists(modules / L"ppl" / L"Sirius.sys") ? "info" : "warn", wideToUtf8((modules / L"ppl" / L"Sirius.sys").wstring()));
+    add("qt_runtime", std::filesystem::exists(exeDir / L"Qt6Core.dll") || std::filesystem::exists(exeDir / L"Qt5Core.dll") ? "ok" : "info", "Qt runtime DLL check beside tool directory");
+    add("openssl_runtime", std::filesystem::exists(exeDir / L"libssl-3-x64.dll") || std::filesystem::exists(exeDir / L"libssl-3.dll") ? "ok" : "info", "OpenSSL runtime DLL check beside tool directory");
+
+    response.clear();
+    if (sendToPGS(host, port, ProcessGuard::client::withAuthToken(token, "module verify"), response) && response.rfind("OK", 0) == 0)
+    {
+        add("module_loader", "ok", response);
+    }
+    else
+    {
+        add("module_loader", "warn", response.empty() ? "module verify unavailable" : response);
+    }
+
+    if (jsonOutput)
+    {
+        std::cout << "{\"checks\":[";
+        for (std::size_t i = 0; i < checks.size(); ++i)
+        {
+            if (i != 0) std::cout << ",";
+            std::cout << "{\"id\":\"" << jsonEscape(checks[i].id) << "\",\"status\":\""
+                      << jsonEscape(checks[i].status) << "\",\"message\":\""
+                      << jsonEscape(checks[i].message) << "\"}";
+        }
+        std::cout << "]}\n";
+        return 0;
+    }
+
+    std::cout << "PGS doctor\n";
+    for (const DoctorCheck &check : checks)
+    {
+        std::cout << "  [" << check.status << "] " << check.id << ": " << check.message << "\n";
+    }
+    return 0;
+}
+
 void showUsage(const char *exe)
 {
     std::cout
@@ -962,12 +1170,20 @@ void showUsage(const char *exe)
         << "  " << exe << " get --pid <pid> [--json]\n"
         << "  " << exe << " token-set --new-token <token> [--old-token <token>]\n"
         << "  " << exe << " ping\n"
+        << "  " << exe << " doctor [--json]\n"
         << "  " << exe << " module list\n"
         << "  " << exe << " module info --path <dll> [--modules-dir <dir>] [--json]\n"
         << "  " << exe << " module trust --path <dll> [--modules-dir <dir>] [--hash auto|none|HEX] [--require-signed]\n"
         << "  " << exe << " module load --path <dll>\n"
         << "  " << exe << " module unload --name <name>\n"
         << "  " << exe << " module call --name <name> --request \"op=set;pid=N;signer=X\"\n"
+        << "  " << exe << " module invoke --name <name> --method <namespace.method> --params-json <json>\n"
+        << "  " << exe << " module verify|reload|disable|rollback\n"
+        << "  " << exe << " module op-status <operation-id>\n"
+        << "  " << exe << " module artifact get <id>\n"
+        << "  " << exe << " health-check set|get|clear --pid <pid> [--config-json <json>]\n"
+        << "  " << exe << " restart-hook set|get|clear --pid <pid> [--config-json <json>]\n"
+        << "  " << exe << " group create|add|remove|restart|pause|resume|list --name <name> [--pid <pid>] [--order N] [--deps a,b]\n"
         << "  " << exe << " ppl set --pid <pid> --signer <None|Authenticode|CodeGen|Antimalware|Lsa|Windows|WinTcb|WinSystem>\n"
         << "  " << exe << " ppl get --pid <pid>\n"
         << "  " << exe << " ppl clear --pid <pid>\n"
@@ -996,6 +1212,11 @@ void showUsage(const char *exe)
         << "  --json               print list/get output as JSON\n"
         << "  --name <value>       module name (module unload/call, ppl module)\n"
         << "  --request \"kv\"      module call request, e.g. op=set;pid=N;signer=X\n"
+        << "  --method <value>    module invoke JSON-RPC method, e.g. profile.apply\n"
+        << "  --params-json <json> module invoke JSON params object\n"
+        << "  --config-json <json> health-check/restart-hook JSON config\n"
+        << "  --order <N>          guard group startup order metadata\n"
+        << "  --deps <a,b>         guard group dependency names\n"
         << "  --signer <value>     PPL signer for ppl set\n"
         << "  --modules-dir <dir>  modules root for module info/trust (default: derived from --path)\n"
         << "  --require-signed     module trust writes a signed requirement and verifies it now\n"
@@ -1094,6 +1315,11 @@ int main()
     bool hasName = false;
     std::string moduleRequest;
     bool hasRequest = false;
+    std::string moduleMethod;
+    bool hasMethod = false;
+    std::string moduleParamsJson = "{}";
+    bool hasParamsJson = false;
+    std::vector<std::string> moduleExtraArgs;
     std::string modulesDir;
     bool hasModulesDir = false;
     bool requireSigned = false;
@@ -1114,6 +1340,12 @@ int main()
     bool hasSchedId = false;
     std::string eventLimit;
     bool hasEventLimit = false;
+    std::string configJson;
+    bool hasConfigJson = false;
+    std::string groupOrder;
+    bool hasGroupOrder = false;
+    std::string groupDeps;
+    bool hasGroupDeps = false;
     // v3 advanced guard policy (all default to legacy behaviour).
     int restartWindowSec = 0;
     int restartDelayMs = 0;
@@ -1201,7 +1433,8 @@ int main()
         // Peel off the subcommand token for module/ppl so argIndex skips it.
         if (command == "module" || command == "ppl" || command == "schedule" ||
             command == "events" || command == "health" || command == "profile" ||
-            command == "report")
+            command == "report" || command == "health-check" || command == "restart-hook" ||
+            command == "group")
         {
             subCommand = (argIndex < static_cast<int>(argsUtf8.size())) ? argsUtf8[argIndex] : std::string();
             ++argIndex;
@@ -1342,6 +1575,36 @@ int main()
             hasRequest = true;
             continue;
         }
+        if (arg == "--method")
+        {
+            moduleMethod = needValue("--method");
+            hasMethod = true;
+            continue;
+        }
+        if (arg == "--params-json")
+        {
+            moduleParamsJson = needValue("--params-json");
+            hasParamsJson = true;
+            continue;
+        }
+        if (arg == "--config-json")
+        {
+            configJson = needValue("--config-json");
+            hasConfigJson = true;
+            continue;
+        }
+        if (arg == "--order")
+        {
+            groupOrder = needValue("--order");
+            hasGroupOrder = true;
+            continue;
+        }
+        if (arg == "--deps")
+        {
+            groupDeps = needValue("--deps");
+            hasGroupDeps = true;
+            continue;
+        }
         if (arg == "--signer")
         {
             signerText = needValue("--signer");
@@ -1451,6 +1714,12 @@ int main()
             continue;
         }
 
+        if (command == "module" && !arg.empty() && arg[0] != '-')
+        {
+            moduleExtraArgs.push_back(arg);
+            continue;
+        }
+
         std::cerr << "Unknown argument: " << arg << "\n";
         return 1;
     }
@@ -1479,6 +1748,13 @@ int main()
         return ProcessGuard::client::withAuthToken(token, cmd);
     };
 
+    if (command == "doctor")
+    {
+        const int rc = runDoctor(host, port, token, jsonOutput);
+        WSACleanup();
+        return rc;
+    }
+
     std::string wireCommand;
     if (command == "bless" || command == "register" || command == "bless-start" || command == "start-bless")
     {
@@ -1491,6 +1767,7 @@ int main()
         // child process running after a failed registration.
         std::string path;
         std::string derivedRestartArgs;
+        bool useServerStartRegister = false;
         if (command == "bless-start" || command == "start-bless")
         {
             if (hasPath && hasStartCommand)
@@ -1521,30 +1798,28 @@ int main()
                     return 1;
                 }
             }
-            else if (!startProcessFromPath(pathOverride, startArgs, launchedProcess, startError))
+            else
             {
-                std::cerr << "Failed to start process from path: " << pathOverride;
-                if (!startError.empty())
-                {
-                    std::cerr << " | " << startError;
-                }
-                std::cerr << "\n";
-                WSACleanup();
-                return 1;
+                path = pathOverride;
+                derivedRestartArgs = startArgs;
+                useServerStartRegister = true;
             }
 
-            hasLaunchedProcess = true;
-            pid = launchedProcess.pid;
-            path = launchedProcess.pathUtf8;
-            derivedRestartArgs = launchedProcess.startArgsUtf8;
-            hasPid = true;
-            if (derivedRestartArgs.empty())
+            if (hasStartCommand)
             {
-                derivedRestartArgs = startArgs;
+                hasLaunchedProcess = true;
+                pid = launchedProcess.pid;
+                path = launchedProcess.pathUtf8;
+                derivedRestartArgs = launchedProcess.startArgsUtf8;
+                hasPid = true;
+                if (derivedRestartArgs.empty())
+                {
+                    derivedRestartArgs = startArgs;
+                }
             }
         }
 
-        if (!hasPid)
+        if (!hasPid && !useServerStartRegister)
         {
             std::cerr << "bless requires --pid, or use bless-start --path\n";
             WSACleanup();
@@ -1603,7 +1878,15 @@ int main()
         }
 
         std::ostringstream oss;
-        oss << "register " << pid << "|" << base64Encode(path) << "|" << maxRestartsLabel(effectiveMax) << "|" << base64Encode(effectiveArgs);
+        if (useServerStartRegister)
+        {
+            oss << "start-register " << base64Encode(path) << "|" << base64Encode(startArgs) << "|"
+                << maxRestartsLabel(effectiveMax) << "|" << base64Encode(effectiveArgs);
+        }
+        else
+        {
+            oss << "register " << pid << "|" << base64Encode(path) << "|" << maxRestartsLabel(effectiveMax) << "|" << base64Encode(effectiveArgs);
+        }
         // v3 guard-policy fields (positions 5..11 after pid|path|max|args|hash).
         // The hash slot is always emitted (empty => compatible/no-hash mode) so
         // the trailing fields stay aligned with the protocol parser.
@@ -1819,6 +2102,79 @@ int main()
             }
             wireCommand = "module call " + moduleName + " " + moduleRequest;
         }
+        else if (sub == "invoke")
+        {
+            if (!hasName || !hasMethod)
+            {
+                std::cerr << "module invoke requires --name and --method\n";
+                WSACleanup();
+                return 1;
+            }
+            const std::string params = hasParamsJson ? moduleParamsJson : std::string("{}");
+            wireCommand = "module invoke " + moduleName + " " + moduleMethod + " " + base64Encode(params);
+        }
+        else if (sub == "verify")
+        {
+            wireCommand = "module verify";
+        }
+        else if (sub == "reload" || sub == "disable" || sub == "rollback")
+        {
+            if (!hasName)
+            {
+                std::cerr << "module " << sub << " requires --name\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "module " + sub + " " + moduleName;
+        }
+        else if (sub == "install")
+        {
+            if (!hasPath)
+            {
+                std::cerr << "module install requires --path\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "module install " + base64Encode(pathOverride);
+        }
+        else if (sub == "artifact")
+        {
+            std::string artifactId;
+            if (moduleExtraArgs.size() >= 2 && moduleExtraArgs[0] == "get")
+            {
+                artifactId = moduleExtraArgs[1];
+            }
+            else if (hasName)
+            {
+                artifactId = moduleName;
+            }
+            if (artifactId.empty())
+            {
+                std::cerr << "module artifact get requires an id\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "module artifact get " + artifactId;
+        }
+        else if (sub == "op-status")
+        {
+            std::string operationId;
+            if (!moduleExtraArgs.empty())
+            {
+                operationId = moduleExtraArgs[0];
+            }
+            else if (hasName)
+            {
+                operationId = moduleName;
+            }
+            if (operationId.empty())
+            {
+                std::cerr << "module op-status requires an operation id\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "module op-status " + operationId;
+        }
         else
         {
             std::cerr << "Unknown module subcommand: " << sub << "\n";
@@ -1997,7 +2353,7 @@ int main()
                 WSACleanup();
                 return 1;
             }
-            wireCommand = "ppl set " + std::to_string(pid) + " " + signerText;
+            wireCommand = "module invoke ppl ppl.set " + base64Encode("{\"pid\":" + std::to_string(pid) + ",\"signer\":\"" + jsonEscape(signerText) + "\"}");
         }
         else if (sub == "get" || sub == "clear")
         {
@@ -2007,11 +2363,91 @@ int main()
                 WSACleanup();
                 return 1;
             }
-            wireCommand = "ppl " + sub + " " + std::to_string(pid);
+            wireCommand = "module invoke ppl ppl." + sub + " " + base64Encode("{\"pid\":" + std::to_string(pid) + "}");
         }
         else
         {
             std::cerr << "Unknown ppl subcommand: " << sub << "\n";
+            WSACleanup();
+            return 1;
+        }
+    }
+    else if (command == "health-check" || command == "restart-hook")
+    {
+        const std::string sub = subCommand;
+        if (sub != "set" && sub != "get" && sub != "clear")
+        {
+            std::cerr << "Unknown " << command << " subcommand: " << sub << "\n";
+            WSACleanup();
+            return 1;
+        }
+        if (!hasPid)
+        {
+            std::cerr << command << " " << sub << " requires --pid\n";
+            WSACleanup();
+            return 1;
+        }
+        wireCommand = command + " " + sub + " " + std::to_string(pid);
+        if (sub == "set")
+        {
+            if (!hasConfigJson)
+            {
+                std::cerr << command << " set requires --config-json\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand += " " + base64Encode(configJson);
+        }
+    }
+    else if (command == "group")
+    {
+        const std::string sub = subCommand.empty() ? "list" : subCommand;
+        if (sub == "list")
+        {
+            wireCommand = "group list";
+        }
+        else if (sub == "create")
+        {
+            if (!hasName)
+            {
+                std::cerr << "group create requires --name\n";
+                WSACleanup();
+                return 1;
+            }
+            DWORD orderValue = 0;
+            if (hasGroupOrder && !ProcessGuard::util::parseDwordValue(groupOrder, orderValue))
+            {
+                std::cerr << "Invalid --order value\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "group create " + moduleName + " " +
+                          std::to_string(hasGroupOrder ? orderValue : 0) + " " +
+                          (hasGroupDeps ? base64Encode(groupDeps) : std::string("-"));
+        }
+        else if (sub == "add" || sub == "remove")
+        {
+            if (!hasName || !hasPid)
+            {
+                std::cerr << "group " << sub << " requires --name and --pid\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "group " + sub + " " + moduleName + " " + std::to_string(pid);
+        }
+        else if (sub == "restart" || sub == "pause" || sub == "resume")
+        {
+            if (!hasName)
+            {
+                std::cerr << "group " << sub << " requires --name\n";
+                WSACleanup();
+                return 1;
+            }
+            wireCommand = "group " + sub + " " + moduleName;
+        }
+        else
+        {
+            std::cerr << "Unknown group subcommand: " << sub << "\n";
             WSACleanup();
             return 1;
         }

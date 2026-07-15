@@ -6,15 +6,16 @@
  * A PGS module is a Windows DLL that exports the functions declared below.
  * PGS discovers modules in <service-dir>/modules/ at startup (and on demand
  * via the "module load" management command), loads them with LoadLibrary, and
- * invokes them through PG_Invoke. This lets PGS gain new capabilities without
- * baking them into the core — the PPL module (modules/ppl/) is the reference
- * implementation.
+ * invokes them through PG_Invoke or the optional JSON-RPC entry PG_InvokeJson.
+ * This lets PGS gain new capabilities without baking them into the core; PPL
+ * is treated as a high-risk module rather than a core service feature.
  *
  * @section abi ABI design
  *  - Pure C linkage (extern "C") so modules built by any compiler/language
  *    that can produce a Windows DLL with these exports are compatible.
- *  - Request/response use the same "KEY=VALUE;..." UTF-8 KV style as the rest
- *    of the PGS management protocol, so no JSON/extra dependency is needed.
+ *  - ABI v2 request/response uses the historical "KEY=VALUE;..." UTF-8 KV
+ *    style. ABI v3 adds an optional JSON-RPC-style PG_InvokeJson entry point
+ *    so module semantics can evolve independently from the transport.
  *  - Functions are split into metadata (Name/Version/AbiVersion/Manifest),
  *    lifecycle (Init/Shutdown), and the workhorse (Invoke). Only Name + Invoke
  *    are strictly required; the others are optional and NULL-safe on the PGS
@@ -45,6 +46,11 @@
  * expected behaviour of the functions below. Modules report the version they
  * were built against via PG_GetAbiVersion so PGS can reject mismatches. */
 #define PG_MODULE_ABI_VERSION 2
+#define PG_MODULE_ABI_VERSION_JSON 3
+#define PG_MODULE_ABI_MIN_SUPPORTED 2
+#define PG_MODULE_DEFAULT_MAX_JSON_BYTES (64u * 1024u)
+#define PG_MODULE_DEFAULT_DEADLINE_MS 5000u
+#define PG_MODULE_MAX_DEADLINE_MS 60000u
 
 /* Export macro. Modules define PG_MODULE_EXPORTS when compiling so the
  * functions are dllexport'd. PGS does NOT define it (it only resolves the
@@ -92,6 +98,21 @@ struct PGS_Services
     /* Wall-clock epoch milliseconds (GetSystemTimeAsFileTime based). Provided
      * so schedule arithmetic is consistent and mockable. */
     long long (*now_ms)(void *context);
+};
+
+/* ABI v3 services. The first fields intentionally mirror PGS_Services so a
+ * host can pass this struct to older modules without changing their v2 reads.
+ * v3 modules should check `size` before using fields after now_ms. */
+struct PGS_ServicesV3
+{
+    unsigned int size;
+    void *context;
+    int (*call)(void *context, const char *request, char *response, size_t response_size);
+    long long (*now_ms)(void *context);
+    int (*call_json)(void *context, const char *request_json, char *response_json, size_t response_size);
+    int (*emit_event)(void *context, const char *event_json);
+    const char *(*get_data_dir)(void *context);
+    void (*log)(void *context, int level, const char *message);
 };
 
 #ifdef __cplusplus
@@ -160,6 +181,18 @@ PG_MODULE_API void PG_Shutdown(void);
  * state inside the module must be protected by the module itself.
  */
 PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t responseBufSize);
+
+/* Optional ABI v3 JSON-RPC invocation entry point. Modules that implement it
+ * export the same signature under the symbol name PG_InvokeJson. PGS probes it
+ * dynamically, so ABI v2 modules do not need to define it.
+ *
+ * Request example:
+ *   {"jsonrpc":"2.0","id":"...","module":"profile","method":"profile.apply","params":{...}}
+ * Response examples:
+ *   {"jsonrpc":"2.0","id":"...","result":{...}}
+ *   {"jsonrpc":"2.0","id":"...","error":{"code":"ERR_CODE","message":"..."}}
+ */
+typedef int (*PG_InvokeJsonFn)(const char *requestJson, char *responseJson, size_t responseJsonSize);
 
 #ifdef __cplusplus
 }

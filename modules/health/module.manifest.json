@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "health",
+  "version": "1.0.0",
+  "abi": 2,
+  "summary": "Service health summaries from stats, list, and events.",
+  "risk": "low",
+  "capabilities": ["health.summary", "health.stats", "guard.list", "event.read"],
+  "methods": [
+    {"name": "health.summary", "risk": "low", "sync": true, "required_capabilities": ["health.summary"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "health.stats", "risk": "low", "sync": true, "required_capabilities": ["health.stats"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}
