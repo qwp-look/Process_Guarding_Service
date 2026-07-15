@@ -42,6 +42,54 @@ QString bodyValue(const QJsonObject &obj, const QString &key)
     return obj.value(key).toString().trimmed();
 }
 
+bool bodyFlag(const QJsonObject &obj, const QString &key)
+{
+    const QString value = bodyValue(obj, key).toLower();
+    return value == QLatin1String("1") || value == QLatin1String("true") ||
+           value == QLatin1String("yes") || value == QLatin1String("on");
+}
+
+void appendAdvancedGuardArgs(QStringList &args, const QJsonObject &body)
+{
+    const QString restartWindow = bodyValue(body, QStringLiteral("restart_window"));
+    if (!restartWindow.isEmpty())
+    {
+        args << QStringLiteral("--restart-window") << restartWindow;
+    }
+    const QString restartDelay = bodyValue(body, QStringLiteral("restart_delay"));
+    if (!restartDelay.isEmpty())
+    {
+        args << QStringLiteral("--restart-delay") << restartDelay;
+    }
+    if (bodyFlag(body, QStringLiteral("restart_backoff")))
+    {
+        args << QStringLiteral("--restart-backoff");
+    }
+    const QString hangTimeout = bodyValue(body, QStringLiteral("hang_timeout"));
+    if (!hangTimeout.isEmpty())
+    {
+        args << QStringLiteral("--hang-timeout") << hangTimeout;
+    }
+    if (bodyFlag(body, QStringLiteral("kill_on_exit")))
+    {
+        args << QStringLiteral("--kill-on-exit");
+    }
+    if (bodyFlag(body, QStringLiteral("winapp")))
+    {
+        args << QStringLiteral("--winapp");
+    }
+    const QString aumid = bodyValue(body, QStringLiteral("aumid"));
+    if (!aumid.isEmpty())
+    {
+        args << QStringLiteral("--aumid") << aumid;
+    }
+}
+
+QString optionalPolicyField(const QJsonObject &body, const QString &key)
+{
+    return body.contains(key) ? bodyValue(body, key) : QString();
+}
+
 // Parse one "PID=1;SESSION=0;ALIVE=1;...;PATH_B64=...;RESTART_ARGS_B64=..." line
 // into the same JSON shape pgs_bless --json produces, so the browser frontend
 // does not change when the web backend switches from QProcess to direct TCP.
@@ -50,6 +98,7 @@ QJsonObject parseGuardKvLine(const QString &line)
     QJsonObject obj;
     std::string pathB64;
     std::string argsB64;
+    std::string aumidB64;
     const QStringList parts = line.split(QLatin1Char(';'));
     for (const QString &part : parts)
     {
@@ -68,6 +117,11 @@ QJsonObject parseGuardKvLine(const QString &line)
         {
             argsB64 = val.toStdString();
         }
+        else if (key == QLatin1String("aumid_b64"))
+        {
+            aumidB64 = val.toStdString();
+            obj.insert(key, val);
+        }
         else
         {
             obj.insert(key, val);
@@ -75,6 +129,7 @@ QJsonObject parseGuardKvLine(const QString &line)
     }
     obj.insert(QStringLiteral("path"), QString::fromStdString(ProcessGuard::client::base64Decode(pathB64)));
     obj.insert(QStringLiteral("restart_args"), QString::fromStdString(ProcessGuard::client::base64Decode(argsB64)));
+    obj.insert(QStringLiteral("aumid"), QString::fromStdString(ProcessGuard::client::base64Decode(aumidB64)));
     return obj;
 }
 
@@ -451,11 +506,13 @@ table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px 12p
 <div class="layout">
 <div class="grid" style="gap:16px">
 <section class="panel"><h2>Overview</h2><div class="cards"><div class="card"><b id="metric-guards">0</b>Active Guards</div><div class="card"><b id="metric-service">unknown</b>Service</div><div class="card"><b id="metric-ping">unknown</b>PGS Ping</div></div><div class="actions"><button onclick="refreshAll()">Refresh All</button><button class="secondary" onclick="pingPgs()">Ping</button><button class="secondary" onclick="serviceStatus()">Service Status</button></div></section>
-<section class="panel"><h2>Guard Table</h2><div class="hint">This table shows currently active guards. It refreshes every 2 seconds.</div><div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>PID</th><th>Path</th><th>Args</th><th>Restarts</th><th>Max</th><th>Alive</th><th>Session</th><th>Hash</th></tr></thead><tbody id="guard-body"></tbody></table></div></section>
-<section class="panel"><h2>Launch And Protect</h2><div class="grid grid2"><label>Path<input id="start-path" placeholder="C:/apps/worker.exe"></label><label>Command<input id="start-command" placeholder="&quot;C:/apps/worker.exe&quot; --safe"></label><label>Start Args<input id="start-args" placeholder="--mode worker"></label><label>Restart Args<input id="start-restart-args" placeholder="optional"></label><label>Max Restarts<input id="start-max" value="3"></label></div><div class="actions"><button onclick="blessStart()">Start + Bless</button></div></section>
+<section class="panel"><h2>Guard Table</h2><div class="hint">This table shows currently active guards. It refreshes every 2 seconds.</div><div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>PID</th><th>Path</th><th>Args</th><th>Restarts</th><th>Max</th><th>Alive</th><th>Session</th><th>Hash</th><th>App</th><th>AUMID</th><th>Window</th><th>Delay</th><th>Backoff</th><th>Hang</th><th>Kill</th></tr></thead><tbody id="guard-body"></tbody></table></div></section>
+<section class="panel"><h2>Launch And Protect</h2><div class="grid grid2"><label>Path<input id="start-path" placeholder="C:/apps/worker.exe"></label><label>Command<input id="start-command" placeholder="&quot;C:/apps/worker.exe&quot; --safe"></label><label>Start Args<input id="start-args" placeholder="--mode worker"></label><label>Restart Args<input id="start-restart-args" placeholder="optional"></label><label>Max Restarts<input id="start-max" value="3"></label><label>Restart Window<input id="start-window" placeholder="0"></label><label>Restart Delay<input id="start-delay" placeholder="0"></label><label>Hang Timeout<input id="start-hang" placeholder="0"></label><label>AUMID<input id="start-aumid" placeholder="PackageFamilyName!App"></label><label><input id="start-backoff" type="checkbox"> Restart Backoff</label><label><input id="start-kill" type="checkbox"> Kill On Exit</label><label><input id="start-winapp" type="checkbox"> WindowsApps</label></div><div class="actions"><button onclick="blessStart()">Start + Bless</button></div></section>
 </div>
 <div class="grid" style="gap:16px">
-<section class="panel"><h2>Guard Actions</h2><div class="grid grid2"><label>PID<input id="guard-pid" placeholder="1234"></label><label>Path For Unbless-Path<input id="guard-path" placeholder="optional"></label><label>Max Restarts<input id="guard-max" value="3"></label><label>Restart Args<input id="guard-restart-args" placeholder="optional"></label></div><div class="actions"><button onclick="blessPid()">Bless PID</button><button class="secondary" onclick="setPolicy()">Set Policy</button><button class="secondary" onclick="intentionalExit()">Intentional</button><button class="warn" onclick="unblessGuard()">Unbless</button></div></section>
+<section class="panel"><h2>Guard Actions</h2><div class="grid grid2"><label>PID<input id="guard-pid" placeholder="1234"></label><label>Path For Unbless-Path<input id="guard-path" placeholder="optional"></label><label>Max Restarts<input id="guard-max" value="3"></label><label>Restart Args<input id="guard-restart-args" placeholder="optional"></label><label>Restart Window<input id="guard-window" placeholder="0"></label><label>Restart Delay<input id="guard-delay" placeholder="0"></label><label>Hang Timeout<input id="guard-hang" placeholder="0"></label><label>AUMID<input id="guard-aumid" placeholder="PackageFamilyName!App"></label><label><input id="guard-backoff" type="checkbox"> Restart Backoff</label><label><input id="guard-kill" type="checkbox"> Kill On Exit</label><label><input id="guard-winapp" type="checkbox"> WindowsApps</label></div><div class="actions"><button onclick="blessPid()">Bless PID</button><button class="secondary" onclick="setPolicy()">Set Policy</button><button class="secondary" onclick="intentionalExit()">Intentional</button><button class="warn" onclick="unblessGuard()">Unbless</button></div></section>
+<section class="panel"><h2>Scheduler</h2><div class="grid grid2"><label>Type<input id="sched-type" value="interval"></label><label>Expression<input id="sched-expr" placeholder="300"></label><label>Count<input id="sched-count" placeholder="optional"></label><label>Action<input id="sched-action" placeholder="set-policy 1234|no"></label><label>ID<input id="sched-id" placeholder="schedule id"></label></div><div class="actions"><button onclick="scheduleAdd()">Add</button><button class="secondary" onclick="scheduleList()">List</button><button class="secondary" onclick="scheduleToggle('enable')">Enable</button><button class="secondary" onclick="scheduleToggle('disable')">Disable</button><button class="warn" onclick="scheduleRemove()">Remove</button></div></section>
+<section class="panel"><h2>Modules</h2><div class="grid grid2"><label>Name<input id="module-name" placeholder="health"></label><label>Request<input id="module-request" placeholder="op=summary"></label></div><div class="actions"><button class="secondary" onclick="moduleList()">List</button><button onclick="moduleCall()">Call</button></div></section>
 <section class="panel"><h2>Service</h2><div class="actions"><button class="secondary" onclick="serviceAction('install')">Install</button><button class="secondary" onclick="serviceAction('start')">Start</button><button class="secondary" onclick="serviceAction('stop')">Stop</button><button class="secondary" onclick="serviceAction('status')">Status</button><button class="warn" onclick="serviceAction('uninstall')">Uninstall</button></div></section>
 <section class="panel"><h2>Token</h2><div class="grid grid2"><label>Old Token<input id="token-old" type="password" autocomplete="off" placeholder="optional"></label><label>New Token<input id="token-new" type="password" autocomplete="off" placeholder="new token"></label></div><div class="actions"><button onclick="updateToken()">Update Token</button></div></section>
 <section class="panel"><h2>Audit Timeline</h2><div class="actions"><button class="secondary" onclick="refreshAudit()">Refresh Audit</button></div><div class="timeline" id="audit-list"></div></section>
@@ -468,9 +525,9 @@ window.PGS_CSRF_TOKEN="__PGS_CSRF_TOKEN__";
 const logBox=document.getElementById('log-box');const guardBody=document.getElementById('guard-body');const auditList=document.getElementById('audit-list');
 function logLine(m){const t=new Date().toLocaleTimeString();logBox.textContent+=`[${t}] ${m}\n`;logBox.scrollTop=logBox.scrollHeight}
 async function api(path,options={}){const hdrs=Object.assign({'Content-Type':'application/json'},options.headers||{});if(window.PGS_API_TOKEN){hdrs['X-PGS-Token']=window.PGS_API_TOKEN}if(window.PGS_CSRF_TOKEN){hdrs['X-PGS-CSRF']=window.PGS_CSRF_TOKEN}const r=await fetch(path,Object.assign({},options,{headers:hdrs,credentials:'same-origin'}));const text=await r.text();let data={};try{data=text?JSON.parse(text):{}}catch{data={ok:false,message:text}}if(!r.ok||data.ok===false){throw new Error(data.message||text||`request failed: ${r.status}`)}return data}
-function guardPayload(){return{pid:document.getElementById('guard-pid').value.trim(),path:document.getElementById('guard-path').value.trim(),max_restarts:document.getElementById('guard-max').value.trim(),restart_args:document.getElementById('guard-restart-args').value.trim()}}
+function guardPayload(){const p={pid:document.getElementById('guard-pid').value.trim(),path:document.getElementById('guard-path').value.trim(),max_restarts:document.getElementById('guard-max').value.trim(),restart_args:document.getElementById('guard-restart-args').value.trim(),restart_window:document.getElementById('guard-window').value.trim(),restart_delay:document.getElementById('guard-delay').value.trim(),hang_timeout:document.getElementById('guard-hang').value.trim()};if(document.getElementById('guard-backoff').checked)p.restart_backoff='1';if(document.getElementById('guard-kill').checked)p.kill_on_exit='1';if(document.getElementById('guard-winapp').checked)p.winapp='1';const a=document.getElementById('guard-aumid').value.trim();if(a)p.aumid=a;return p}
 function appendCell(row,value){const cell=document.createElement('td');cell.textContent=value==null?'':String(value);row.appendChild(cell)}
-function renderGuards(items){const rows=[];for(const i of items){const row=document.createElement('tr');appendCell(row,i.pid);appendCell(row,i.path);appendCell(row,i.restart_args);appendCell(row,i.restart_count||'0');appendCell(row,i.max_restarts);appendCell(row,i.alive);appendCell(row,i.session);appendCell(row,i.hash);rows.push(row)}guardBody.replaceChildren(...rows)}
+function renderGuards(items){const rows=[];for(const i of items){const row=document.createElement('tr');appendCell(row,i.pid);appendCell(row,i.path);appendCell(row,i.restart_args);appendCell(row,i.restart_count||'0');appendCell(row,i.max_restarts);appendCell(row,i.alive);appendCell(row,i.session);appendCell(row,i.hash);appendCell(row,i.app_kind);appendCell(row,i.aumid);appendCell(row,i.restart_window);appendCell(row,i.restart_delay);appendCell(row,i.backoff);appendCell(row,i.hang_timeout);appendCell(row,i.kill_on_exit);rows.push(row)}guardBody.replaceChildren(...rows)}
 function renderAudit(events,enabled){if(!enabled){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:'Audit log is not configured for this server.'}));return}if(!events.length){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:'No audit events yet.'}));return}const nodes=[];for(const e of events.slice().reverse()){const item=document.createElement('div');item.className='event';const time=document.createElement('div');time.className='time';time.textContent=e.time||'';const action=document.createElement('div');action.className='action';action.textContent=e.action||e.raw||'';const meta=document.createElement('div');meta.className='meta';meta.textContent=`user ${e.user||'-'} from ${e.from||'-'}`;item.append(time,action,meta);nodes.push(item)}auditList.replaceChildren(...nodes)}
 async function refreshAudit(){try{const d=await api('/api/audit?limit=80',{headers:{'Content-Type':'application/json'}});renderAudit(Array.isArray(d.events)?d.events:[],d.enabled!==false)}catch(e){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:`audit unavailable: ${e.message}`}))}}
 async function refreshAll(){await Promise.allSettled([pingPgs(),serviceStatus(),refreshGuards(),refreshAudit()])}
@@ -478,12 +535,18 @@ async function pingPgs(){try{const d=await api('/api/ping');document.getElementB
 async function serviceStatus(){try{const d=await api('/api/service/status');document.getElementById('metric-service').textContent=d.state||'unknown';logLine(`service status: ${d.state||d.message}`)}catch(e){document.getElementById('metric-service').textContent='error';logLine(`service status failed: ${e.message}`)}}
 async function refreshGuards(){try{const d=await api('/api/guards');const items=Array.isArray(d.guards)?d.guards:[];document.getElementById('metric-guards').textContent=String(items.length);renderGuards(items)}catch(e){logLine(`guard refresh failed: ${e.message}`)}}
 async function blessPid(){try{const d=await api('/api/bless',{method:'POST',body:JSON.stringify(guardPayload())});logLine(d.message||'bless ok');refreshGuards()}catch(e){logLine(`bless failed: ${e.message}`)}}
-async function blessStart(){const body={path:document.getElementById('start-path').value.trim(),command:document.getElementById('start-command').value.trim(),start_args:document.getElementById('start-args').value.trim(),restart_args:document.getElementById('start-restart-args').value.trim(),max_restarts:document.getElementById('start-max').value.trim()};try{const d=await api('/api/bless-start',{method:'POST',body:JSON.stringify(body)});logLine(d.message||'bless-start ok');refreshGuards()}catch(e){logLine(`bless-start failed: ${e.message}`)}}
+async function blessStart(){const body={path:document.getElementById('start-path').value.trim(),command:document.getElementById('start-command').value.trim(),start_args:document.getElementById('start-args').value.trim(),restart_args:document.getElementById('start-restart-args').value.trim(),max_restarts:document.getElementById('start-max').value.trim(),restart_window:document.getElementById('start-window').value.trim(),restart_delay:document.getElementById('start-delay').value.trim(),hang_timeout:document.getElementById('start-hang').value.trim()};if(document.getElementById('start-backoff').checked)body.restart_backoff='1';if(document.getElementById('start-kill').checked)body.kill_on_exit='1';if(document.getElementById('start-winapp').checked)body.winapp='1';const a=document.getElementById('start-aumid').value.trim();if(a)body.aumid=a;try{const d=await api('/api/bless-start',{method:'POST',body:JSON.stringify(body)});logLine(d.message||'bless-start ok');refreshGuards()}catch(e){logLine(`bless-start failed: ${e.message}`)}}
 async function setPolicy(){try{const d=await api('/api/policy',{method:'POST',body:JSON.stringify(guardPayload())});logLine(d.message||'policy updated');refreshGuards()}catch(e){logLine(`policy failed: ${e.message}`)}}
 async function unblessGuard(){try{const d=await api('/api/unbless',{method:'POST',body:JSON.stringify(guardPayload())});logLine(d.message||'unbless ok');refreshGuards()}catch(e){logLine(`unbless failed: ${e.message}`)}}
 async function intentionalExit(){try{const d=await api('/api/intentional',{method:'POST',body:JSON.stringify(guardPayload())});logLine(d.message||'intentional marked');refreshGuards()}catch(e){logLine(`intentional failed: ${e.message}`)}}
 async function updateToken(){const body={old_token:document.getElementById('token-old').value.trim(),new_token:document.getElementById('token-new').value.trim()};try{const d=await api('/api/token',{method:'POST',body:JSON.stringify(body)});logLine(d.message||'token updated')}catch(e){logLine(`token update failed: ${e.message}`)}}
 async function serviceAction(action){try{const d=await api(`/api/service/${action}`,{method:action==='status'?'GET':'POST'});logLine(d.message||`${action} ok`);serviceStatus()}catch(e){logLine(`service ${action} failed: ${e.message}`)}}
+async function moduleList(){try{const d=await api('/api/modules');logLine(d.stdout||d.message||'modules listed')}catch(e){logLine(`module list failed: ${e.message}`)}}
+async function moduleCall(){const body={name:document.getElementById('module-name').value.trim(),request:document.getElementById('module-request').value.trim()};try{const d=await api('/api/module/call',{method:'POST',body:JSON.stringify(body)});logLine(d.stdout||d.message||'module call ok')}catch(e){logLine(`module call failed: ${e.message}`)}}
+async function scheduleList(){try{const d=await api('/api/schedule');logLine(d.stdout||d.message||'schedule listed')}catch(e){logLine(`schedule list failed: ${e.message}`)}}
+async function scheduleAdd(){const body={type:document.getElementById('sched-type').value.trim(),expr:document.getElementById('sched-expr').value.trim(),count:document.getElementById('sched-count').value.trim(),action:document.getElementById('sched-action').value.trim()};try{const d=await api('/api/schedule',{method:'POST',body:JSON.stringify(body)});logLine(d.stdout||d.message||'schedule added')}catch(e){logLine(`schedule add failed: ${e.message}`)}}
+async function scheduleToggle(action){const id=document.getElementById('sched-id').value.trim();try{const d=await api(`/api/schedule/${action}`,{method:'POST',body:JSON.stringify({id})});logLine(d.stdout||d.message||`schedule ${action} ok`)}catch(e){logLine(`schedule ${action} failed: ${e.message}`)}}
+async function scheduleRemove(){const id=document.getElementById('sched-id').value.trim();try{const d=await api('/api/schedule/remove',{method:'POST',body:JSON.stringify({id})});logLine(d.stdout||d.message||'schedule removed')}catch(e){logLine(`schedule remove failed: ${e.message}`)}}
 setInterval(refreshGuards,2000);setInterval(refreshAudit,5000);refreshAll();
 </script>
 </body></html>
@@ -504,7 +567,8 @@ int WebServer::roleRequired(const QString &route)
         return static_cast<int>(Role::Admin);
     // operator: guard mutations
     if (route.startsWith("/api/bless") || route == "/api/policy" ||
-        route == "/api/unbless" || route == "/api/intentional")
+        route == "/api/unbless" || route == "/api/intentional" ||
+        route.startsWith("/api/module") || route.startsWith("/api/schedule"))
         return static_cast<int>(Role::Operator);
     // everything else (health/ping/guards/guard/service/status/cluster) = viewer
     return static_cast<int>(Role::Viewer);
@@ -728,6 +792,41 @@ bool WebServer::start()
             {
                 if (!authorizeApi(request, "/api/audit")) return jsonUnauthorized();
                 return handleAudit(request);
+            }
+            if (path == QStringLiteral("/api/modules") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/modules")) return jsonUnauthorized();
+                return handleModules();
+            }
+            if (path == QStringLiteral("/api/module/call") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/module/call")) return jsonUnauthorized();
+                return handleModuleCall(request);
+            }
+            if (path == QStringLiteral("/api/schedule") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/schedule")) return jsonUnauthorized();
+                return handleScheduleList();
+            }
+            if (path == QStringLiteral("/api/schedule") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/schedule")) return jsonUnauthorized();
+                return handleScheduleAdd(request);
+            }
+            if (path == QStringLiteral("/api/schedule/remove") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/schedule/remove")) return jsonUnauthorized();
+                return handleScheduleControl(request, QStringLiteral("remove"));
+            }
+            if (path == QStringLiteral("/api/schedule/enable") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/schedule/enable")) return jsonUnauthorized();
+                return handleScheduleControl(request, QStringLiteral("enable"));
+            }
+            if (path == QStringLiteral("/api/schedule/disable") && request.method() == Method::Post)
+            {
+                if (!authorizeApi(request, "/api/schedule/disable")) return jsonUnauthorized();
+                return handleScheduleControl(request, QStringLiteral("disable"));
             }
             if (path == QStringLiteral("/api/service/status") && request.method() == Method::Get)
             {
@@ -1073,6 +1172,7 @@ QHttpServerResponse WebServer::handleBless(const PgsHttp::Request &request)
     {
         args << "--restart-args" << restartArgs;
     }
+    appendAdvancedGuardArgs(args, body);
     args << blessBaseArguments();
     return jsonCommandResult(runTool(resolvedBlessToolPath(), args), "bless completed");
 }
@@ -1112,6 +1212,7 @@ QHttpServerResponse WebServer::handleBlessStart(const PgsHttp::Request &request)
     {
         args << "--restart-args" << restartArgs;
     }
+    appendAdvancedGuardArgs(args, body);
     args << blessBaseArguments();
     return jsonCommandResult(runTool(resolvedBlessToolPath(), args), "bless-start completed");
 }
@@ -1125,10 +1226,30 @@ QHttpServerResponse WebServer::handlePolicy(const PgsHttp::Request &request)
     {
         return jsonError("pid and max_restarts are required");
     }
-    // Wire format: "set-policy <pid>|<maxRestarts>|<base64(restartArgs)>"
+    // Wire format:
+    //   set-policy <pid>|<max>|<argsB64>[|restartWindow|restartDelay|backoff|hang|kill|appKind|aumidB64]
     const QString restartArgs = bodyValue(body, "restart_args");
     const std::string argsB64 = ProcessGuard::client::base64Encode(restartArgs.toStdString());
-    const QString wire = QStringLiteral("set-policy %1|%2|%3").arg(pid, maxRestarts, QString::fromStdString(argsB64));
+    QString wire = QStringLiteral("set-policy %1|%2|%3").arg(pid, maxRestarts, QString::fromStdString(argsB64));
+    const QString restartWindow = optionalPolicyField(body, QStringLiteral("restart_window"));
+    const QString restartDelay = optionalPolicyField(body, QStringLiteral("restart_delay"));
+    const QString backoff = body.contains(QStringLiteral("restart_backoff")) ? (bodyFlag(body, QStringLiteral("restart_backoff")) ? QStringLiteral("1") : QStringLiteral("0")) : QString();
+    const QString hangTimeout = optionalPolicyField(body, QStringLiteral("hang_timeout"));
+    const QString killOnExit = body.contains(QStringLiteral("kill_on_exit")) ? (bodyFlag(body, QStringLiteral("kill_on_exit")) ? QStringLiteral("1") : QStringLiteral("0")) : QString();
+    const QString appKind = bodyFlag(body, QStringLiteral("winapp")) ? QStringLiteral("winapp") : QString();
+    const QString aumid = bodyValue(body, QStringLiteral("aumid"));
+    if (!restartWindow.isEmpty() || !restartDelay.isEmpty() || !backoff.isEmpty() ||
+        !hangTimeout.isEmpty() || !killOnExit.isEmpty() || !appKind.isEmpty() || !aumid.isEmpty())
+    {
+        wire += QStringLiteral("|%1|%2|%3|%4|%5|%6|%7")
+                    .arg(restartWindow,
+                         restartDelay,
+                         backoff,
+                         hangTimeout,
+                         killOnExit,
+                         appKind,
+                         QString::fromStdString(ProcessGuard::client::base64Encode(aumid.toStdString())));
+    }
     return jsonCommandResult(runPgsDirect(wire), QStringLiteral("policy updated"));
 }
 
@@ -1187,6 +1308,70 @@ QHttpServerResponse WebServer::handleTokenUpdate(const PgsHttp::Request &request
 
     m_options.pgsToken = newToken;
     return jsonCommandResult(result, QStringLiteral("token updated"));
+}
+
+QHttpServerResponse WebServer::handleModules()
+{
+    return jsonCommandResult(runPgsDirect(QStringLiteral("module list")), QStringLiteral("modules listed"));
+}
+
+QHttpServerResponse WebServer::handleModuleCall(const PgsHttp::Request &request)
+{
+    const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
+    const QString name = bodyValue(body, QStringLiteral("name"));
+    const QString moduleRequest = bodyValue(body, QStringLiteral("request"));
+    if (name.isEmpty() || moduleRequest.isEmpty())
+    {
+        return jsonError(QStringLiteral("name and request are required"));
+    }
+    if (name.contains(QLatin1Char(' ')) || name.contains(QLatin1Char('\t')))
+    {
+        return jsonError(QStringLiteral("module name must not contain whitespace"));
+    }
+    return jsonCommandResult(runPgsDirect(QStringLiteral("module call %1 %2").arg(name, moduleRequest)),
+                             QStringLiteral("module call completed"));
+}
+
+QHttpServerResponse WebServer::handleScheduleList()
+{
+    return jsonCommandResult(runPgsDirect(QStringLiteral("module call sched op=list")),
+                             QStringLiteral("schedule listed"));
+}
+
+QHttpServerResponse WebServer::handleScheduleAdd(const PgsHttp::Request &request)
+{
+    const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
+    const QString type = bodyValue(body, QStringLiteral("type"));
+    const QString expr = bodyValue(body, QStringLiteral("expr"));
+    const QString action = bodyValue(body, QStringLiteral("action"));
+    const QString count = bodyValue(body, QStringLiteral("count"));
+    if (type.isEmpty() || expr.isEmpty() || action.isEmpty())
+    {
+        return jsonError(QStringLiteral("type, expr, and action are required"));
+    }
+    if (type != QLatin1String("cron") && type != QLatin1String("once") && type != QLatin1String("interval"))
+    {
+        return jsonError(QStringLiteral("type must be cron, once, or interval"));
+    }
+    QString wire = QStringLiteral("module call sched op=add;type=%1;expr=%2;action=%3")
+                       .arg(type, expr, action);
+    if (!count.isEmpty())
+    {
+        wire += QStringLiteral(";count=") + count;
+    }
+    return jsonCommandResult(runPgsDirect(wire), QStringLiteral("schedule added"));
+}
+
+QHttpServerResponse WebServer::handleScheduleControl(const PgsHttp::Request &request, const QString &action)
+{
+    const QJsonObject body = QJsonDocument::fromJson(request.body()).object();
+    const QString id = bodyValue(body, QStringLiteral("id"));
+    if (id.isEmpty())
+    {
+        return jsonError(QStringLiteral("id is required"));
+    }
+    return jsonCommandResult(runPgsDirect(QStringLiteral("module call sched op=%1;id=%2").arg(action, id)),
+                             QStringLiteral("schedule updated"));
 }
 
 QHttpServerResponse WebServer::handleServiceStatus()

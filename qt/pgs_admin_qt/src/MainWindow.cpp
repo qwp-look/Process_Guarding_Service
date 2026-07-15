@@ -308,6 +308,37 @@ void MainWindow::setupUi()
     m_restartArgsEdit = new QLineEdit(targetBox);
     targetLayout->addWidget(m_restartArgsEdit, 6, 1);
 
+    m_labelRestartWindow = new QLabel(targetBox);
+    targetLayout->addWidget(m_labelRestartWindow, 7, 0);
+    m_restartWindowEdit = new QLineEdit(targetBox);
+    m_restartWindowEdit->setPlaceholderText(QStringLiteral("0"));
+    targetLayout->addWidget(m_restartWindowEdit, 7, 1);
+
+    m_labelRestartDelay = new QLabel(targetBox);
+    targetLayout->addWidget(m_labelRestartDelay, 8, 0);
+    m_restartDelayEdit = new QLineEdit(targetBox);
+    m_restartDelayEdit->setPlaceholderText(QStringLiteral("0"));
+    targetLayout->addWidget(m_restartDelayEdit, 8, 1);
+
+    m_labelHangTimeout = new QLabel(targetBox);
+    targetLayout->addWidget(m_labelHangTimeout, 9, 0);
+    m_hangTimeoutEdit = new QLineEdit(targetBox);
+    m_hangTimeoutEdit->setPlaceholderText(QStringLiteral("0"));
+    targetLayout->addWidget(m_hangTimeoutEdit, 9, 1);
+
+    m_labelAumid = new QLabel(targetBox);
+    targetLayout->addWidget(m_labelAumid, 10, 0);
+    m_aumidEdit = new QLineEdit(targetBox);
+    m_aumidEdit->setPlaceholderText(QStringLiteral("PackageFamilyName!App"));
+    targetLayout->addWidget(m_aumidEdit, 10, 1);
+
+    m_restartBackoffCheck = new QCheckBox(targetBox);
+    targetLayout->addWidget(m_restartBackoffCheck, 11, 0);
+    m_killOnExitCheck = new QCheckBox(targetBox);
+    targetLayout->addWidget(m_killOnExitCheck, 11, 1);
+    m_winappCheck = new QCheckBox(targetBox);
+    targetLayout->addWidget(m_winappCheck, 12, 1);
+
     auto *buttonRow1 = new QHBoxLayout();
     m_btnPing = new QPushButton(blessPage);
     m_btnList = new QPushButton(blessPage);
@@ -431,9 +462,10 @@ void MainWindow::setupUi()
     tableButtons->addWidget(m_btnTableClear);
 
     m_guardTable = new QTableWidget(tablePage);
-    m_guardTable->setColumnCount(8);
+    m_guardTable->setColumnCount(15);
     m_guardTable->setHorizontalHeaderLabels(QStringList{
-        "PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified"});
+        "PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified",
+        "App", "AUMID", "Window", "Delay", "Backoff", "Hang", "KillOnExit"});
     m_guardTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_guardTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_guardTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -517,6 +549,7 @@ void MainWindow::setupUi()
         {
             args << "--restart-args" << restartArgs;
         }
+        appendAdvancedGuardArgs(args);
         runBlessCommand(args);
     });
     connect(m_btnBlessStart, &QPushButton::clicked, this, [this]() {
@@ -551,6 +584,7 @@ void MainWindow::setupUi()
         {
             args << "--restart-args" << restartArgs;
         }
+        appendAdvancedGuardArgs(args);
         runBlessCommand(args);
     });
     connect(m_btnUnbless, &QPushButton::clicked, this, [this]() {
@@ -584,6 +618,7 @@ void MainWindow::setupUi()
         {
             args << "--restart-args" << restartArgs;
         }
+        appendAdvancedGuardArgs(args);
         runBlessCommand(args);
     });
     connect(m_btnIntentional, &QPushButton::clicked, this, [this]() {
@@ -728,6 +763,42 @@ QString MainWindow::pidArg() const
     return m_pidEdit->text().trimmed();
 }
 
+void MainWindow::appendAdvancedGuardArgs(QStringList &args) const
+{
+    const QString restartWindow = m_restartWindowEdit ? m_restartWindowEdit->text().trimmed() : QString();
+    if (!restartWindow.isEmpty())
+    {
+        args << "--restart-window" << restartWindow;
+    }
+    const QString restartDelay = m_restartDelayEdit ? m_restartDelayEdit->text().trimmed() : QString();
+    if (!restartDelay.isEmpty())
+    {
+        args << "--restart-delay" << restartDelay;
+    }
+    if (m_restartBackoffCheck && m_restartBackoffCheck->isChecked())
+    {
+        args << "--restart-backoff";
+    }
+    const QString hangTimeout = m_hangTimeoutEdit ? m_hangTimeoutEdit->text().trimmed() : QString();
+    if (!hangTimeout.isEmpty())
+    {
+        args << "--hang-timeout" << hangTimeout;
+    }
+    if (m_killOnExitCheck && m_killOnExitCheck->isChecked())
+    {
+        args << "--kill-on-exit";
+    }
+    if (m_winappCheck && m_winappCheck->isChecked())
+    {
+        const QString aumid = m_aumidEdit ? m_aumidEdit->text().trimmed() : QString();
+        args << "--winapp";
+        if (!aumid.isEmpty())
+        {
+            args << "--aumid" << aumid;
+        }
+    }
+}
+
 bool MainWindow::isChineseUi() const
 {
     return m_languageCombo && m_languageCombo->currentIndex() == 0;
@@ -855,6 +926,13 @@ void MainWindow::applyLanguage()
     m_labelLaunchCommand->setText(trUi("launch command", "自定义启动命令"));
     m_labelMaxRestarts->setText(trUi("max restarts", "最大重启次数"));
     m_labelRestartArgs->setText(trUi("restart args", "重启参数"));
+    m_labelRestartWindow->setText(trUi("restart window (s)", "重启窗口（秒）"));
+    m_labelRestartDelay->setText(trUi("restart delay (ms)", "重启延迟（ms）"));
+    m_labelHangTimeout->setText(trUi("hang timeout (ms)", "假活超时（ms）"));
+    m_labelAumid->setText(trUi("AUMID", "AUMID"));
+    m_restartBackoffCheck->setText(trUi("restart backoff", "指数退避"));
+    m_killOnExitCheck->setText(trUi("kill on exit", "退出连杀"));
+    m_winappCheck->setText(trUi("WindowsApps / AUMID", "WindowsApps / AUMID"));
     m_labelServicePath->setText(trUi("pgs_service path", "pgs_service 路径"));
     m_labelServiceToken->setText(trUi("run token", "run token"));
     m_labelTableToolPath->setText(trUi("pgs_bless path", "pgs_bless 路径"));
@@ -890,8 +968,8 @@ void MainWindow::applyLanguage()
     m_btnTableRefresh->setText(trUi("Refresh", "刷新"));
     m_btnTableClear->setText(trUi("Clear Table", "清空表格"));
     m_guardTable->setHorizontalHeaderLabels(isChineseUi()
-                                                ? QStringList{"PID", "路径", "哈希", "已重启", "最大重启", "存活", "会话", "哈希校验"}
-                                                : QStringList{"PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified"});
+                                                ? QStringList{"PID", "路径", "哈希", "已重启", "最大重启", "存活", "会话", "哈希校验", "应用", "AUMID", "窗口", "延迟", "退避", "假活", "退出连杀"}
+                                                : QStringList{"PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified", "App", "AUMID", "Window", "Delay", "Backoff", "Hang", "KillOnExit"});
     QSettings settings("OpenStarlight", "PGSAdminQt");
     settings.setValue("language", isChineseUi() ? 0 : 1);
 }
@@ -1243,6 +1321,13 @@ void MainWindow::populateGuardTableFromJson(const QString &jsonText, const QStri
         if (hashText != "1" && hashText.compare("true", Qt::CaseInsensitive) != 0)
             hashColor = QColor(0xd9, 0x6a, 0x10); // orange
         setCell(7, hashText, hashColor);
+        setCell(8, obj.value("app_kind").toString());
+        setCell(9, obj.value("aumid").toString());
+        setCell(10, obj.value("restart_window").toString());
+        setCell(11, obj.value("restart_delay").toString());
+        setCell(12, obj.value("backoff").toString());
+        setCell(13, obj.value("hang_timeout").toString());
+        setCell(14, obj.value("kill_on_exit").toString());
     }
     if (!m_guardTableColumnsSized || !m_lastTableRefreshWasAuto)
     {

@@ -8,7 +8,9 @@ param(
     [int]$ClusterPort = 55434,
     [string]$Token = 'pgs-acceptance-token',
     [string]$InstallDir = '',
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [switch]$EnablePpl,
+    [switch]$RunWinApp
 )
 
 $ErrorActionPreference = 'Stop'
@@ -143,7 +145,8 @@ function Start-PgsConsole {
         [string]$Token,
         [string]$ProgramDataRoot,
         [string]$LogPrefix,
-        [switch]$WithoutTokenEnv
+        [switch]$WithoutTokenEnv,
+        [switch]$EnablePpl
     )
 
     New-Item -ItemType Directory -Force -Path $ProgramDataRoot | Out-Null
@@ -162,9 +165,14 @@ function Start-PgsConsole {
         else {
             $env:PGS_SERVICE_TOKEN = $Token
         }
-        Remove-Item Env:PGS_ENABLE_PPL -ErrorAction SilentlyContinue
+        if ($EnablePpl) {
+            $env:PGS_ENABLE_PPL = '1'
+        }
+        else {
+            Remove-Item Env:PGS_ENABLE_PPL -ErrorAction SilentlyContinue
+        }
         $proc = Start-Process -FilePath (Join-Path $ReleaseDir 'pgs_service.exe') `
-            -ArgumentList @('run', '--port', "$Port") `
+            -ArgumentList (@('run', '--port', "$Port") + ($(if ($EnablePpl) { @('--enable-ppl') } else { @() }))) `
             -WorkingDirectory $ReleaseDir `
             -WindowStyle Hidden `
             -PassThru `
@@ -392,6 +400,14 @@ try {
     $pplLoad = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'load', '--path', $PplDll) -AllowError
     Assert-True ($pplLoad.Code -ne 0 -and $pplLoad.Text -match 'PGS_ENABLE_PPL|enable-ppl') "PPL gate did not reject default load: $($pplLoad.Text)"
 
+    if ($EnablePpl) {
+        Write-Step 'PPL opt-in runtime smoke'
+        Stop-ProcessSafe $portableProc
+        $portableProc = Start-PgsConsole -ReleaseDir $PortableRelease -Port $PortablePort -Token $Token -ProgramDataRoot $ProgramDataPortable -LogPrefix (Join-Path $LogsRoot 'portable-ppl-enabled') -EnablePpl
+        $pplOptInLoad = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'load', '--path', $PplDll) -AllowError
+        Assert-True (($pplOptInLoad.Code -eq 0 -and $pplOptInLoad.Text -match '^OK loaded') -or $pplOptInLoad.Text -match 'module already loaded') "PPL opt-in load failed: $($pplOptInLoad.Text)"
+    }
+
     foreach ($dll in @($SchedDll, $HealthDll, $ProfileDll, $ReportDll)) {
         Ensure-ModuleLoaded -BlessExe $BlessExe -Port $PortablePort -Token $Token -Path $dll
     }
@@ -517,6 +533,12 @@ try {
     Assert-True ($null -ne $clusterSummary.nodes) 'cluster summary missing nodes field'
     $clusterNodes = Invoke-JsonWeb -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes" -Headers $clusterHeaders
     Assert-True ($null -ne $clusterNodes.nodes) 'cluster nodes missing nodes field'
+    $nodeBody = @{ name = 'self'; url = "https://127.0.0.1:$WebPort"; credentials = 'admin:acceptance' } | ConvertTo-Json -Compress
+    $nodeAdd = Invoke-WebRequest -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes" -Headers $clusterHeaders -Method Post -Body $nodeBody -ContentType 'application/json' -TimeoutSec 3 -UseBasicParsing
+    Assert-True ($nodeAdd.StatusCode -ge 200 -and $nodeAdd.StatusCode -lt 300) 'cluster node add failed'
+    $nodeRemoveBody = @{ name = 'self' } | ConvertTo-Json -Compress
+    $nodeRemove = Invoke-WebRequest -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes" -Headers $clusterHeaders -Method Delete -Body $nodeRemoveBody -ContentType 'application/json' -TimeoutSec 3 -UseBasicParsing
+    Assert-True ($nodeRemove.StatusCode -ge 200 -and $nodeRemove.StatusCode -lt 300) 'cluster node remove failed'
     Write-Host '[acceptance] web and cluster API ok'
 
     Write-Step 'Qt GUI launch smoke'
@@ -575,9 +597,13 @@ try {
             (Join-Path $InstallDir 'pgs_admin_qt.exe'),
             (Join-Path $InstallDir 'pgs_admin_web.exe'),
             (Join-Path $InstallDir 'pgs_cluster_web.exe'),
+            (Join-Path $InstallDir 'modules\modules.allow'),
+            (Join-Path $InstallDir 'modules\sched\pgs_sched_module.dll'),
             (Join-Path $InstallDir 'modules\health\pgs_health_module.dll'),
             (Join-Path $InstallDir 'modules\profile\pgs_profile_module.dll'),
-            (Join-Path $InstallDir 'modules\report\pgs_report_module.dll')
+            (Join-Path $InstallDir 'modules\report\pgs_report_module.dll'),
+            (Join-Path $InstallDir 'modules\ppl\pgs_ppl_module.dll'),
+            (Join-Path $InstallDir 'modules\ppl\Sirius.sys')
         )) {
             Assert-Path $path
         }
@@ -600,6 +626,12 @@ try {
         Assert-True (($LASTEXITCODE -ne 0) -or (($sc | Out-String) -match 'does not exist|1060')) 'PGS service still exists after uninstall'
         Assert-True (-not (Test-Path -LiteralPath $InstallDir)) "install dir still exists after uninstall: $InstallDir"
         Write-Host '[acceptance] installer install/uninstall ok'
+    }
+
+    if ($RunWinApp) {
+        Write-Step 'WindowsApps verification helper'
+        Invoke-Logged -FilePath 'pwsh' -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path (Get-Location) 'tools\verify_winapp.ps1'), '-Here', $PortableRelease) | Out-Null
+        Write-Host '[acceptance] WindowsApps helper ok'
     }
 
     Write-Step 'Final cleanup'

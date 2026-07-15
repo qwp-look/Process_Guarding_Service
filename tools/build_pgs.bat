@@ -10,7 +10,8 @@ if not defined CXX set "CXX=%MINGW_BIN%\g++.exe"
 set "COMPILER=%CXX%"
 set "PATH=%MINGW_BIN%;%PATH%"
 set "INCLUDE_DIR=include"
-set "BUILD_DIR=build"
+if not defined PGS_BUILD_DIR set "PGS_BUILD_DIR=build"
+set "BUILD_DIR=%PGS_BUILD_DIR%"
 set "CXXFLAGS=-std=c++17 -Wall -Wextra -O2 -DNTDDI_VERSION=0x06020000"
 
 if not exist "%COMPILER%" (

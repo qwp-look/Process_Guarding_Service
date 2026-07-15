@@ -8,6 +8,7 @@ MINGW_ROOT="${MINGW_ROOT:-/mingw64}"
 export PATH="$MINGW_ROOT/bin:/usr/bin:$PATH"
 GXX="${GXX:-$MINGW_ROOT/bin/g++.exe}"
 CMAKE="${CMAKE:-$MINGW_ROOT/bin/cmake.exe}"
+BUILD_DIR="${PGS_BUILD_DIR:-build}"
 
 # This script is intentionally broader than a plain compile:
 # - verifies critical source files are present
@@ -63,13 +64,13 @@ fi
 
 echo
 echo "[Qt] Configuring..."
-rm -rf build/pgs_admin_qt
-"$CMAKE" -S qt/pgs_admin_qt -B build/pgs_admin_qt -G "MinGW Makefiles" \
+rm -rf "$BUILD_DIR/pgs_admin_qt"
+"$CMAKE" -S qt/pgs_admin_qt -B "$BUILD_DIR/pgs_admin_qt" -G "MinGW Makefiles" \
   -DCMAKE_PREFIX_PATH="$MINGW_ROOT" \
   -DCMAKE_CXX_COMPILER="$GXX"
 
 echo "[Qt] Building..."
-"$CMAKE" --build build/pgs_admin_qt -j "${PGS_BUILD_JOBS:-4}"
+"$CMAKE" --build "$BUILD_DIR/pgs_admin_qt" -j "${PGS_BUILD_JOBS:-4}"
 
 echo
 echo "[Web] Building admin + cluster consoles..."

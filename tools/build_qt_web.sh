@@ -9,11 +9,12 @@ MINGW_ROOT="${MINGW_ROOT:-/mingw64}"
 export PATH="$MINGW_ROOT/bin:/usr/bin:$PATH"
 CMAKE="${CMAKE:-$MINGW_ROOT/bin/cmake.exe}"
 GXX="${GXX:-$MINGW_ROOT/bin/g++.exe}"
+BUILD_DIR="${PGS_BUILD_DIR:-build}"
 
 build_one() {
   local name="$1"
   local source_dir="$2"
-  local build_dir="build/$name"
+  local build_dir="$BUILD_DIR/$name"
 
   echo "[qt-web] configuring $name ..."
   "$CMAKE" -S "$source_dir" -B "$build_dir" -G "MinGW Makefiles" \

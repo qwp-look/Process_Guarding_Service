@@ -5,8 +5,9 @@ chcp 65001 >nul 2>&1
 if not defined MSYS2_ROOT set "MSYS2_ROOT=C:\msys64"
 if not defined MSYS2_BASH set "MSYS2_BASH=%MSYS2_ROOT%\usr\bin\bash.exe"
 set "REPO_ROOT=%~dp0.."
-set "PGS_TMP=%REPO_ROOT%\build\tmp"
-set "PGS_HOME=%REPO_ROOT%\build\home"
+if not defined PGS_BUILD_DIR set "PGS_BUILD_DIR=build_verify"
+set "PGS_TMP=%REPO_ROOT%\%PGS_BUILD_DIR%\tmp"
+set "PGS_HOME=%REPO_ROOT%\%PGS_BUILD_DIR%\home"
 
 if not exist "%MSYS2_BASH%" (
     echo MSYS2 bash not found: %MSYS2_BASH%

@@ -790,6 +790,13 @@ QHttpServerResponse ClusterServer::handleSummary() const
                     row.insert("max_restarts", guard.value("max_restarts").toString());
                     row.insert("alive", alive);
                     row.insert("session", guard.value("session").toString());
+                    row.insert("app_kind", guard.value("app_kind").toString());
+                    row.insert("aumid", guard.value("aumid").toString());
+                    row.insert("restart_window", guard.value("restart_window").toString());
+                    row.insert("restart_delay", guard.value("restart_delay").toString());
+                    row.insert("backoff", guard.value("backoff").toString());
+                    row.insert("hang_timeout", guard.value("hang_timeout").toString());
+                    row.insert("kill_on_exit", guard.value("kill_on_exit").toString());
                     guardRows.append(row);
                 }
                 if (guardCount == 0)
@@ -1012,7 +1019,7 @@ function renderDetail(){
     table.className='guard-table';
     const head=document.createElement('thead');
     const hr=document.createElement('tr');
-    ['PID','Alive','Restarts','Max','Session','Path'].forEach(h=>{const th=document.createElement('th');th.textContent=h;hr.appendChild(th);});
+    ['PID','Alive','Restarts','Max','Session','App','Window','Delay','Backoff','Hang','Kill','Path'].forEach(h=>{const th=document.createElement('th');th.textContent=h;hr.appendChild(th);});
     head.appendChild(hr);
     table.appendChild(head);
     const body=document.createElement('tbody');
@@ -1025,6 +1032,12 @@ function renderDetail(){
       appendCell(row,g.restart_count);
       appendCell(row,g.max_restarts);
       appendCell(row,g.session);
+      appendCell(row,g.app_kind);
+      appendCell(row,g.restart_window);
+      appendCell(row,g.restart_delay);
+      appendCell(row,g.backoff);
+      appendCell(row,g.hang_timeout);
+      appendCell(row,g.kill_on_exit);
       appendCell(row,g.path);
       body.appendChild(row);
     });

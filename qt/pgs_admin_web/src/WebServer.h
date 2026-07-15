@@ -72,6 +72,11 @@ private:
     QHttpServerResponse handleUnbless(const PgsHttp::Request &request);
     QHttpServerResponse handleIntentional(const PgsHttp::Request &request);
     QHttpServerResponse handleTokenUpdate(const PgsHttp::Request &request);
+    QHttpServerResponse handleModules();
+    QHttpServerResponse handleModuleCall(const PgsHttp::Request &request);
+    QHttpServerResponse handleScheduleList();
+    QHttpServerResponse handleScheduleAdd(const PgsHttp::Request &request);
+    QHttpServerResponse handleScheduleControl(const PgsHttp::Request &request, const QString &action);
     QHttpServerResponse handleServiceStatus();
     QHttpServerResponse handleServiceAction(const QString &action);
     QHttpServerResponse handleAudit(const PgsHttp::Request &request) const;

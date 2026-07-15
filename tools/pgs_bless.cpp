@@ -553,6 +553,7 @@ void printSummaries(const std::vector<std::string> &lines, bool jsonOutput)
 
             const std::string path = base64Decode(get("PATH_B64"));
             const std::string args = base64Decode(get("RESTART_ARGS_B64"));
+            const std::string aumid = base64Decode(get("AUMID_B64"));
             std::cout << "{"
                       << "\"pid\":\"" << jsonEscape(get("PID")) << "\","
                       << "\"session\":\"" << jsonEscape(get("SESSION")) << "\","
@@ -563,7 +564,14 @@ void printSummaries(const std::vector<std::string> &lines, bool jsonOutput)
                       << "\"hash_verified\":\"" << jsonEscape(get("HASH_VERIFIED")) << "\","
                       << "\"hash\":\"" << jsonEscape(get("HASH")) << "\","
                       << "\"path\":\"" << jsonEscape(path) << "\","
-                      << "\"restart_args\":\"" << jsonEscape(args) << "\""
+                      << "\"restart_args\":\"" << jsonEscape(args) << "\","
+                      << "\"app_kind\":\"" << jsonEscape(get("APP_KIND")) << "\","
+                      << "\"aumid\":\"" << jsonEscape(aumid) << "\","
+                      << "\"restart_window\":\"" << jsonEscape(get("RESTART_WINDOW")) << "\","
+                      << "\"restart_delay\":\"" << jsonEscape(get("RESTART_DELAY")) << "\","
+                      << "\"backoff\":\"" << jsonEscape(get("BACKOFF")) << "\","
+                      << "\"hang_timeout\":\"" << jsonEscape(get("HANG_TIMEOUT")) << "\","
+                      << "\"kill_on_exit\":\"" << jsonEscape(get("KILL_ON_EXIT")) << "\""
                       << "}";
         }
         std::cout << "]\n";
@@ -585,9 +593,16 @@ void printSummaries(const std::vector<std::string> &lines, bool jsonOutput)
             << " restarts=" << get("RESTART_COUNT")
             << " hash_verified=" << get("HASH_VERIFIED")
             << " hash=" << get("HASH")
+            << " app=" << get("APP_KIND")
+            << " window=" << get("RESTART_WINDOW")
+            << " delay=" << get("RESTART_DELAY")
+            << " backoff=" << get("BACKOFF")
+            << " hang=" << get("HANG_TIMEOUT")
+            << " kill_on_exit=" << get("KILL_ON_EXIT")
             << "\n"
             << "  path: " << base64Decode(get("PATH_B64")) << "\n"
-            << "  args: " << base64Decode(get("RESTART_ARGS_B64")) << "\n";
+            << "  args: " << base64Decode(get("RESTART_ARGS_B64")) << "\n"
+            << "  aumid: " << base64Decode(get("AUMID_B64")) << "\n";
     }
 }
 
@@ -951,17 +966,19 @@ void showUsage(const char *exe)
 {
     std::cout
         << "Usage:\n"
-        << "  " << exe << " bless --pid <pid> [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX]\n"
-        << "  " << exe << " bless-start --path <exe> [--start-args \"...\"] [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX]\n"
-        << "  " << exe << " bless-start --command \"<exe and args>\" [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX]\n"
+        << "  " << exe << " bless --pid <pid> [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX] [advanced-policy]\n"
+        << "  " << exe << " bless-start --path <exe> [--start-args \"...\"] [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX] [advanced-policy]\n"
+        << "  " << exe << " bless-start --command \"<exe and args>\" [--max-restarts N|no] [--restart-args \"...\"] [--hash auto|none|HEX] [advanced-policy]\n"
         << "  " << exe << " unbless --pid <pid>\n"
         << "  " << exe << " unbless-path --path <exe>\n"
-        << "  " << exe << " policy --pid <pid> --max-restarts N|no [--restart-args \"...\"]\n"
+        << "  " << exe << " policy --pid <pid> --max-restarts N|no [--restart-args \"...\"] [advanced-policy]\n"
         << "  " << exe << " intentional --pid <pid>\n"
         << "  " << exe << " list [--json]\n"
         << "  " << exe << " get --pid <pid> [--json]\n"
         << "  " << exe << " token-set --new-token <token> [--old-token <token>]\n"
         << "  " << exe << " ping\n"
+        << "  " << exe << " version\n"
+        << "  " << exe << " stats\n"
         << "  " << exe << " module list\n"
         << "  " << exe << " module info --path <dll> [--modules-dir <dir>] [--json]\n"
         << "  " << exe << " module trust --path <dll> [--modules-dir <dir>] [--hash auto|none|HEX] [--require-signed]\n"
@@ -971,13 +988,13 @@ void showUsage(const char *exe)
         << "  " << exe << " ppl set --pid <pid> --signer <None|Authenticode|CodeGen|Antimalware|Lsa|Windows|WinTcb|WinSystem>\n"
         << "  " << exe << " ppl get --pid <pid>\n"
         << "  " << exe << " ppl clear --pid <pid>\n"
-        << "  " << exe << " schedule add --cron <m h dom mon dow> --action <wire-command>\n"
-        << "  " << exe << " schedule add --once <YYYY-MM-DDTHH:MM:SS> --action <wire-command>\n"
-        << "  " << exe << " schedule add --interval <seconds> [--count N] --action <wire-command>\n"
-        << "  " << exe << " schedule list\n"
-        << "  " << exe << " schedule remove --id <id>\n"
-        << "  " << exe << " schedule enable --id <id>\n"
-        << "  " << exe << " schedule disable --id <id>\n"
+        << "  " << exe << " schedule|sched add --cron <m h dom mon dow> --action <wire-command>\n"
+        << "  " << exe << " schedule|sched add --once <YYYY-MM-DDTHH:MM:SS> --action <wire-command>\n"
+        << "  " << exe << " schedule|sched add --interval <seconds> [--count N] --action <wire-command>\n"
+        << "  " << exe << " schedule|sched list\n"
+        << "  " << exe << " schedule|sched remove --id <id>\n"
+        << "  " << exe << " schedule|sched enable --id <id>\n"
+        << "  " << exe << " schedule|sched disable --id <id>\n"
         << "  " << exe << " health summary|stats|list|events [--limit N]\n"
         << "  " << exe << " profile set --name <profile> --max-restarts N|no [--restart-args \"...\"]\n"
         << "  " << exe << " profile list|get|remove|apply --name <profile> [--pid <pid>]\n"
@@ -999,6 +1016,16 @@ void showUsage(const char *exe)
         << "  --signer <value>     PPL signer for ppl set\n"
         << "  --modules-dir <dir>  modules root for module info/trust (default: derived from --path)\n"
         << "  --require-signed     module trust writes a signed requirement and verifies it now\n"
+        << "\nAdvanced guard-policy options (bless / bless-start / policy):\n"
+        << "  --restart-window <s> sliding restart-count window, 0 keeps lifetime count\n"
+        << "  --restart-delay <ms> delay before relaunch\n"
+        << "  --restart-backoff    exponential backoff from --restart-delay\n"
+        << "  --no-restart-backoff clear backoff when used with policy\n"
+        << "  --hang-timeout <ms>  GUI hang probe timeout, max 60000\n"
+        << "  --kill-on-exit       close the whole process family when PGS exits\n"
+        << "  --no-kill-on-exit    clear kill-on-exit when used with policy\n"
+        << "  --winapp --aumid <id> mark guard as WindowsApps; AUMID is required\n"
+        << "  --win32              switch an existing policy back to Win32\n"
         << "\nCompatibility:\n"
         << "  " << exe << " <pid>          equivalent to: " << exe << " bless --pid <pid>\n";
 }
@@ -1116,12 +1143,19 @@ int main()
     bool hasEventLimit = false;
     // v3 advanced guard policy (all default to legacy behaviour).
     int restartWindowSec = 0;
+    bool hasRestartWindowSec = false;
     int restartDelayMs = 0;
+    bool hasRestartDelayMs = false;
     bool restartBackoff = false;
+    bool hasRestartBackoff = false;
     int hangTimeoutMs = 0;
+    bool hasHangTimeoutMs = false;
     bool killOnExit = false;
+    bool hasKillOnExit = false;
     std::string aumid;
+    bool hasAumid = false;
     bool winapp = false;
+    bool hasAppKind = false;
 
     auto consumeValue = [&](int &index, const char *name) -> std::string {
         if (index + 1 >= static_cast<int>(argsUtf8.size()))
@@ -1200,6 +1234,7 @@ int main()
         command = argsUtf8[argIndex++];
         // Peel off the subcommand token for module/ppl so argIndex skips it.
         if (command == "module" || command == "ppl" || command == "schedule" ||
+            command == "sched" ||
             command == "events" || command == "health" || command == "profile" ||
             command == "report")
         {
@@ -1403,6 +1438,7 @@ int main()
                 return 1;
             }
             restartWindowSec = static_cast<int>(parsed);
+            hasRestartWindowSec = true;
             continue;
         }
         if (arg == "--restart-delay")
@@ -1415,11 +1451,19 @@ int main()
                 return 1;
             }
             restartDelayMs = static_cast<int>(parsed);
+            hasRestartDelayMs = true;
             continue;
         }
         if (arg == "--restart-backoff")
         {
             restartBackoff = true;
+            hasRestartBackoff = true;
+            continue;
+        }
+        if (arg == "--no-restart-backoff")
+        {
+            restartBackoff = false;
+            hasRestartBackoff = true;
             continue;
         }
         if (arg == "--hang-timeout")
@@ -1432,26 +1476,56 @@ int main()
                 return 1;
             }
             hangTimeoutMs = static_cast<int>(parsed);
+            hasHangTimeoutMs = true;
             continue;
         }
         if (arg == "--kill-on-exit")
         {
             killOnExit = true;
+            hasKillOnExit = true;
+            continue;
+        }
+        if (arg == "--no-kill-on-exit")
+        {
+            killOnExit = false;
+            hasKillOnExit = true;
             continue;
         }
         if (arg == "--aumid")
         {
             aumid = needValue("--aumid");
             if (aumid.empty()) { return 1; }
+            hasAumid = true;
             continue;
         }
         if (arg == "--winapp")
         {
             winapp = true;
+            hasAppKind = true;
+            continue;
+        }
+        if (arg == "--win32")
+        {
+            winapp = false;
+            hasAppKind = true;
             continue;
         }
 
         std::cerr << "Unknown argument: " << arg << "\n";
+        return 1;
+    }
+
+    if ((command == "bless" || command == "register" ||
+         command == "bless-start" || command == "start-bless" ||
+         command == "policy") &&
+        hasAppKind && winapp && !hasAumid)
+    {
+        std::cerr << "--winapp requires --aumid <ApplicationUserModelId>\n";
+        return 1;
+    }
+    if ((command == "bless-start" || command == "start-bless") && hasAppKind && winapp)
+    {
+        std::cerr << "bless-start --winapp is not implemented; start the app first, then use bless --pid --winapp --aumid <id>\n";
         return 1;
     }
 
@@ -1717,9 +1791,29 @@ int main()
         }
         std::ostringstream oss;
         oss << "set-policy " << pid << "|" << maxRestartsLabel(maxRestarts);
-        if (hasRestartArgs)
+        const bool hasPolicyAdvanced =
+            hasRestartWindowSec || hasRestartDelayMs || hasRestartBackoff ||
+            hasHangTimeoutMs || hasKillOnExit || hasAppKind || hasAumid;
+        if (hasRestartArgs || hasPolicyAdvanced)
         {
-            oss << "|" << base64Encode(restartArgs);
+            oss << "|" << (hasRestartArgs ? base64Encode(restartArgs) : std::string());
+        }
+        if (hasPolicyAdvanced)
+        {
+            oss << "|"
+                << (hasRestartWindowSec ? std::to_string(restartWindowSec) : std::string())
+                << "|"
+                << (hasRestartDelayMs ? std::to_string(restartDelayMs) : std::string())
+                << "|"
+                << (hasRestartBackoff ? (restartBackoff ? "1" : "0") : "")
+                << "|"
+                << (hasHangTimeoutMs ? std::to_string(hangTimeoutMs) : std::string())
+                << "|"
+                << (hasKillOnExit ? (killOnExit ? "1" : "0") : "")
+                << "|"
+                << (hasAppKind ? (winapp ? "winapp" : "win32") : "")
+                << "|"
+                << (hasAumid ? base64Encode(aumid) : std::string());
         }
         wireCommand = oss.str();
     }
@@ -1750,6 +1844,14 @@ int main()
     else if (command == "ping")
     {
         wireCommand = "ping";
+    }
+    else if (command == "version")
+    {
+        wireCommand = "version";
+    }
+    else if (command == "stats")
+    {
+        wireCommand = "stats";
     }
     else if (command == "token-set" || command == "set-token")
     {
@@ -1831,7 +1933,7 @@ int main()
     // schedule <add|list|remove|enable|disable>. Routes to the "sched" module
     // via "module call sched op=...". The schedule action is a PGS wire
     // command restricted to guard-management verbs by the module allowlist.
-    else if (command == "schedule")
+    else if (command == "schedule" || command == "sched")
     {
         const std::string sub = subCommand;
         std::string req;

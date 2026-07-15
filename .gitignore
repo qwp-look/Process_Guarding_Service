@@ -1,7 +1,11 @@
 # Build output (all toolchains: MinGW g++, CMake, Qt)
 build/
+build_release/
+build_verify/
 */build/
 */*/build/
+pd-*/
+release_smoke_service*.log
 
 # Object files, static/shared libraries, debug symbols
 *.o

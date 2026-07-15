@@ -179,6 +179,24 @@ namespace ProcessGuard
 
         enum class RecvResult { Ok, Closed, Error, TooLarge };
     private:
+        struct GuardPolicyPatch
+        {
+            bool hasRestartWindowSec = false;
+            int restartWindowSec = 0;
+            bool hasRestartDelayMs = false;
+            int restartDelayMs = 0;
+            bool hasBackoff = false;
+            bool backoff = false;
+            bool hasHangTimeoutMs = false;
+            int hangTimeoutMs = 0;
+            bool hasKillOnExit = false;
+            bool killOnExit = false;
+            bool hasAppKind = false;
+            AppKind appKind = AppKind::Win32;
+            bool hasAumid = false;
+            std::string aumid;
+        };
+
         bool m_initialized = false;
         std::atomic<bool> m_running{false};
         std::thread m_listenerThread;
@@ -283,7 +301,8 @@ namespace ProcessGuard
                                   int hangTimeoutMs, bool killOnExit);
         std::string handleIntentionalExit(DWORD pid);
         std::string handleUnregister(DWORD pid);
-        std::string handleSetPolicy(DWORD pid, int maxRestarts, const std::string &restartArgs);
+        std::string handleSetPolicy(DWORD pid, int maxRestarts, const std::string &restartArgs,
+                                    const GuardPolicyPatch &patch);
         std::string handleSetToken(const std::string &encodedOldToken, const std::string &encodedNewToken);
         std::string handleList();
         std::string handleGet(DWORD pid);
@@ -309,6 +328,7 @@ namespace ProcessGuard
         void terminateGuardFamily(std::uint64_t guardId);
         // Close + forget a guard's job handle.
         void closeGuardJob(std::uint64_t guardId, bool preserveProcesses = false);
+        bool setGuardJobKillOnExit(std::uint64_t guardId, bool killOnExit);
 
         // GUI hang probe: returns true if the guard's main window is unresponsive.
         bool isGuardHung(const GuardInfo &info) const;
