@@ -5,7 +5,7 @@
                     {
                         "name":  "sched",
                         "version":  "1.0.0",
-                        "sha256":  "ee9639cdf5631540aee605c781f6c37c8161f55fdb2b32f9efc76c3ed7afeaaa",
+                        "sha256":  "b37efd42dad1d38f56a2586202f4560881be6d9b57758d3b797f0d8f7879c0b7",
                         "publisher":  "PGS bundled",
                         "source":  "bundled",
                         "capabilities":  [
@@ -28,7 +28,7 @@
                     {
                         "name":  "health",
                         "version":  "1.0.0",
-                        "sha256":  "3afc79220d24f06c9c5bed302dd83cb75e6655fbabed0030375f4774b38fd0db",
+                        "sha256":  "cdd140d9971d21cdbba08da53b69ee067a9f76899e399e1d85757363d33616fe",
                         "publisher":  "PGS bundled",
                         "source":  "bundled",
                         "capabilities":  [
@@ -45,7 +45,7 @@
                     {
                         "name":  "profile",
                         "version":  "1.0.0",
-                        "sha256":  "d08366f9c1562b188203c64e6fb32aea1be17a69755fb9953108b78db898837f",
+                        "sha256":  "b8f646ff985b3c424348c416f9e92e9383d3557ae52ab3b3f4eb9a4e5a61f681",
                         "publisher":  "PGS bundled",
                         "source":  "bundled",
                         "capabilities":  [
@@ -62,7 +62,7 @@
                     {
                         "name":  "report",
                         "version":  "1.0.0",
-                        "sha256":  "8fce8122c14494c4b8aba13216bcf5c31fc7f376faa1e1801f6a1e2400c39908",
+                        "sha256":  "efbf77a6442ff9688b7e609a6e695b58a937a2d30ce840836c17af4707505f1c",
                         "publisher":  "PGS bundled",
                         "source":  "bundled",
                         "capabilities":  [
@@ -80,7 +80,7 @@
                     {
                         "name":  "ppl",
                         "version":  "1.0.0",
-                        "sha256":  "bf3e7271bdb22e68a8826a3d0176cba37dcd3210cf43a10341eb12dedc1450db",
+                        "sha256":  "d3f66dc9891b1bfa6f24ee6768a05f9d00f348958e26904ca15dacb524aebc00",
                         "publisher":  "PGS bundled",
                         "source":  "bundled",
                         "capabilities":  [

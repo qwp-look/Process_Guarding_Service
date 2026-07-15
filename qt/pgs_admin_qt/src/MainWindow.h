@@ -39,6 +39,7 @@ private:
     void populateGuardTableFromJson(const QString &jsonText, const QString &stderrText);
     void setupUi();
     QString pidArg() const;
+    void appendAdvancedGuardArgs(QStringList &args) const;
     bool isChineseUi() const;
     QString trUi(const QString &en, const QString &zh) const;
     void applyLanguage();
@@ -60,6 +61,13 @@ private:
     QLineEdit *m_launchCommandEdit = nullptr;
     QLineEdit *m_maxRestartsEdit = nullptr;
     QLineEdit *m_restartArgsEdit = nullptr;
+    QLineEdit *m_restartWindowEdit = nullptr;
+    QLineEdit *m_restartDelayEdit = nullptr;
+    QLineEdit *m_hangTimeoutEdit = nullptr;
+    QLineEdit *m_aumidEdit = nullptr;
+    QCheckBox *m_restartBackoffCheck = nullptr;
+    QCheckBox *m_killOnExitCheck = nullptr;
+    QCheckBox *m_winappCheck = nullptr;
     QLineEdit *m_tokenEdit = nullptr;
     QLineEdit *m_newTokenEdit = nullptr;
 
@@ -103,6 +111,10 @@ private:
     QLabel *m_labelLaunchCommand = nullptr;
     QLabel *m_labelMaxRestarts = nullptr;
     QLabel *m_labelRestartArgs = nullptr;
+    QLabel *m_labelRestartWindow = nullptr;
+    QLabel *m_labelRestartDelay = nullptr;
+    QLabel *m_labelHangTimeout = nullptr;
+    QLabel *m_labelAumid = nullptr;
     QPushButton *m_btnPing = nullptr;
     QPushButton *m_btnList = nullptr;
     QPushButton *m_btnGet = nullptr;

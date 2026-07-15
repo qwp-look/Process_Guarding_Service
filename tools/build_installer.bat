@@ -19,13 +19,27 @@ if not defined ISCC set "ISCC=C:\Progra~2\Inno Setup 6\ISCC.exe"
 
 set "PGS_VERSION=3.1.0"
 
-echo [1/4] Building + assembling release tree (tools\package_release.bat)...
+echo [1/5] Building + assembling release tree (tools\package_release.bat)...
 call tools\package_release.bat
 if errorlevel 1 ( echo ERROR: package_release.bat failed & popd & exit /b 1 )
 
+echo [2/5] Running release smoke...
+if not defined PGS_SKIP_RELEASE_SMOKE (
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\release_smoke.ps1 -Release "%CD%\release" -ProgramDataRoot "%CD%\build_release\pd-release-smoke-installer" -Fresh
+    if errorlevel 1 ( echo ERROR: release smoke failed & popd & exit /b 1 )
+) else (
+    echo release smoke skipped because PGS_SKIP_RELEASE_SMOKE is set
+)
+
+if exist "release\modules\profile\pgs_profiles.db" del /f /q "release\modules\profile\pgs_profiles.db" >nul 2>&1
+if exist "release\modules\profile\pgs_profiles.db" (
+    echo ERROR: runtime profile database leaked into release\modules\profile
+    popd & exit /b 1
+)
+
 if not exist installer\Output mkdir installer\Output >nul 2>&1
-echo [2/4] Creating portable release zip...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path 'release\*' -DestinationPath 'installer\Output\pgs_release_%PGS_VERSION%.zip' -Force"
+echo [3/5] Creating portable release zip...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = Join-Path (Resolve-Path 'installer\Output').Path 'pgs_release_%PGS_VERSION%.zip'; if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }; [System.IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path 'release').Path, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)"
 if errorlevel 1 ( echo ERROR: portable zip failed & popd & exit /b 1 )
 
 if not exist "%ISCC%" (
@@ -34,11 +48,11 @@ if not exist "%ISCC%" (
     popd & exit /b 1
 )
 
-echo [3/4] Compiling installer (installer\pgs_installer.iss)...
+echo [4/5] Compiling installer (installer\pgs_installer.iss)...
 "%ISCC%" installer\pgs_installer.iss
 if errorlevel 1 ( echo ERROR: ISCC failed & popd & exit /b 1 )
 
-echo [4/4] Done. Artifacts:
+echo [5/5] Done. Artifacts:
 dir /b installer\Output\pgs_setup_*.exe 2>nul
 dir /b installer\Output\pgs_release_*.zip 2>nul
 

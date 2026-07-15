@@ -17,13 +17,14 @@ export PATH="${MINGW_ROOT}/bin:/usr/bin:${PATH:-}"
 token="smoke-token"
 rotated_token="smoke-token-rotated"
 pgs_port="${PGS_SMOKE_PORT:-12345}"
+build_dir="${PGS_BUILD_DIR:-build}"
 service_pid=""
 service_job_pid=""
 guard_pid=""
-worker_path_win="$(cygpath -w "$repo_root/build/smoke_worker.exe")"
-service_log="$repo_root/build/smoke_service.log"
-service_err_log="$repo_root/build/smoke_service.err.log"
-smoke_program_data="${PGS_SMOKE_PROGRAMDATA:-$repo_root/build/local_pd_smoke}"
+worker_path_win="$(cygpath -w "$repo_root/$build_dir/smoke_worker.exe")"
+service_log="$repo_root/$build_dir/smoke_service.log"
+service_err_log="$repo_root/$build_dir/smoke_service.err.log"
+smoke_program_data="${PGS_SMOKE_PROGRAMDATA:-$repo_root/$build_dir/local_pd_smoke}"
 ps_exe="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
 process_exists() {
@@ -32,7 +33,7 @@ process_exists() {
 }
 
 bless() {
-  PGS_AUTH_TOKEN="$token" ./build/pgs_bless.exe --port "$pgs_port" "$@"
+  PGS_AUTH_TOKEN="$token" "$build_dir/pgs_bless.exe" --port "$pgs_port" "$@"
 }
 
 force_stop_process() {
@@ -40,13 +41,22 @@ force_stop_process() {
   "$ps_exe" -NoProfile -Command "Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
 }
 
+force_stop_service_host() {
+  if [[ -n "$service_pid" ]]; then
+    force_stop_process "$service_pid"
+  fi
+  if [[ -n "$service_job_pid" ]]; then
+    kill "$service_job_pid" >/dev/null 2>&1 || true
+  fi
+}
+
 start_service_process() {
   local token_value="${1:-}"
   mkdir -p "$smoke_program_data"
   if [[ -n "$token_value" ]]; then
-    PGS_SERVICE_TOKEN="$token_value" ProgramData="$(cygpath -w "$smoke_program_data")" ./build/pgs_service.exe run --port "$pgs_port" >"$service_log" 2>"$service_err_log" &
+    PGS_SERVICE_TOKEN="$token_value" ProgramData="$(cygpath -w "$smoke_program_data")" "$build_dir/pgs_service.exe" run --port "$pgs_port" >"$service_log" 2>"$service_err_log" &
   else
-    ProgramData="$(cygpath -w "$smoke_program_data")" ./build/pgs_service.exe run --port "$pgs_port" >"$service_log" 2>"$service_err_log" &
+    ProgramData="$(cygpath -w "$smoke_program_data")" "$build_dir/pgs_service.exe" run --port "$pgs_port" >"$service_log" 2>"$service_err_log" &
   fi
 
   service_job_pid=$!
@@ -68,11 +78,8 @@ cleanup() {
     force_stop_process "$guard_pid"
   fi
 
-  if [[ -n "$service_pid" ]]; then
-    force_stop_process "$service_pid"
-  fi
-  if [[ -n "$service_job_pid" ]]; then
-    kill "$service_job_pid" >/dev/null 2>&1 || true
+  if [[ -n "$service_pid" || -n "$service_job_pid" ]]; then
+    force_stop_service_host
   fi
 }
 
@@ -100,7 +107,18 @@ if [[ "$ready" -ne 1 ]]; then
 fi
 
 echo "[Smoke] ping ok"
-bless list --json >"$repo_root/build/smoke_list_initial.json"
+version_text="$(bless version)"
+if [[ ! "$version_text" =~ ^OK[[:space:]]protocol=3 ]]; then
+  echo "[Smoke] unexpected version response: $version_text"
+  exit 1
+fi
+stats_text="$(bless stats)"
+if [[ ! "$stats_text" =~ ^OK[[:space:]]guards= ]]; then
+  echo "[Smoke] unexpected stats response: $stats_text"
+  exit 1
+fi
+echo "[Smoke] protocol contract ok"
+bless list --json >"$repo_root/$build_dir/smoke_list_initial.json"
 
 echo "[Smoke] rotating token..."
 bless token-set --old-token "$token" --new-token "$rotated_token" >/dev/null
@@ -115,7 +133,7 @@ bless_output="$(
     --max-restarts 1 \
     --hash auto
 )"
-printf '%s\n' "$bless_output" >"$repo_root/build/smoke_bless_start.log"
+printf '%s\n' "$bless_output" >"$repo_root/$build_dir/smoke_bless_start.log"
 
 guard_pid="$(printf '%s\n' "$bless_output" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
 if [[ -z "$guard_pid" ]]; then
@@ -123,11 +141,16 @@ if [[ -z "$guard_pid" ]]; then
   exit 1
 fi
 
-bless get --pid "$guard_pid" >"$repo_root/build/smoke_guard_get.txt"
-bless list --json >"$repo_root/build/smoke_list_after_bless.json"
+bless get --pid "$guard_pid" >"$repo_root/$build_dir/smoke_guard_get.txt"
+bless list --json >"$repo_root/$build_dir/smoke_list_after_bless.json"
+if ! grep -q '"app_kind"' "$repo_root/$build_dir/smoke_list_after_bless.json" ||
+   ! grep -q '"restart_window"' "$repo_root/$build_dir/smoke_list_after_bless.json"; then
+  echo "[Smoke] list --json is missing v3 guard-policy fields"
+  exit 1
+fi
 
 echo "[Smoke] simulating service crash..."
-force_stop_process "$service_pid"
+force_stop_service_host
 
 service_down=0
 for _ in $(seq 1 20); do
@@ -188,7 +211,7 @@ if [[ "$ready" -ne 1 ]]; then
 fi
 
 echo "[Smoke] verifying persisted guard restore..."
-restored_list_path="$repo_root/build/smoke_list_restored.json"
+restored_list_path="$repo_root/$build_dir/smoke_list_restored.json"
 restored_list_path_win="$(cygpath -w "$restored_list_path")"
 restored_pid=""
 for _ in $(seq 1 40); do
@@ -208,7 +231,7 @@ if [[ -z "$restored_pid" ]]; then
 fi
 
 guard_pid="$restored_pid"
-bless get --pid "$guard_pid" >"$repo_root/build/smoke_guard_restored_get.txt"
+bless get --pid "$guard_pid" >"$repo_root/$build_dir/smoke_guard_restored_get.txt"
 
 echo "[Smoke] cleaning restored guard..."
 bless intentional --pid "$guard_pid" >/dev/null
@@ -217,7 +240,7 @@ force_stop_process "$guard_pid"
 
 echo "[Smoke] v3: IOCP immediate restart + window-exhaust stop..."
 
-window_list_path="$repo_root/build/smoke_window_list.json"
+window_list_path="$repo_root/$build_dir/smoke_window_list.json"
 window_list_win="$(cygpath -w "$window_list_path")"
 
 # echo the pid of any currently-guarded smoke_worker (empty if none)

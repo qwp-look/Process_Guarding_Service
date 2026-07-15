@@ -538,6 +538,10 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
     {
         command = "unregister";
     }
+    else if (command == "policy")
+    {
+        command = "set-policy";
+    }
 
     if (command == "start-register")
     {
@@ -723,10 +727,10 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
         if (fields.size() >= 12)
         {
             aumid = base64Decode(fields[11]);
-            if (appKind == AppKind::WinApp && aumid.empty())
-            {
-                return "ERR missing AUMID for winapp";
-            }
+        }
+        if (appKind == AppKind::WinApp && aumid.empty())
+        {
+            return "ERR missing AUMID for winapp";
         }
 
         return handleRegister(pid, trim(fields[1]), maxRestarts, restartArgs, declaredHash,
@@ -772,7 +776,107 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
             return "ERR invalid max-restarts in set-policy";
         }
         const std::string restartArgs = (fields.size() >= 3) ? base64Decode(fields[2]) : std::string();
-        return handleSetPolicy(pid, maxRestarts, restartArgs);
+
+        GuardPolicyPatch patch;
+        if (fields.size() >= 4)
+        {
+            const std::string text = trim(fields[3]);
+            if (!text.empty())
+            {
+                DWORD v = 0;
+                if (!util::parseDwordValue(text, v) ||
+                    v > static_cast<DWORD>(std::numeric_limits<int>::max()))
+                {
+                    return "ERR invalid restart-window in set-policy";
+                }
+                patch.hasRestartWindowSec = true;
+                patch.restartWindowSec = static_cast<int>(v);
+            }
+        }
+        if (fields.size() >= 5)
+        {
+            const std::string text = trim(fields[4]);
+            if (!text.empty())
+            {
+                DWORD v = 0;
+                if (!util::parseDwordValue(text, v) ||
+                    v > static_cast<DWORD>(std::numeric_limits<int>::max()))
+                {
+                    return "ERR invalid restart-delay in set-policy";
+                }
+                patch.hasRestartDelayMs = true;
+                patch.restartDelayMs = static_cast<int>(v);
+            }
+        }
+        if (fields.size() >= 6)
+        {
+            const std::string text = trim(fields[5]);
+            if (!text.empty())
+            {
+                bool v = false;
+                if (!util::parseBoolFlag(text, v))
+                {
+                    return "ERR invalid restart-backoff in set-policy";
+                }
+                patch.hasBackoff = true;
+                patch.backoff = v;
+            }
+        }
+        if (fields.size() >= 7)
+        {
+            const std::string text = trim(fields[6]);
+            if (!text.empty())
+            {
+                DWORD v = 0;
+                if (!util::parseDwordValue(text, v) || v > static_cast<DWORD>(kMaxHangTimeoutMs))
+                {
+                    return "ERR invalid hang-timeout in set-policy";
+                }
+                patch.hasHangTimeoutMs = true;
+                patch.hangTimeoutMs = static_cast<int>(v);
+            }
+        }
+        if (fields.size() >= 8)
+        {
+            const std::string text = trim(fields[7]);
+            if (!text.empty())
+            {
+                bool v = false;
+                if (!util::parseBoolFlag(text, v))
+                {
+                    return "ERR invalid kill-on-exit in set-policy";
+                }
+                patch.hasKillOnExit = true;
+                patch.killOnExit = v;
+            }
+        }
+        if (fields.size() >= 9)
+        {
+            const std::string low = toLowerAscii(trim(fields[8]));
+            if (!low.empty())
+            {
+                if (low == "1" || low == "winapp" || low == "uwp" || low == "store")
+                {
+                    patch.hasAppKind = true;
+                    patch.appKind = AppKind::WinApp;
+                }
+                else if (low == "0" || low == "win32")
+                {
+                    patch.hasAppKind = true;
+                    patch.appKind = AppKind::Win32;
+                }
+                else
+                {
+                    return "ERR invalid app-kind in set-policy";
+                }
+            }
+        }
+        if (fields.size() >= 10)
+        {
+            patch.hasAumid = true;
+            patch.aumid = base64Decode(fields[9]);
+        }
+        return handleSetPolicy(pid, maxRestarts, restartArgs, patch);
     }
 
     if (command == "set-token")
@@ -967,7 +1071,13 @@ std::string PGS::handleRegister(
         }
     }
 
-    HANDLE processHandle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    constexpr DWORD kGuardProcessAccess =
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE;
+    HANDLE processHandle = OpenProcess(kGuardProcessAccess, FALSE, pid);
+    if (!processHandle)
+    {
+        processHandle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    }
     if (!processHandle)
     {
         Logger::warning("PGS: OpenProcess failed for pid=" + std::to_string(pid) + ", error=" + std::to_string(GetLastError()));
@@ -1131,8 +1241,12 @@ std::string PGS::handleUnregister(DWORD pid)
     return "OK unregistered pid=" + std::to_string(pid);
 }
 
-std::string PGS::handleSetPolicy(DWORD pid, int maxRestarts, const std::string &restartArgs)
+std::string PGS::handleSetPolicy(DWORD pid, int maxRestarts, const std::string &restartArgs,
+                                 const GuardPolicyPatch &patch)
 {
+    std::uint64_t jobIdForKillOnExitUpdate = 0;
+    bool updateKillOnExitJob = false;
+    bool killOnExitValue = false;
     {
         std::lock_guard<std::mutex> lock(m_guardsMutex);
         auto it = m_guards.find(pid);
@@ -1141,8 +1255,39 @@ std::string PGS::handleSetPolicy(DWORD pid, int maxRestarts, const std::string &
             return "ERR pid not found";
         }
 
+        const AppKind finalAppKind = patch.hasAppKind ? patch.appKind : it->second.appKind;
+        std::string finalAumid = patch.hasAumid ? patch.aumid : it->second.aumid;
+        if (patch.hasAppKind && finalAppKind == AppKind::Win32 && !patch.hasAumid)
+        {
+            finalAumid.clear();
+        }
+        if (finalAppKind == AppKind::WinApp && finalAumid.empty())
+        {
+            return "ERR missing AUMID for winapp";
+        }
+
         it->second.maxRestarts = maxRestarts;
         it->second.restartArgs = restartArgs;
+        if (patch.hasRestartWindowSec)
+            it->second.restartWindowSec = patch.restartWindowSec;
+        if (patch.hasRestartDelayMs)
+            it->second.restartDelayMs = patch.restartDelayMs;
+        if (patch.hasBackoff)
+            it->second.backoff = patch.backoff;
+        if (patch.hasHangTimeoutMs)
+            it->second.hangTimeoutMs = patch.hangTimeoutMs;
+        if (patch.hasKillOnExit)
+        {
+            it->second.killOnExit = patch.killOnExit;
+            jobIdForKillOnExitUpdate = it->second.guardId;
+            killOnExitValue = patch.killOnExit;
+            updateKillOnExitJob = true;
+        }
+        if (patch.hasAppKind)
+            it->second.appKind = patch.appKind;
+        if (patch.hasAumid || (patch.hasAppKind && patch.appKind == AppKind::Win32))
+            it->second.aumid = finalAumid;
+
         auto &policy = m_policyByGuardId[it->second.guardId];
         policy.maxRestarts = maxRestarts;
         auto persisted = m_persistedGuards.find(it->second.guardId);
@@ -1150,9 +1295,27 @@ std::string PGS::handleSetPolicy(DWORD pid, int maxRestarts, const std::string &
         {
             persisted->second.maxRestarts = maxRestarts;
             persisted->second.restartArgs = restartArgs;
+            if (patch.hasRestartWindowSec)
+                persisted->second.restartWindowSec = patch.restartWindowSec;
+            if (patch.hasRestartDelayMs)
+                persisted->second.restartDelayMs = patch.restartDelayMs;
+            if (patch.hasBackoff)
+                persisted->second.backoff = patch.backoff;
+            if (patch.hasHangTimeoutMs)
+                persisted->second.hangTimeoutMs = patch.hangTimeoutMs;
+            if (patch.hasKillOnExit)
+                persisted->second.killOnExit = patch.killOnExit;
+            if (patch.hasAppKind)
+                persisted->second.appKind = patch.appKind;
+            if (patch.hasAumid || (patch.hasAppKind && patch.appKind == AppKind::Win32))
+                persisted->second.aumid = finalAumid;
         }
     }
 
+    if (updateKillOnExitJob)
+    {
+        setGuardJobKillOnExit(jobIdForKillOnExitUpdate, killOnExitValue);
+    }
     persistState();
     Logger::warning("PGS: updated policy pid=" + std::to_string(pid) +
                     ", max=" + maxRestartsLabel(maxRestarts));

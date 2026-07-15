@@ -1270,7 +1270,13 @@ bool PGS::tryAttachPersistedGuard(const PersistedGuardState &persisted, GuardInf
         return false;
     }
 
-    HANDLE processHandle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, persisted.lastKnownPid);
+    constexpr DWORD kGuardProcessAccess =
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE;
+    HANDLE processHandle = OpenProcess(kGuardProcessAccess, FALSE, persisted.lastKnownPid);
+    if (!processHandle)
+    {
+        processHandle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, persisted.lastKnownPid);
+    }
     if (!processHandle)
     {
         return false;
@@ -2644,6 +2650,18 @@ bool PGS::attachGuardJob(std::uint64_t guardId, HANDLE &outJob)
     {
         return false;
     }
+    if (m_ioPort)
+    {
+        JOBOBJECT_ASSOCIATE_COMPLETION_PORT acp{};
+        acp.CompletionPort = m_ioPort;
+        acp.CompletionKey = reinterpret_cast<PVOID>(static_cast<uintptr_t>(guardId));
+        if (!SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &acp, sizeof(acp)))
+        {
+            Logger::warning("PGS: survivor job completion-port rebind failed guard-id=" +
+                            std::to_string(guardId) +
+                            ", error=" + std::to_string(GetLastError()));
+        }
+    }
     outJob = job;
     return true;
 }
@@ -2753,6 +2771,43 @@ void PGS::closeGuardJob(std::uint64_t guardId, bool preserveProcesses)
         }
         m_jobs.erase(it);
     }
+}
+
+bool PGS::setGuardJobKillOnExit(std::uint64_t guardId, bool killOnExit)
+{
+    std::lock_guard<std::mutex> lock(m_jobMutex);
+    const auto it = m_jobs.find(guardId);
+    if (it == m_jobs.end() || !it->second)
+    {
+        return false;
+    }
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli{};
+    if (!QueryInformationJobObject(it->second, JobObjectExtendedLimitInformation, &eli, sizeof(eli), nullptr))
+    {
+        Logger::warning("PGS: failed to query job limits for policy update guard-id=" +
+                        std::to_string(guardId) +
+                        ", error=" + std::to_string(GetLastError()));
+        return false;
+    }
+
+    if (killOnExit)
+    {
+        eli.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    }
+    else
+    {
+        eli.BasicLimitInformation.LimitFlags &= ~JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    }
+
+    if (!SetInformationJobObject(it->second, JobObjectExtendedLimitInformation, &eli, sizeof(eli)))
+    {
+        Logger::warning("PGS: failed to update kill-on-exit for job guard-id=" +
+                        std::to_string(guardId) +
+                        ", error=" + std::to_string(GetLastError()));
+        return false;
+    }
+    return true;
 }
 
 bool PGS::isGuardHung(const GuardInfo &info) const

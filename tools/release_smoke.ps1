@@ -86,6 +86,7 @@ $schedPath = Join-Path $Release 'modules\sched\pgs_sched_module.dll'
 $pplPath = Join-Path $Release 'modules\ppl\pgs_ppl_module.dll'
 $healthPath = Join-Path $Release 'modules\health\pgs_health_module.dll'
 $profilePath = Join-Path $Release 'modules\profile\pgs_profile_module.dll'
+$profileDb = Join-Path $Release 'modules\profile\pgs_profiles.db'
 $reportPath = Join-Path $Release 'modules\report\pgs_report_module.dll'
 
 foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $pplPath, $healthPath, $profilePath, $reportPath)) {
@@ -226,8 +227,10 @@ finally {
     }
     if ($serviceProc) {
         Stop-Process -Id $serviceProc.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $serviceProc.Id -Timeout 10 -ErrorAction SilentlyContinue
     }
     Stop-ByName @('smoke_worker')
+    Remove-Item -LiteralPath $profileDb -Force -ErrorAction SilentlyContinue
 
     if ($null -eq $oldProgramData) {
         Remove-Item Env:ProgramData -ErrorAction SilentlyContinue

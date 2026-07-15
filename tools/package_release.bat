@@ -28,7 +28,9 @@ if not defined CMAKE set "CMAKE=%MINGW_BIN%\cmake.exe"
 if not defined CXX set "CXX=%MINGW_BIN%\g++.exe"
 set "MINGW=%MINGW_BIN%"
 set "PATH=%MINGW_BIN%;%PATH%"
-set "BUILD=build"
+if not defined PGS_RELEASE_BUILD_DIR set "PGS_RELEASE_BUILD_DIR=build_release"
+set "BUILD=%PGS_RELEASE_BUILD_DIR%"
+set "PGS_BUILD_DIR=%BUILD%"
 set "RELEASE=release"
 
 if not exist "%CXX%" ( echo MinGW g++ not found: %CXX% & popd & exit /b 1 )
@@ -65,7 +67,15 @@ if errorlevel 1 ( echo ERROR: Qt cluster web build failed & popd & exit /b 1 )
 echo [3/6] Assemble release tree...
 REM Always start from a clean release tree so installer and zip artifacts cannot
 REM accidentally include stale binaries from a previous packaging run.
-if exist "%RELEASE%" rmdir /s /q "%RELEASE%"
+if exist "%RELEASE%" (
+    rmdir /s /q "%RELEASE%"
+    if exist "%RELEASE%" (
+        echo ERROR: failed to remove existing release tree: %RELEASE%
+        echo        Fix ACL/locks under %RELEASE% and rerun tools\package_release.bat.
+        popd
+        exit /b 1
+    )
+)
 mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_bless.exe"       "%RELEASE%\" >nul
@@ -104,6 +114,7 @@ copy /Y "%BUILD%\modules\modules.allow"        "%RELEASE%\modules\" >nul
 copy /Y "%BUILD%\modules\modules.lock"         "%RELEASE%\modules\" >nul
 copy /Y "module_managers\official\manager.manifest.json" "%RELEASE%\module_managers\official\" >nul
 copy /Y "modules_staging\README.md" "%RELEASE%\modules_staging\" >nul
+copy /Y "docs\INDEX.md"              "%RELEASE%\docs\" >nul
 copy /Y "docs\MODULE_SYSTEM.md"       "%RELEASE%\docs\" >nul
 copy /Y "docs\MODULE_ECOSYSTEM.md"    "%RELEASE%\docs\" >nul
 copy /Y "docs\REMAINING_UPGRADE_PLAN.md" "%RELEASE%\docs\" >nul
@@ -114,6 +125,11 @@ copy /Y "docs\SCHEDULER_MODULE.md"     "%RELEASE%\docs\" >nul
 copy /Y "docs\REMOTE_GATEWAY.md"       "%RELEASE%\docs\" >nul
 copy /Y "docs\CLUSTER_DASHBOARD.md"    "%RELEASE%\docs\" >nul
 copy /Y "docs\GUARD_POLICIES.md"       "%RELEASE%\docs\" >nul
+copy /Y "docs\SECURITY_HARDENING_BACKLOG.md" "%RELEASE%\docs\" >nul
+copy /Y "docs\UNFINISHED_FEATURES_BACKLOG.md" "%RELEASE%\docs\" >nul
+xcopy /E /I /Y "docs\user" "%RELEASE%\docs\user" >nul
+xcopy /E /I /Y "docs\operator" "%RELEASE%\docs\operator" >nul
+xcopy /E /I /Y "docs\developer" "%RELEASE%\docs\developer" >nul
 if not exist "%RELEASE%\docs\schemas" mkdir "%RELEASE%\docs\schemas" >nul 2>&1
 copy /Y "docs\schemas\*.json"          "%RELEASE%\docs\schemas\" >nul
 copy /Y "LICENSE"                     "%RELEASE%\" >nul
@@ -140,7 +156,82 @@ for %%D in (%QT_MINGW_DEPS%) do copy /Y "%MINGW%\%%D" "%RELEASE%\%%D" >nul 2>&1
 if not exist "%RELEASE%\tls" mkdir "%RELEASE%\tls" >nul 2>&1
 copy /Y "%MINGW_ROOT%\share\qt6\plugins\tls\qopensslbackend.dll" "%RELEASE%\tls\" >nul 2>&1
 
-echo [6/6] Done. Release layout:
+echo [6/7] Validate required release artifacts...
+dir "%RELEASE%\modules" >nul 2>&1
+if errorlevel 1 ( echo ERROR: release\modules is missing or unreadable & popd & exit /b 1 )
+for %%F in (
+  pgs_service.exe
+  pgs_bless.exe
+  pgs_admin_qt.exe
+  pgs_admin_web.exe
+  pgs_cluster_web.exe
+  modules\modules.allow
+  modules\modules.lock
+  modules\ppl\pgs_ppl_module.dll
+  modules\ppl\Sirius.sys
+  modules\ppl\module.html
+  modules\ppl\module.manifest
+  modules\ppl\module.manifest.json
+  modules\sched\pgs_sched_module.dll
+  modules\sched\module.html
+  modules\sched\module.manifest
+  modules\sched\module.manifest.json
+  modules\health\pgs_health_module.dll
+  modules\health\module.html
+  modules\health\module.manifest
+  modules\health\module.manifest.json
+  modules\profile\pgs_profile_module.dll
+  modules\profile\module.html
+  modules\profile\module.manifest
+  modules\profile\module.manifest.json
+  modules\report\pgs_report_module.dll
+  modules\report\module.html
+  modules\report\module.manifest
+  modules\report\module.manifest.json
+  module_managers\official\manager.manifest.json
+  modules_staging\README.md
+  examples\smoke_worker.exe
+  docs\INDEX.md
+  docs\MODULE_SYSTEM.md
+  docs\MODULE_ECOSYSTEM.md
+  docs\REMAINING_UPGRADE_PLAN.md
+  docs\SERVICE_MODE_GUIDE.md
+  docs\TECHNICAL_ARCHITECTURE.md
+  docs\ROBUSTNESS_AND_TESTING.md
+  docs\SCHEDULER_MODULE.md
+  docs\REMOTE_GATEWAY.md
+  docs\CLUSTER_DASHBOARD.md
+  docs\GUARD_POLICIES.md
+  docs\SECURITY_HARDENING_BACKLOG.md
+  docs\UNFINISHED_FEATURES_BACKLOG.md
+  docs\user\QUICK_START.md
+  docs\user\USER_GUIDE.md
+  docs\user\FEATURES.md
+  docs\user\FEATURE_GUARD.md
+  docs\user\FEATURE_UI.md
+  docs\user\FEATURE_SCHEDULER.md
+  docs\user\FAQ.md
+  docs\operator\OPERATOR_GUIDE.md
+  docs\operator\RELEASE_GUIDE.md
+  docs\operator\TROUBLESHOOTING.md
+  docs\developer\ARCHITECTURE.md
+  docs\developer\BUILD.md
+  docs\developer\MODULE_SYSTEM.md
+  docs\developer\PROTOCOL.md
+  docs\developer\TESTING.md
+  docs\schemas\manager.manifest.schema.json
+  docs\schemas\module.manifest.schema.json
+  docs\schemas\modules.lock.schema.json
+  README.md
+) do (
+  if not exist "%RELEASE%\%%F" (
+    echo ERROR: required release artifact missing: %RELEASE%\%%F
+    popd
+    exit /b 1
+  )
+)
+
+echo [7/7] Done. Release layout:
 echo   %RELEASE%\pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe / pgs_admin_web.exe / pgs_cluster_web.exe
 echo   %RELEASE%\modules\ppl\{pgs_ppl_module.dll, Sirius.sys, module.html, module.manifest}
 echo   %RELEASE%\modules\sched\{pgs_sched_module.dll, module.html, module.manifest}
