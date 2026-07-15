@@ -58,9 +58,17 @@ public:
         // distinction from the core service. Token hash is SHA-256 (via CNG).
         m_bootTokenHash = args.hasToken ? ProcessGuard::util::sha256Hex(args.token) : std::string();
 
-        // PPL/module loading is opt-in: --enable-ppl or PGS_ENABLE_PPL=1.
-        if (args.enablePpl || std::getenv("PGS_ENABLE_PPL") != nullptr)
+        if (args.enableModules || std::getenv("PGS_ENABLE_MODULES") != nullptr)
         {
+            m_pgs.setModulesEnabled(true);
+        }
+        // Compatibility: --enable-ppl still works, but the new model names the
+        // real risk boundary as kernel/high-risk modules.
+        if (args.enablePpl || args.enableKernelModules ||
+            std::getenv("PGS_ENABLE_PPL") != nullptr ||
+            std::getenv("PGS_ENABLE_KERNEL_MODULES") != nullptr)
+        {
+            m_pgs.setKernelModulesEnabled(true);
             m_pgs.setPplEnabled(true);
         }
 
@@ -107,6 +115,8 @@ private:
         bool hasToken{false};
         std::string token;
         bool enablePpl{false};
+        bool enableModules{false};
+        bool enableKernelModules{false};
         // v3 G: install/run can bind an explicit port; install embeds it into
         // the service binPath so SCM startup honours it. Default 0 = use the
         // PGS default / restored-from-archive port.
@@ -154,9 +164,17 @@ private:
         {
             binPath += " --port " + std::to_string(args.port);
         }
+        if (args.enableModules)
+        {
+            binPath += " --enable-modules";
+        }
         if (args.enablePpl)
         {
             binPath += " --enable-ppl";
+        }
+        if (args.enableKernelModules)
+        {
+            binPath += " --enable-kernel-modules";
         }
         if (args.allowAllModules)
         {
@@ -406,7 +424,9 @@ private:
     int printHelp(const char *exe) const
     {
         std::cout
-            << "Usage: " << exe << " [install|uninstall|start|stop|status|run|--service] [--token <value>]\n"
+            << "Usage: " << exe << " [install|uninstall|start|stop|status|run|--service] [options]\n"
+            << "Options: --token <value> --port <1-65535> --enable-modules --enable-kernel-modules\n"
+            << "         --enable-risk critical --enable-ppl (legacy alias) --allow-all-modules\n"
             << "       Set PGS_SERVICE_TOKEN to provide the service token without exposing it on the command line.\n";
         return 1;
     }
@@ -657,6 +677,35 @@ private:
             {
                 out.enablePpl = true;
                 continue;
+            }
+
+            if (arg == "--enable-modules")
+            {
+                out.enableModules = true;
+                continue;
+            }
+
+            if (arg == "--enable-kernel-modules")
+            {
+                out.enableModules = true;
+                out.enableKernelModules = true;
+                continue;
+            }
+
+            if (arg == "--enable-risk")
+            {
+                if (i + 1 >= argc)
+                {
+                    return false;
+                }
+                const std::string level = argv[++i];
+                if (level == "critical" || level == "kernel")
+                {
+                    out.enableModules = true;
+                    out.enableKernelModules = true;
+                    continue;
+                }
+                return false;
             }
 
             // v3 G: explicit listen port (overrides the default / archive).

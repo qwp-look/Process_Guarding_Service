@@ -54,6 +54,9 @@ void ModulePage::setupUi()
 
     if (isPpl)
     {
+        m_riskLabel = new QLabel(this);
+        m_riskLabel->setWordWrap(true);
+        layout->addWidget(m_riskLabel);
         m_pplBox = new QGroupBox(this);
         auto *row = new QHBoxLayout(m_pplBox);
         m_lblPid = new QLabel(m_pplBox);
@@ -80,10 +83,17 @@ void ModulePage::setupUi()
     }
 
     auto *callRow = new QHBoxLayout();
+    m_lblMethod = new QLabel(this);
+    callRow->addWidget(m_lblMethod);
+    m_methodEdit = new QLineEdit(this);
+    m_methodEdit->setPlaceholderText(QStringLiteral("profile.apply"));
+    m_methodEdit->setText(defaultMethod());
+    callRow->addWidget(m_methodEdit);
     m_lblRequest = new QLabel(this);
     callRow->addWidget(m_lblRequest);
     m_requestEdit = new QLineEdit(this);
-    m_requestEdit->setPlaceholderText(QStringLiteral("op=set;pid=1234;signer=Antimalware"));
+    m_requestEdit->setPlaceholderText(QStringLiteral("{\"pid\":1234}"));
+    m_requestEdit->setText(QStringLiteral("{}"));
     callRow->addWidget(m_requestEdit, 1);
     m_btnCall = new QPushButton(this);
     m_btnList = new QPushButton(this);
@@ -126,12 +136,18 @@ void ModulePage::setupUi()
 
     connect(m_btnCall, &QPushButton::clicked, this, [this]() {
         const QString req = m_requestEdit->text().trimmed();
+        const QString method = m_methodEdit->text().trimmed();
         if (req.isEmpty())
         {
-            appendOutput(trUi("request is required for module call", "module call 需要请求内容"));
+            appendOutput(trUi("JSON params are required for module invoke", "module invoke 需要 JSON 参数"));
             return;
         }
-        runCommand({"module", "call", "--name", m_folder, "--request", req});
+        if (method.isEmpty())
+        {
+            appendOutput(trUi("method is required for module invoke", "module invoke 需要方法名"));
+            return;
+        }
+        runCommand({"module", "invoke", "--name", m_folder, "--method", method, "--params-json", req});
     });
     connect(m_btnList, &QPushButton::clicked, this, [this]() {
         runCommand({"module", "list"});
@@ -158,10 +174,12 @@ void ModulePage::setupUi()
 
 void ModulePage::retranslateUi()
 {
+    if (m_riskLabel) m_riskLabel->setText(trUi("High-risk module: loading and invoking driver/kernel features requires explicit service opt-in and trusted module files.", "高风险模块：加载和调用驱动/内核能力需要服务显式启用，并且模块文件必须已受信任。"));
     if (m_lblPid) m_lblPid->setText(trUi("PID:", "PID："));
     if (m_lblSigner) m_lblSigner->setText(trUi("Signer:", "签名："));
+    if (m_lblMethod) m_lblMethod->setText(trUi("Method:", "方法："));
     if (m_lblRequest) m_lblRequest->setText(trUi("Request:", "请求："));
-    if (m_btnCall) m_btnCall->setText(trUi("Call (module call)", "调用 (module call)"));
+    if (m_btnCall) m_btnCall->setText(trUi("Invoke", "调用"));
     if (m_btnList) m_btnList->setText(trUi("List modules", "列出模块"));
     if (m_btnReload) m_btnReload->setText(trUi("Reload HTML", "重载 HTML"));
     if (m_btnPplSet) m_btnPplSet->setText(trUi("PPL Set", "PPL 设置"));
@@ -220,6 +238,17 @@ void ModulePage::runCommand(const QStringList &args)
 void ModulePage::appendOutput(const QString &text)
 {
     m_output->append(text.trimmed());
+}
+
+QString ModulePage::defaultMethod() const
+{
+    const QString key = m_folder.toLower();
+    if (key == QStringLiteral("ppl")) return QStringLiteral("ppl.get");
+    if (key == QStringLiteral("sched")) return QStringLiteral("sched.list");
+    if (key == QStringLiteral("health")) return QStringLiteral("health.summary");
+    if (key == QStringLiteral("profile")) return QStringLiteral("profile.list");
+    if (key == QStringLiteral("report")) return QStringLiteral("report.snapshot");
+    return key + QStringLiteral(".info");
 }
 
 QString ModulePage::pidArg() const

@@ -161,7 +161,7 @@ PGS_SERVICE_TOKEN=your-secret-token ./build/pgs_service.exe run
 
 服务由 SCM 恢复后，会先读取守护归档和 token hash 再恢复现场。只有首次启动且此前没有旧归档时，服务会自动生成随机 token 并写入 `pgs_initial_token.txt`（目录 ACL 仅 SYSTEM+Administrators）。要切换 token，使用 `token-set` 命令。
 
-`install` 会把需要 SCM 后续启动继续生效的运行参数写入服务 `binPath`，目前包括 `--port <1-65535>`、`--enable-ppl` 和 `--allow-all-modules`。`--allow-all-modules` 等价于关闭模块 allowlist 边界，只建议开发/应急调试使用。`--token` 不会写入 SCM 命令行，避免被本机其他用户从服务配置或进程命令行读取；token 请通过首次生成文件、环境变量或 `token-set` 管理。
+`install` 会把需要 SCM 后续启动继续生效的运行参数写入服务 `binPath`，目前包括 `--port <1-65535>`、`--enable-modules`、`--enable-kernel-modules`、`--enable-risk critical`、兼容 `--enable-ppl` 和 `--allow-all-modules`。`--enable-modules` 只表示扫描/加载普通模块；PPL/驱动类模块还必须显式打开 kernel/risk 开关。`--allow-all-modules` 等价于关闭模块 trust 边界，只建议开发/应急调试使用。`--token` 不会写入 SCM 命令行，避免被本机其他用户从服务配置或进程命令行读取；token 请通过首次生成文件、环境变量或 `token-set` 管理。
 
 ### 客户端携带 token
 
@@ -220,6 +220,11 @@ export PGS_AUTH_TOKEN=your-secret-token
 ./build/pgs_bless.exe policy --pid 1234 --max-restarts no
 ./build/pgs_bless.exe unbless --pid 1234
 ./build/pgs_bless.exe get --pid 1234 --json
+./build/pgs_bless.exe doctor --json
+./build/pgs_bless.exe health-check set --pid 1234 --config-json "{\"type\":\"tcp\",\"port\":8080}"
+./build/pgs_bless.exe restart-hook set --pid 1234 --config-json "{\"pre_restart\":{\"module\":\"profile\",\"method\":\"profile.apply\"}}"
+./build/pgs_bless.exe group create --name backend --order 10 --deps database
+./build/pgs_bless.exe group add --name backend --pid 1234
 ```
 
 这些命令的用途如下：
@@ -231,7 +236,7 @@ export PGS_AUTH_TOKEN=your-secret-token
   列出所有已注册守护目标，包含 PID、路径、重启策略、重启计数、hash 信息等。
 
 - `./build/pgs_bless.exe bless --pid 1234 --max-restarts 3 --hash auto`  
-  将目标进程注册为守护对象；当进程异常退出时，最多自动重启 3 次；`--hash auto` 会自动计算并上报文件 hash 用于一致性校验。
+  将目标进程注册为守护对象；当进程异常退出时，最多自动重启 3 次；`--hash auto` 会自动计算并上报文件 hash 用于一致性校验，`--hash none` 不持久化 hash，后续重启不做 hash 拦截。
 
 - `./build/pgs_bless.exe bless-start --path "C:/程序/示例.exe" --start-args "--mode worker" --max-restarts 3 --hash auto`  
   按路径直接启动程序并自动注册守护；适合第三方进程未先运行时的一键接管场景。  
@@ -316,7 +321,7 @@ cmake --build build/pgs_admin_web -j4
 - 浏览器访问 `http://127.0.0.1:18080`
 - Web 后端直连 `PGSClient` 处理高频 `ping/list/get`，必要时仍复用 `pgs_bless.exe` / `pgs_service.exe`
 - 当前提供守护列表、守护操作、token 更新、服务管理等能力
-- 默认本地模式只允许回环绑定，页面内嵌一次性 API token，API 同时校验 Host/Origin。
+- 默认本地模式只允许回环绑定，页面内嵌一次性 API token，首页与 API 都校验 Host/Origin，并返回 `Cache-Control: no-store`、CSP、`X-Content-Type-Options` 等安全头。
 - remote 模式使用 `--remote --tls-cert --tls-key --users-file --audit-log`，强制 TLS + Basic RBAC + 审计。
   remote 页面不嵌入 PGS 管理 token；变更类 API 额外要求同源 `X-PGS-CSRF`。
 
@@ -413,17 +418,17 @@ cp -f /mingw64/bin/libwinpthread-1.dll build/pgs_admin_qt/
 
 ### 最小权限运行建议
 
-- **默认不启用 PPL/驱动**：PPL 模块（`modules/ppl`）与 `Sirius.sys` 内核驱动默认**不加载**。仅当设置环境变量 `PGS_ENABLE_PPL=1` 或向 `pgs_service` 传入 `--enable-ppl` 时才加载。非 opt-in 部署下，`ppl set/get/clear` 不可达，内核驱动也不会被引入。
+- **默认不启用 PPL/驱动**：普通模块用 `PGS_ENABLE_MODULES=1` 或 `--enable-modules` 扫描加载；PPL 模块（`modules/ppl`）与 `Sirius.sys` 内核驱动默认**不加载**。只有设置 `PGS_ENABLE_KERNEL_MODULES=1`、传入 `--enable-kernel-modules`、`--enable-risk critical`，或使用兼容别名 `PGS_ENABLE_PPL=1` / `--enable-ppl` 时，PPL 安装/加载/调用才可达。
 - **token 鉴权强制开启**：空 token 不再被接受；未配置 token 时服务自动生成随机 token 并写入受限目录下的 `pgs_initial_token.txt`（仅 SYSTEM/Administrators 可读）。token 哈希为 SHA-256，state/logs 目录以受限 ACL 创建。
 - **token 不走命令行**：控制台 `run` 可用 `PGS_SERVICE_TOKEN`，Qt 管理端与 Web 控制台通过环境变量 `PGS_AUTH_TOKEN` 传 token 给 `pgs_bless`，避免被本地其他用户经进程命令行查询泄露。
-- **`module load` 路径白名单**：服务端只允许加载位于模块目录之内的 DLL，`..`/UNC/盘外绝对路径一律拒绝，避免任意 DLL 被加载进 SYSTEM 级服务进程。普通模块可显式加载；`ppl` 模块仍要求 `PGS_ENABLE_PPL=1` 或 `--enable-ppl`。
+- **`module load/install` 信任链**：服务端只允许加载位于模块根目录内的 DLL，`..`/UNC/盘外绝对路径一律拒绝；`modules.lock` 是主信任文件，旧 `modules.allow` 兼容读取。manifest 名称、ABI、hash/signature、capability/risk 均由核心 loader 复核，manager 扩展不能绕过。
 - **绑定回环**：PGS 管理端口默认绑定 `127.0.0.1`；Web 控制台默认绑定 `127.0.0.1` 并要求 `X-PGS-Token` 头 + `Host`/`Origin` 校验（防 DNS rebinding 与跨站 CSRF）。远程 Web 控制台必须显式 `--remote`，并配置 TLS、RBAC users 文件和 audit log。
 - **cluster 远程监听强制 TLS+token**：`pgs_cluster_web` 默认只监听回环；非回环监听必须提供 `--api-token --tls-cert --tls-key`。
 - **不要在不受信任的主机启用 PPL**：`Sirius.sys` 一旦加载常驻并暴露 `\\.\Sirius` 设备，具备 ARK 级内核能力（终止/隐藏/注入/改 token/读写内存/关 PatchGuard/关 DSE 等），任何能打开该设备的本地主体都获得完整内核级能力；用户态无法修改驱动设备 DACL。
 
 ### 进一步收敛（按需）
 
-- 若不需要 PPL，可从构建产物中移除 `modules/ppl` 目录，使即便误设 `PGS_ENABLE_PPL=1` 也无模块可加载。
+- 若不需要 PPL，可从构建产物中移除 `modules/ppl` 目录，使即便误设高危开关也无模块可加载。
 - 考虑以自定义低权限服务账户运行 `pgs_service`（需评估守护目标进程所需的访问权），以缩小 LocalSystem 特权面。
 
 ## 8. v3 加固补充（LocalSystem 取舍 / 服务账号 / 端口 / token 风险）

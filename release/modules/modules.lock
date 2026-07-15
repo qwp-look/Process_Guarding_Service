@@ -1,0 +1,101 @@
+{
+    "version":  1,
+    "generated_at":  "build",
+    "modules":  [
+                    {
+                        "name":  "sched",
+                        "version":  "1.0.0",
+                        "sha256":  "ee9639cdf5631540aee605c781f6c37c8161f55fdb2b32f9efc76c3ed7afeaaa",
+                        "publisher":  "PGS bundled",
+                        "source":  "bundled",
+                        "capabilities":  [
+                                             "sched.add",
+                                             "sched.list",
+                                             "sched.remove",
+                                             "sched.enable",
+                                             "sched.disable",
+                                             "guard.register",
+                                             "guard.unregister",
+                                             "guard.intentional",
+                                             "guard.policy",
+                                             "guard.list"
+                                         ],
+                        "risk":  "medium",
+                        "trustedAt":  "build",
+                        "signature_policy":  "hash",
+                        "require_signed":  false
+                    },
+                    {
+                        "name":  "health",
+                        "version":  "1.0.0",
+                        "sha256":  "3afc79220d24f06c9c5bed302dd83cb75e6655fbabed0030375f4774b38fd0db",
+                        "publisher":  "PGS bundled",
+                        "source":  "bundled",
+                        "capabilities":  [
+                                             "health.summary",
+                                             "health.stats",
+                                             "guard.list",
+                                             "event.read"
+                                         ],
+                        "risk":  "low",
+                        "trustedAt":  "build",
+                        "signature_policy":  "hash",
+                        "require_signed":  false
+                    },
+                    {
+                        "name":  "profile",
+                        "version":  "1.0.0",
+                        "sha256":  "d08366f9c1562b188203c64e6fb32aea1be17a69755fb9953108b78db898837f",
+                        "publisher":  "PGS bundled",
+                        "source":  "bundled",
+                        "capabilities":  [
+                                             "profile.set",
+                                             "profile.list",
+                                             "profile.apply",
+                                             "guard.policy"
+                                         ],
+                        "risk":  "medium",
+                        "trustedAt":  "build",
+                        "signature_policy":  "hash",
+                        "require_signed":  false
+                    },
+                    {
+                        "name":  "report",
+                        "version":  "1.0.0",
+                        "sha256":  "8fce8122c14494c4b8aba13216bcf5c31fc7f376faa1e1801f6a1e2400c39908",
+                        "publisher":  "PGS bundled",
+                        "source":  "bundled",
+                        "capabilities":  [
+                                             "report.snapshot",
+                                             "report.backup",
+                                             "event.read",
+                                             "guard.list",
+                                             "health.stats"
+                                         ],
+                        "risk":  "low",
+                        "trustedAt":  "build",
+                        "signature_policy":  "hash",
+                        "require_signed":  false
+                    },
+                    {
+                        "name":  "ppl",
+                        "version":  "1.0.0",
+                        "sha256":  "bf3e7271bdb22e68a8826a3d0176cba37dcd3210cf43a10341eb12dedc1450db",
+                        "publisher":  "PGS bundled",
+                        "source":  "bundled",
+                        "capabilities":  [
+                                             "driver.kernel",
+                                             "driver.sirius.load",
+                                             "process.ppl.set",
+                                             "process.ppl.clear",
+                                             "ppl.set",
+                                             "ppl.get",
+                                             "ppl.clear"
+                                         ],
+                        "risk":  "critical",
+                        "trustedAt":  "build",
+                        "signature_policy":  "hash",
+                        "require_signed":  false
+                    }
+                ]
+}

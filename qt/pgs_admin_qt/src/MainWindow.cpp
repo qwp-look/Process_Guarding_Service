@@ -431,9 +431,10 @@ void MainWindow::setupUi()
     tableButtons->addWidget(m_btnTableClear);
 
     m_guardTable = new QTableWidget(tablePage);
-    m_guardTable->setColumnCount(8);
+    m_guardTable->setColumnCount(15);
     m_guardTable->setHorizontalHeaderLabels(QStringList{
-        "PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified"});
+        "PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified",
+        "App", "AUMID", "Job", "Window", "Delay", "Backoff", "Hang/Kill"});
     m_guardTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_guardTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_guardTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -890,8 +891,10 @@ void MainWindow::applyLanguage()
     m_btnTableRefresh->setText(trUi("Refresh", "刷新"));
     m_btnTableClear->setText(trUi("Clear Table", "清空表格"));
     m_guardTable->setHorizontalHeaderLabels(isChineseUi()
-                                                ? QStringList{"PID", "路径", "哈希", "已重启", "最大重启", "存活", "会话", "哈希校验"}
-                                                : QStringList{"PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified"});
+                                                ? QStringList{"PID", "路径", "哈希", "已重启", "最大重启", "存活", "会话", "哈希校验",
+                                                              "应用", "AUMID", "Job", "窗口", "延迟", "退避", "卡死/退出"}
+                                                : QStringList{"PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified",
+                                                              "App", "AUMID", "Job", "Window", "Delay", "Backoff", "Hang/Kill"});
     QSettings settings("OpenStarlight", "PGSAdminQt");
     settings.setValue("language", isChineseUi() ? 0 : 1);
 }
@@ -1243,6 +1246,16 @@ void MainWindow::populateGuardTableFromJson(const QString &jsonText, const QStri
         if (hashText != "1" && hashText.compare("true", Qt::CaseInsensitive) != 0)
             hashColor = QColor(0xd9, 0x6a, 0x10); // orange
         setCell(7, hashText, hashColor);
+        setCell(8, obj.value("app_kind").toString());
+        setCell(9, obj.value("aumid").toString());
+        const QString jobText = obj.value("job_attached").toString();
+        const QColor jobColor = (jobText == "1" || jobText.compare("true", Qt::CaseInsensitive) == 0)
+                                    ? QColor(0x16, 0x8c, 0x2e) : QColor(0xd9, 0x6a, 0x10);
+        setCell(10, jobText, jobColor);
+        setCell(11, obj.value("restart_window").toString());
+        setCell(12, obj.value("restart_delay").toString());
+        setCell(13, obj.value("backoff").toString());
+        setCell(14, obj.value("hang_timeout").toString() + QStringLiteral("/") + obj.value("kill_on_exit").toString());
     }
     if (!m_guardTableColumnsSized || !m_lastTableRefreshWasAuto)
     {

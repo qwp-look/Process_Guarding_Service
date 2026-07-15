@@ -167,7 +167,7 @@ PG_MODULE_API const char *PG_GetManifest(void)
 {
     return "name=report;version=1.0.0;abi=2;"
            "summary=Base64 service snapshots and backup reports;"
-           "capabilities=report.snapshot,report.backup,event.read,guard.list";
+           "capabilities=report.snapshot,report.backup,event.read,guard.list,health.stats";
 }
 
 PG_MODULE_API int PG_Init(void *reserved)

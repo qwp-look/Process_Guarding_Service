@@ -5,7 +5,8 @@
  * protection control: set / get / clear. Internally reuses the StarlightGUI
  * Sirius.sys kernel driver via SiriusDriverClient (Apache-2.0, author "Stars").
  *
- * Request KV examples (forwarded by PGS "ppl" / "module call ppl" commands):
+ * Request examples (PGS "ppl" compatibility routes through module invoke; KV stays supported):
+ *   {"jsonrpc":"2.0","module":"ppl","method":"ppl.set","params":{"pid":1234,"signer":"Antimalware"}}
  *   op=set;pid=1234;signer=Antimalware
  *   op=get;pid=1234
  *   op=clear;pid=1234
@@ -15,6 +16,7 @@
 #define PG_MODULE_EXPORTS
 
 #include <windows.h>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -113,6 +115,82 @@ namespace
         return (end == std::string::npos) ? kv.substr(pos) : kv.substr(pos, end - pos);
     }
 
+    std::string jsonStringValue(const std::string &text, const std::string &key)
+    {
+        const std::string needle = "\"" + key + "\"";
+        std::size_t pos = text.find(needle);
+        if (pos == std::string::npos)
+            return std::string();
+        pos = text.find(':', pos + needle.size());
+        if (pos == std::string::npos)
+            return std::string();
+        ++pos;
+        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+            ++pos;
+        if (pos >= text.size() || text[pos] != '"')
+            return std::string();
+        ++pos;
+        std::string out;
+        bool escaped = false;
+        for (; pos < text.size(); ++pos)
+        {
+            const char ch = text[pos];
+            if (escaped)
+            {
+                out.push_back(ch);
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"')
+                break;
+            out.push_back(ch);
+        }
+        return out;
+    }
+
+    std::string jsonNumberValue(const std::string &text, const std::string &key)
+    {
+        const std::string quoted = jsonStringValue(text, key);
+        if (!quoted.empty())
+            return quoted;
+        const std::string needle = "\"" + key + "\"";
+        std::size_t pos = text.find(needle);
+        if (pos == std::string::npos)
+            return std::string();
+        pos = text.find(':', pos + needle.size());
+        if (pos == std::string::npos)
+            return std::string();
+        ++pos;
+        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+            ++pos;
+        std::size_t end = pos;
+        while (end < text.size() && text[end] >= '0' && text[end] <= '9')
+            ++end;
+        return end > pos ? text.substr(pos, end - pos) : std::string();
+    }
+
+    std::string jsonEscape(const std::string &value)
+    {
+        std::string out;
+        for (char ch : value)
+        {
+            if (ch == '\\' || ch == '"')
+                out.push_back('\\');
+            if (ch == '\n')
+            {
+                out += "\\n";
+                continue;
+            }
+            out.push_back(ch);
+        }
+        return out;
+    }
+
     void setResponse(char *buf, size_t bufsize, const std::string &msg)
     {
         if (!buf || bufsize == 0)
@@ -174,14 +252,14 @@ PG_MODULE_API const char *PG_GetVersion(void)
 
 PG_MODULE_API unsigned int PG_GetAbiVersion(void)
 {
-    return PG_MODULE_ABI_VERSION;
+    return PG_MODULE_ABI_VERSION_JSON;
 }
 
 PG_MODULE_API const char *PG_GetManifest(void)
 {
-    return "name=ppl;version=1.0.0;abi=2;"
+    return "name=ppl;version=1.0.0;abi=3;"
            "summary=Protected Process Light control backed by Sirius.sys;"
-           "capabilities=ppl.set,ppl.get,ppl.clear,driver.sirius.load";
+           "capabilities=driver.kernel,process.ppl.set,process.ppl.clear,ppl.set,ppl.get,ppl.clear,driver.sirius.load";
 }
 
 // PG_Init: store the module's own HMODULE (set in DllMain) on the driver
@@ -277,5 +355,41 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
 
     setResponse(responseBuf, responseBufSize, "ERR unknown op: " + op);
     return 1;
+}
+
+PG_MODULE_API int PG_InvokeJson(const char *requestJson, char *responseBuf, size_t responseBufSize)
+{
+    const std::string request = requestJson ? requestJson : "";
+    const std::string method = jsonStringValue(request, "method");
+    const std::string id = jsonStringValue(request, "id");
+    const std::string pidText = jsonNumberValue(request, "pid");
+    const std::string signerText = jsonStringValue(request, "signer");
+    std::string op;
+    if (method == "ppl.set")
+        op = "set";
+    else if (method == "ppl.get")
+        op = "get";
+    else if (method == "ppl.clear")
+        op = "clear";
+    else
+    {
+        setResponse(responseBuf, responseBufSize, "{\"jsonrpc\":\"2.0\",\"id\":\"" + jsonEscape(id) + "\",\"error\":{\"code\":\"UNKNOWN_METHOD\",\"message\":\"unknown PPL method\"}}");
+        return 1;
+    }
+    std::string kv = "op=" + op + ";pid=" + pidText;
+    if (op == "set")
+    {
+        kv += ";signer=" + signerText;
+    }
+    char legacy[1024] = {0};
+    const int rc = PG_Invoke(kv.c_str(), legacy, sizeof(legacy));
+    const std::string raw(legacy);
+    if (rc != 0 || raw.rfind("ERR", 0) == 0)
+    {
+        setResponse(responseBuf, responseBufSize, "{\"jsonrpc\":\"2.0\",\"id\":\"" + jsonEscape(id) + "\",\"error\":{\"code\":\"PPL_ERROR\",\"message\":\"" + jsonEscape(raw) + "\"}}");
+        return 1;
+    }
+    setResponse(responseBuf, responseBufSize, "{\"jsonrpc\":\"2.0\",\"id\":\"" + jsonEscape(id) + "\",\"result\":{\"legacy_response\":\"" + jsonEscape(raw) + "\"}}");
+    return 0;
 }
 #endif // !PGS_ENABLE_TEST_HOOKS

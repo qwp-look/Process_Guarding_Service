@@ -601,7 +601,7 @@ PG_MODULE_API const char *PG_GetManifest(void)
 {
     return "name=sched;version=1.0.0;abi=2;"
            "summary=Cron, one-shot, and interval scheduling for restricted guard commands;"
-           "capabilities=sched.add,sched.list,sched.remove,sched.enable,sched.disable,guard.register,guard.policy";
+           "capabilities=sched.add,sched.list,sched.remove,sched.enable,sched.disable,guard.register,guard.unregister,guard.intentional,guard.policy,guard.list";
 }
 
 PG_MODULE_API int PG_Init(void *reserved)

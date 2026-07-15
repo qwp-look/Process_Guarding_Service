@@ -1,0 +1,43 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "ppl",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Protected Process Light control through the Sirius driver.",
+  "risk": "critical",
+  "capabilities": [
+    "driver.kernel",
+    "driver.sirius.load",
+    "process.ppl.set",
+    "process.ppl.clear",
+    "ppl.set",
+    "ppl.get",
+    "ppl.clear"
+  ],
+  "methods": [
+    {
+      "name": "ppl.set",
+      "risk": "critical",
+      "sync": true,
+      "required_capabilities": ["driver.kernel", "process.ppl.set"],
+      "params_schema": {"type": "object", "required": ["pid", "signer"]},
+      "result_schema": {"type": "object"}
+    },
+    {
+      "name": "ppl.get",
+      "risk": "high",
+      "sync": true,
+      "required_capabilities": ["driver.kernel"],
+      "params_schema": {"type": "object", "required": ["pid"]},
+      "result_schema": {"type": "object"}
+    },
+    {
+      "name": "ppl.clear",
+      "risk": "critical",
+      "sync": true,
+      "required_capabilities": ["driver.kernel", "process.ppl.clear"],
+      "params_schema": {"type": "object", "required": ["pid"]},
+      "result_schema": {"type": "object"}
+    }
+  ]
+}

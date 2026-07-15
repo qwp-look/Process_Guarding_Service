@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "report",
+  "version": "1.0.0",
+  "abi": 2,
+  "summary": "Base64 service snapshots and backup reports.",
+  "risk": "low",
+  "capabilities": ["report.snapshot", "report.backup", "event.read", "guard.list", "health.stats"],
+  "methods": [
+    {"name": "report.snapshot", "risk": "low", "sync": true, "required_capabilities": ["report.snapshot", "health.stats", "guard.list", "event.read"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "report.backup", "risk": "low", "sync": true, "required_capabilities": ["report.backup", "health.stats", "guard.list", "event.read"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}
