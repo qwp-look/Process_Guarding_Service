@@ -77,10 +77,10 @@
 ## P1-08 Release 包完整性策略
 
 - 预期行为：release tree、zip、installer 有完整 manifest/checksum，发布前 release smoke 和 artifact 验证强制执行。
-- 当前状态：`package_release.bat` 已增加必需产物检查；`build_installer.bat` 默认跑 `release_smoke.ps1`；本轮已生成 `installer\Output\pgs_release_3.1.0.zip` 和 `pgs_setup_3.1.0.exe`，但签名、checksum、SBOM 未实现。
+- 当前状态：`package_release.bat` 已增加必需产物检查；`build_installer.bat` 默认跑 `release_smoke.ps1` 并生成 `SHA256SUMS.txt`；发布产物改为上传到 GitHub Releases，不再提交 `release\` 或 `installer\Output\`；签名、SBOM、release manifest 未实现。
 - 未完成原因：签名证书和发布流程未配置。
-- 下一步方案：生成 `SHA256SUMS.txt`；接入代码签名；发布 workflow 上传校验文件。
-- 测试方式：篡改文件后 checksum 失败；签名验证通过。
+- 下一步方案：接入代码签名；生成 release manifest/SBOM；发布 workflow 自动上传并校验产物。
+- 测试方式：`SHA256SUMS.txt` 能校验 zip/installer；篡改文件后 checksum 失败；签名验证通过。
 - 相关入口：`tools/package_release.bat`、`tools/build_installer.bat`、`.github/workflows/publish-release.yml`
 - 优先级：P1
 

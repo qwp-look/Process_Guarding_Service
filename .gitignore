@@ -2,10 +2,16 @@
 build/
 build_release/
 build_verify/
+build_*/
 */build/
 */*/build/
 pd-*/
 release_smoke_service*.log
+
+# Generated release artifacts. Build these locally, then upload them to
+# GitHub Releases; they should not be committed to the source repository.
+release/
+installer/Output/
 
 # Object files, static/shared libraries, debug symbols
 *.o

@@ -17,7 +17,7 @@ Process_Guarding_Service (PGS) 是一个 Windows 进程守护工具，用来把�
 
 推荐使用安装包：
 
-1. 以管理员身份运行 `pgs_setup_3.1.0.exe`。
+1. 从 GitHub Releases 下载最新 beta，管理员身份运行 `pgs_setup_0.1.0-beta.1.exe`。
 2. 在向导里安装并启动 PGS 服务。
 3. 打开 **PGS 管理端（Qt）**，按提示填入首次 token，然后添加要守护的程序。
 

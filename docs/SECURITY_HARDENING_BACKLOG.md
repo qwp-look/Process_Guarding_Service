@@ -97,7 +97,7 @@
 ## P1-10 发布签名、哈希和供应链完整性
 
 - 影响组件：installer、portable zip、modules、driver
-- 当前行为：release smoke 检查产物存在和可运行；尚未签名 installer/exe/dll/sys，也未发布 checksums/SBOM。
+- 当前行为：release smoke 检查产物存在和可运行；beta 发布会附带 `SHA256SUMS.txt`；尚未签名 installer/exe/dll/sys，也未发布 SBOM 或自动化 provenance。
 - 风险/攻击面：用户无法验证下载物来源；驱动和模块替换难以及时发现。
 - 建议修复：接入代码签名；生成 SHA-256SUMS；发布 SBOM；installer 校验 bundled 文件；模块 allowlist 与 release 哈希同源生成。
 - 涉及入口：`tools/build_installer.bat`、`tools/package_release.bat`、`.github/workflows/publish-release.yml`。

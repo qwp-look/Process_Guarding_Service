@@ -17,7 +17,7 @@ tools\package_release.bat
 - 复制 docs、modules、examples、Qt/MinGW 运行库。
 - 验证必须产物存在。
 
-不要直接发布仓库中旧的 `release\`。
+不要直接发布仓库中旧的 `release\`。`release\` 是本地生成目录，已被 Git 忽略；发布包应上传到 GitHub Releases。
 
 ## 生成 zip 和安装器
 
@@ -27,8 +27,11 @@ tools\build_installer.bat
 
 脚本会先调用 `tools\package_release.bat`，再运行 release smoke，最后生成：
 
-- `installer\Output\pgs_release_3.1.0.zip`
-- `installer\Output\pgs_setup_3.1.0.exe`
+- `installer\Output\pgs_release_0.1.0-beta.1.zip`
+- `installer\Output\pgs_setup_0.1.0-beta.1.exe`
+- `installer\Output\SHA256SUMS.txt`
+
+`installer\Output\` 也是本地生成目录，不能提交到仓库。
 
 release smoke 会验证：
 
@@ -52,7 +55,6 @@ release smoke 会验证：
 以下内容未在功能完成版中实现：
 
 - 代码签名。
-- SHA256SUMS。
 - SBOM。
 - release allowlist 自动写入模块哈希。
 

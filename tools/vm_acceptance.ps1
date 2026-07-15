@@ -303,8 +303,8 @@ function Wait-ServiceToolStatus {
 }
 
 $WorkRoot = [System.IO.Path]::GetFullPath($WorkRoot)
-if (-not $ReleaseZip) { $ReleaseZip = Join-Path $WorkRoot 'pgs_release_3.1.0.zip' }
-if (-not $SetupExe) { $SetupExe = Join-Path $WorkRoot 'pgs_setup_3.1.0.exe' }
+if (-not $ReleaseZip) { $ReleaseZip = Join-Path $WorkRoot 'pgs_release_0.1.0-beta.1.zip' }
+if (-not $SetupExe) { $SetupExe = Join-Path $WorkRoot 'pgs_setup_0.1.0-beta.1.exe' }
 if (-not $InstallDir) { $InstallDir = Join-Path ${env:ProgramFiles} 'ProcessGuard' }
 
 $ReleaseZip = [System.IO.Path]::GetFullPath($ReleaseZip)

@@ -6,7 +6,8 @@ pushd "%~dp0.."
 REM ===========================================================================
 REM  build_installer.bat - Assemble the release tree and compile the Inno Setup
 REM  installer into installer\Output\pgs_setup_<version>.exe and the portable
-REM  release zip into installer\Output\pgs_release_<version>.zip.
+REM  release zip into installer\Output\pgs_release_<version>.zip. A matching
+REM  SHA256SUMS.txt is generated beside the artifacts for GitHub Releases.
 REM
 REM  Prereqs:
 REM    - MSYS2 MinGW64 + Qt6 (for tools\package_release.bat)
@@ -17,7 +18,7 @@ REM Use the 8.3 short path here. Expanding "Program Files (x86)" inside a
 REM parenthesized batch block can confuse cmd.exe because of the literal ")".
 if not defined ISCC set "ISCC=C:\Progra~2\Inno Setup 6\ISCC.exe"
 
-set "PGS_VERSION=3.1.0"
+if not defined PGS_VERSION set "PGS_VERSION=0.1.0-beta.1"
 
 echo [1/5] Building + assembling release tree (tools\package_release.bat)...
 call tools\package_release.bat
@@ -52,9 +53,14 @@ echo [4/5] Compiling installer (installer\pgs_installer.iss)...
 "%ISCC%" installer\pgs_installer.iss
 if errorlevel 1 ( echo ERROR: ISCC failed & popd & exit /b 1 )
 
-echo [5/5] Done. Artifacts:
+echo [5/6] Writing SHA256SUMS.txt...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $out=(Resolve-Path 'installer\Output').Path; $sha=[System.Security.Cryptography.SHA256]::Create(); try { $files=@('pgs_release_%PGS_VERSION%.zip','pgs_setup_%PGS_VERSION%.exe'); $lines=foreach($name in $files){$path=Join-Path $out $name; if(-not (Test-Path -LiteralPath $path)){throw ('missing artifact: ' + $path)}; $bytes=[System.IO.File]::ReadAllBytes($path); $hash=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant(); ($hash + '  ' + $name)}; Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Value $lines -Encoding ASCII } finally { $sha.Dispose() }"
+if errorlevel 1 ( echo ERROR: SHA256SUMS generation failed & popd & exit /b 1 )
+
+echo [6/6] Done. Artifacts:
 dir /b installer\Output\pgs_setup_*.exe 2>nul
 dir /b installer\Output\pgs_release_*.zip 2>nul
+dir /b installer\Output\SHA256SUMS.txt 2>nul
 
 popd
 exit /b 0

@@ -14,7 +14,7 @@
 ; ===========================================================================
 
 #define PGSAppName         "ProcessGuard Service"
-#define PGSAppVersion      "3.1.0"
+#define PGSAppVersion      "0.1.0-beta.1"
 #define PGSAppPublisher    "qwp-look"
 #define PGSAppExeName      "pgs_service.exe"
 
