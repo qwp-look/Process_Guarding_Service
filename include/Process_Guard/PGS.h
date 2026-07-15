@@ -79,6 +79,30 @@ namespace ProcessGuard
         int hangTimeoutMs = 0;
         bool killOnExit = false;
         HANDLE jobHandle = nullptr;
+
+        // Phase 8 guard metadata. These fields are deliberately data-only:
+        // health checks and restart hooks are stored/validated by the core,
+        // while execution remains opt-in via trusted modules/future runners.
+        std::string healthCheckJson;
+        std::string groupName;
+        bool paused = false;
+        std::int64_t createdAtMs = 0;
+        std::int64_t lastStartMs = 0;
+        std::int64_t lastExitMs = 0;
+        int lastExitCode = 0;
+        std::int64_t cumulativeRunMs = 0;
+        std::int64_t restartIntervalSumMs = 0;
+        int restartIntervalCount = 0;
+        bool crashLoop = false;
+        std::string restartHookJson;
+    };
+
+    struct GuardGroupState
+    {
+        std::string name;
+        bool paused = false;
+        int startupOrder = 0;
+        std::vector<std::string> dependencies;
     };
 
     struct RestartPolicyState
@@ -120,6 +144,18 @@ namespace ProcessGuard
         bool backoff = false;
         int hangTimeoutMs = 0;
         bool killOnExit = false;
+        std::string healthCheckJson;
+        std::string groupName;
+        bool paused = false;
+        std::int64_t createdAtMs = 0;
+        std::int64_t lastStartMs = 0;
+        std::int64_t lastExitMs = 0;
+        int lastExitCode = 0;
+        std::int64_t cumulativeRunMs = 0;
+        std::int64_t restartIntervalSumMs = 0;
+        int restartIntervalCount = 0;
+        bool crashLoop = false;
+        std::string restartHookJson;
     };
 
     class PGS
@@ -146,8 +182,11 @@ namespace ProcessGuard
         bool start();
         void stop();
         bool isRunning() const;
-        // Opt-in toggle for PPL/module loading (default off). Must be set before initialize().
-        void setPplEnabled(bool enabled) { m_pplEnabled = enabled; }
+        // Compatibility opt-in toggle for PPL/module loading (default off).
+        // New code should use setModulesEnabled()/setKernelModulesEnabled().
+        void setPplEnabled(bool enabled) { m_pplEnabled = enabled; if (enabled) m_modulesEnabled = true; }
+        void setModulesEnabled(bool enabled) { m_modulesEnabled = enabled; }
+        void setKernelModulesEnabled(bool enabled) { m_kernelModulesEnabled = enabled; if (enabled) m_modulesEnabled = true; }
         // Override the listen port (default kServerPort); must be set before
         // initialize()/start(). Honoured by createListenSocket().
         void setServerPort(std::uint16_t port) { m_serverPort = port ? port : kServerPort; m_serverPortUserSet = true; }
@@ -212,12 +251,15 @@ namespace ProcessGuard
         // Durable desired-state archive: what should still be guarded after the
         // service host is restarted by the SCM. Independent from live handles.
         std::unordered_map<std::uint64_t, PersistedGuardState> m_persistedGuards;
+        std::unordered_map<std::string, GuardGroupState> m_guardGroups;
         std::atomic<std::uint64_t> m_nextGuardId{1};
 
         // Modules: loaded DLL plugins discovered under m_modulesDir.
         ModuleManager m_modules;
         std::string m_modulesDir;
-        bool m_pplEnabled{false};
+        bool m_pplEnabled{false}; // legacy alias for kernel/PPL module opt-in
+        bool m_modulesEnabled{false};
+        bool m_kernelModulesEnabled{false};
         // When false (default), ModuleManager refuses any DLL not listed in
         // <exe>\modules\modules.allow. When true, the legacy permissive load-all
         // behaviour is restored for development. Persisted as MODULES_PERMISSIVE.
@@ -275,10 +317,14 @@ namespace ProcessGuard
         // TCP clients must go through processMessage(); ABI v2 module callbacks
         // use this path so they do not need to know the operator token.
         std::string dispatchCommandLine(const std::string &commandLine);
-        // "module list|load|unload|call" sub-protocol handler.
+        // "module list|load|unload|call|invoke" sub-protocol handler.
         std::string handleModuleCommand(const std::string &args);
         // "ppl set|get|clear" convenience wrapper that routes to the ppl module.
         std::string handlePplCommand(const std::string &args);
+        // Phase 8 guard metadata and batch-control commands.
+        std::string handleHealthCheckCommand(const std::string &args);
+        std::string handleGroupCommand(const std::string &args);
+        std::string handleRestartHookCommand(const std::string &args);
         // "events list [limit]" returns a bounded in-memory action timeline.
         std::string handleEventsCommand(const std::string &args);
         void recordEvent(const std::string &type, const std::string &detail);
@@ -288,6 +334,10 @@ namespace ProcessGuard
         // callThunk routes a trusted in-process command to dispatchCommandLine;
         // nowMsThunk returns epoch millis for schedule arithmetic.
         static int callThunk(void *context, const char *request, char *response, size_t responseSize);
+        static int callJsonThunk(void *context, const char *requestJson, char *responseJson, size_t responseSize);
+        static int emitEventThunk(void *context, const char *eventJson);
+        static const char *getDataDirThunk(void *context);
+        static void logThunk(void *context, int level, const char *message);
         static long long nowMsThunk(void *context);
         bool isPathInsideModulesDir(const std::string &candidateUtf8) const;
         bool writeInitialTokenFile(const std::string &stateDir, const std::string &token) const;
@@ -346,6 +396,12 @@ namespace ProcessGuard
         bool restorePersistedGuards();
         bool tryAttachPersistedGuard(const PersistedGuardState &persisted, GuardInfo &outGuard);
         void persistState();
+        static std::int64_t currentEpochMs();
+        static GuardInfo desiredGuardFromPersisted(const PersistedGuardState &persisted);
+        static void copyGuardToPersisted(const GuardInfo &guard, PersistedGuardState &persisted);
+        static void inheritRestartProfile(GuardInfo &newGuard, const GuardInfo &oldGuard);
+        static void markGuardExitForProfile(GuardInfo &guard, DWORD exitCode, std::int64_t exitMs);
+        static std::int64_t effectiveCumulativeRunMs(const GuardInfo &guard, std::int64_t nowMs);
         static bool parsePid(const std::string &value, DWORD &outPid);
         static bool parseMaxRestarts(const std::string &value, int &outMaxRestarts);
         static std::string maxRestartsLabel(int maxRestarts);
@@ -356,7 +412,7 @@ namespace ProcessGuard
         static std::string defaultStateFilePath(const std::string &logFilePath);
         static RecvResult recvMessage(SOCKET socket, std::string &payload);
         static bool sendAll(SOCKET socket, const std::string &payload);
-        static std::string makeGuardSummaryLine(const GuardInfo &guard, int restartCount);
+        static std::string makeGuardSummaryLine(const GuardInfo &guard, int restartCount, bool groupPaused = false);
         static std::string parentDirectory(const std::string &path);
         static std::string maxRestartsLabelFor(int maxRestarts) { return maxRestartsLabel(maxRestarts); }
         bool stripAuthEnvelope(const std::string &message, std::string &commandLine) const;

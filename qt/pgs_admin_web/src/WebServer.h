@@ -64,6 +64,7 @@ private:
     QHttpServerResponse handleHealth() const;
     QHttpServerResponse handleClusterHealth();
     QHttpServerResponse handlePing();
+    QHttpServerResponse handleDoctor();
     QHttpServerResponse handleGuards();
     QHttpServerResponse handleGuard(const PgsHttp::Request &request);
     QHttpServerResponse handleBless(const PgsHttp::Request &request);
@@ -83,6 +84,7 @@ private:
     QHttpServerResponse handleIndex() const;
     QHttpServerResponse handleIndexHtml() const;
     bool isRequestAuthorized(const PgsHttp::Request &request) const;
+    bool isLocalPageRequestAllowed(const PgsHttp::Request &request) const;
 
     // Phase-1 implementation intentionally reuses pgs_bless/pgs_service as the
     // integration boundary. That keeps the browser console thin and lets it

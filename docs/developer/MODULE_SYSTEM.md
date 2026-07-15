@@ -2,6 +2,8 @@
 
 模块系统让 PGS 可以按需扩展能力。模块是 Windows DLL，放在 `<exe>\modules\<name>\` 下，通过 `module load` 显式加载或在 opt-in 场景中扫描加载。
 
+更底层的生态设计、`module.manifest.json`、`modules.lock`、manager extension 和 JSON-RPC 风格调用，见 [模块生态基础](../MODULE_ECOSYSTEM.md)。本文只保留开发者日常实现和调试时最常用的模块接口说明。
+
 ## ABI
 
 模块导出：

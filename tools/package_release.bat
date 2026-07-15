@@ -76,7 +76,7 @@ if exist "%RELEASE%" (
         exit /b 1
     )
 )
-mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
+mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_bless.exe"       "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_admin_qt\pgs_admin_qt.exe" "%RELEASE%\" >nul
@@ -93,21 +93,31 @@ copy /Y "%BUILD%\modules\ppl\pgs_ppl_module.dll" "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\Sirius.sys"         "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\module.html"        "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\ppl\module.manifest"     "%RELEASE%\modules\ppl\" >nul
+copy /Y "%BUILD%\modules\ppl\module.manifest.json" "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\sched\pgs_sched_module.dll" "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.html"          "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.manifest"      "%RELEASE%\modules\sched\" >nul
+copy /Y "%BUILD%\modules\sched\module.manifest.json" "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\health\pgs_health_module.dll" "%RELEASE%\modules\health\" >nul
 copy /Y "%BUILD%\modules\health\module.html"           "%RELEASE%\modules\health\" >nul
 copy /Y "%BUILD%\modules\health\module.manifest"       "%RELEASE%\modules\health\" >nul
+copy /Y "%BUILD%\modules\health\module.manifest.json" "%RELEASE%\modules\health\" >nul
 copy /Y "%BUILD%\modules\profile\pgs_profile_module.dll" "%RELEASE%\modules\profile\" >nul
 copy /Y "%BUILD%\modules\profile\module.html"            "%RELEASE%\modules\profile\" >nul
 copy /Y "%BUILD%\modules\profile\module.manifest"        "%RELEASE%\modules\profile\" >nul
+copy /Y "%BUILD%\modules\profile\module.manifest.json" "%RELEASE%\modules\profile\" >nul
 copy /Y "%BUILD%\modules\report\pgs_report_module.dll" "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\report\module.html"           "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\report\module.manifest"       "%RELEASE%\modules\report\" >nul
+copy /Y "%BUILD%\modules\report\module.manifest.json" "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\modules.allow"        "%RELEASE%\modules\" >nul
+copy /Y "%BUILD%\modules\modules.lock"         "%RELEASE%\modules\" >nul
+copy /Y "module_managers\official\manager.manifest.json" "%RELEASE%\module_managers\official\" >nul
+copy /Y "modules_staging\README.md" "%RELEASE%\modules_staging\" >nul
 copy /Y "docs\INDEX.md"              "%RELEASE%\docs\" >nul
 copy /Y "docs\MODULE_SYSTEM.md"       "%RELEASE%\docs\" >nul
+copy /Y "docs\MODULE_ECOSYSTEM.md"    "%RELEASE%\docs\" >nul
+copy /Y "docs\REMAINING_UPGRADE_PLAN.md" "%RELEASE%\docs\" >nul
 copy /Y "docs\SERVICE_MODE_GUIDE.md"  "%RELEASE%\docs\" >nul
 copy /Y "docs\TECHNICAL_ARCHITECTURE.md" "%RELEASE%\docs\" >nul
 copy /Y "docs\ROBUSTNESS_AND_TESTING.md" "%RELEASE%\docs\" >nul
@@ -120,6 +130,8 @@ copy /Y "docs\UNFINISHED_FEATURES_BACKLOG.md" "%RELEASE%\docs\" >nul
 xcopy /E /I /Y "docs\user" "%RELEASE%\docs\user" >nul
 xcopy /E /I /Y "docs\operator" "%RELEASE%\docs\operator" >nul
 xcopy /E /I /Y "docs\developer" "%RELEASE%\docs\developer" >nul
+if not exist "%RELEASE%\docs\schemas" mkdir "%RELEASE%\docs\schemas" >nul 2>&1
+copy /Y "docs\schemas\*.json"          "%RELEASE%\docs\schemas\" >nul
 copy /Y "LICENSE"                     "%RELEASE%\" >nul
 copy /Y "LICENSE.ThirdParty.StarlightGUI.txt" "%RELEASE%\" >nul
 copy /Y "NOTICE"                      "%RELEASE%\" >nul
@@ -154,25 +166,35 @@ for %%F in (
   pgs_admin_web.exe
   pgs_cluster_web.exe
   modules\modules.allow
+  modules\modules.lock
   modules\ppl\pgs_ppl_module.dll
   modules\ppl\Sirius.sys
   modules\ppl\module.html
   modules\ppl\module.manifest
+  modules\ppl\module.manifest.json
   modules\sched\pgs_sched_module.dll
   modules\sched\module.html
   modules\sched\module.manifest
+  modules\sched\module.manifest.json
   modules\health\pgs_health_module.dll
   modules\health\module.html
   modules\health\module.manifest
+  modules\health\module.manifest.json
   modules\profile\pgs_profile_module.dll
   modules\profile\module.html
   modules\profile\module.manifest
+  modules\profile\module.manifest.json
   modules\report\pgs_report_module.dll
   modules\report\module.html
   modules\report\module.manifest
+  modules\report\module.manifest.json
+  module_managers\official\manager.manifest.json
+  modules_staging\README.md
   examples\smoke_worker.exe
   docs\INDEX.md
   docs\MODULE_SYSTEM.md
+  docs\MODULE_ECOSYSTEM.md
+  docs\REMAINING_UPGRADE_PLAN.md
   docs\SERVICE_MODE_GUIDE.md
   docs\TECHNICAL_ARCHITECTURE.md
   docs\ROBUSTNESS_AND_TESTING.md
@@ -197,6 +219,9 @@ for %%F in (
   docs\developer\MODULE_SYSTEM.md
   docs\developer\PROTOCOL.md
   docs\developer\TESTING.md
+  docs\schemas\manager.manifest.schema.json
+  docs\schemas\module.manifest.schema.json
+  docs\schemas\modules.lock.schema.json
   README.md
 ) do (
   if not exist "%RELEASE%\%%F" (

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pgs.local/schemas/module.manifest.schema.json",
+  "title": "PGS module manifest",
+  "type": "object",
+  "required": ["name", "version", "abi", "capabilities", "methods"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"type": "string"},
+    "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+    "version": {"type": "string"},
+    "abi": {"type": "integer", "minimum": 2, "maximum": 3},
+    "summary": {"type": "string"},
+    "publisher": {"type": "string"},
+    "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+    "capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "methods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "risk", "sync", "required_capabilities"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+\\.[A-Za-z0-9_.-]+$"},
+          "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+          "sync": {"type": "boolean"},
+          "required_capabilities": {"type": "array", "items": {"type": "string"}},
+          "params_schema": {"type": "object"},
+          "result_schema": {"type": "object"}
+        }
+      }
+    }
+  }
+}

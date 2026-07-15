@@ -21,7 +21,7 @@
  *    single failing DLL is silently skipped so one bad plugin cannot prevent
  *    the rest from loading. Returns the count newly loaded this call.
  *  - load() loads one DLL by path. It validates required exports (PG_GetName +
- *    PG_Invoke), rejects duplicate names (case-insensitive), and calls
+ *    PG_Invoke or PG_InvokeJson), rejects duplicate names (case-insensitive), and calls
  *    PG_Init; any failure frees the library and returns an error string.
  *  - unload() calls PG_Shutdown then FreeLibrary.
  *
@@ -120,6 +120,7 @@ namespace ProcessGuard
             bool hasAbiVersion = false;
             bool hasNameExport = false;
             bool hasInvokeExport = false;
+            bool hasInvokeJsonExport = false;
             bool hasManifestExport = false;
             ModuleManifest manifest;
             std::string sha256;
@@ -136,6 +137,8 @@ namespace ProcessGuard
             unsigned int abiVersion = 0;
             bool hasAbiVersion = false;
             ModuleManifest manifest;
+            bool hasInvokeJson = false;
+            bool disabled = false;
         };
         /* Snapshot of currently loaded modules (name, version). */
         std::vector<ModuleInfo> list() const;
@@ -152,11 +155,22 @@ namespace ProcessGuard
         bool invoke(const std::string &name, const std::string &request,
                     std::string &response, std::string &err);
 
+        /* Invoke the optional ABI v3 JSON-RPC entry. If the module has no
+         * PG_InvokeJson export, the manager falls back to PG_Invoke with a KV
+         * shim request containing method and params_json_b64. */
+        bool invokeJson(const std::string &name, const std::string &requestJson,
+                        std::string &responseJson, std::string &err);
+
         // v3 security: permissive mode (default false) bypasses the allowlist so
         // the legacy "load any DLL" behaviour is available for development. The
         // operator opt-in flag lives on PGS (m_modulesPermissive) and is pushed
         // here before loadFromDirectory().
         void setPermissive(bool v) { m_permissive = v; }
+
+        // Runtime enablement gate. Only names present here are eligible for
+        // startup scan/direct load. Empty means load no modules unless the
+        // caller explicitly switches to the compatibility permissive path.
+        void setEnabledModules(std::vector<std::string> names);
 
         // Defense-in-depth for all future direct callers: once the manager has
         // a modules root, load() refuses DLLs that resolve outside it. PGS
@@ -167,7 +181,7 @@ namespace ProcessGuard
         // this before loadFromDirectory() so modules receive callbacks. When
         // not ready (m_servicesReady false), PG_Init receives NULL and v1
         // modules keep working unchanged.
-        void setServices(const PGS_Services &s) { m_services = s; m_servicesReady = true; }
+        void setServices(const PGS_ServicesV3 &s) { m_services = s; m_servicesReady = true; }
 
         // Return the allowlist key a module path maps to. Exposed for tests and
         // diagnostics; loading still uses the private helper below.
@@ -201,6 +215,7 @@ namespace ProcessGuard
             int (*init)(void *) = nullptr;
             void (*shutdown)(void) = nullptr;
             int (*invoke)(const char *, char *, size_t) = nullptr;
+            int (*invokeJson)(const char *, char *, size_t) = nullptr;
             struct RuntimeState
             {
                 std::mutex mutex;
@@ -209,6 +224,7 @@ namespace ProcessGuard
                 bool unloading = false;
             };
             std::shared_ptr<RuntimeState> runtime;
+            std::shared_ptr<void> serviceContext;
         };
 
         mutable std::shared_mutex m_mutex;
@@ -224,11 +240,13 @@ namespace ProcessGuard
         std::vector<AllowEntry> m_allowlist;
         bool m_allowlistLoaded = false;
         bool m_permissive = false;
+        std::vector<std::string> m_enabledModules;
         std::string m_modulesRoot;
-        PGS_Services m_services{};
+        PGS_ServicesV3 m_services{};
         bool m_servicesReady = false;
         void loadAllowlist(const std::string &dir);
         const AllowEntry *findAllowEntry(const std::string &moduleKey) const;
+        bool isModuleEnabled(const std::string &moduleKey) const;
         static std::string moduleKeyFromPath(const std::string &path);
         static bool verifySignature(const std::wstring &path);
         bool isInsideConfiguredModulesRoot(const std::string &path) const;

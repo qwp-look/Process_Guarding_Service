@@ -65,6 +65,7 @@ cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" "$BUILD_DIR/modules/sched/" 2>/dev/nu
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" "$BUILD_DIR/modules/sched/" 2>/dev/null || true
 cp -f modules/sched/module.html "$BUILD_DIR/modules/sched/module.html"
 cp -f modules/sched/module.manifest "$BUILD_DIR/modules/sched/module.manifest"
+cp -f modules/sched/module.manifest.json "$BUILD_DIR/modules/sched/module.manifest.json"
 
 # Health module: lightweight service status wrapper around stats/list/events.
 echo "[12/15] Building pgs_health_module.dll..."
@@ -75,6 +76,7 @@ cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" "$BUILD_DIR/modules/health/" 2>/dev/n
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" "$BUILD_DIR/modules/health/" 2>/dev/null || true
 cp -f modules/health/module.html "$BUILD_DIR/modules/health/module.html"
 cp -f modules/health/module.manifest "$BUILD_DIR/modules/health/module.manifest"
+cp -f modules/health/module.manifest.json "$BUILD_DIR/modules/health/module.manifest.json"
 
 # Profile module: named restart-policy profiles, persisted beside the module.
 echo "[13/15] Building pgs_profile_module.dll..."
@@ -85,6 +87,7 @@ cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" "$BUILD_DIR/modules/profile/" 2>/dev/
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" "$BUILD_DIR/modules/profile/" 2>/dev/null || true
 cp -f modules/profile/module.html "$BUILD_DIR/modules/profile/module.html"
 cp -f modules/profile/module.manifest "$BUILD_DIR/modules/profile/module.manifest"
+cp -f modules/profile/module.manifest.json "$BUILD_DIR/modules/profile/module.manifest.json"
 
 # Report module: base64 snapshots/backup exports from stats/list/events.
 echo "[14/15] Building pgs_report_module.dll..."
@@ -95,6 +98,7 @@ cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" "$BUILD_DIR/modules/report/" 2>/dev/n
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" "$BUILD_DIR/modules/report/" 2>/dev/null || true
 cp -f modules/report/module.html "$BUILD_DIR/modules/report/module.html"
 cp -f modules/report/module.manifest "$BUILD_DIR/modules/report/module.manifest"
+cp -f modules/report/module.manifest.json "$BUILD_DIR/modules/report/module.manifest.json"
 
 # Default module allowlist: approve the bundled modules.
 mkdir -p "$BUILD_DIR/modules"
@@ -110,6 +114,7 @@ mkdir -p "$BUILD_DIR/modules/ppl"
 cp -f modules/ppl/Sirius.sys "$BUILD_DIR/modules/ppl/Sirius.sys"
 cp -f modules/ppl/module.html "$BUILD_DIR/modules/ppl/module.html"
 cp -f modules/ppl/module.manifest "$BUILD_DIR/modules/ppl/module.manifest"
+cp -f modules/ppl/module.manifest.json "$BUILD_DIR/modules/ppl/module.manifest.json"
 # MinGW runtime DLLs: copy into build/ (process dir) and build/modules/ppl/
 # (module folder, self-contained) so binaries run without MSYS2 in PATH. The
 # module DLL inherits libstdc++/libgcc from the already-loaded pgs_service.exe,
@@ -120,6 +125,28 @@ cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" "$BUILD_DIR/" 2>/dev/null || true
 cp -f "$MINGW_ROOT/bin/libstdc++-6.dll" "$BUILD_DIR/modules/ppl/" 2>/dev/null || true
 cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" "$BUILD_DIR/modules/ppl/" 2>/dev/null || true
 cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" "$BUILD_DIR/modules/ppl/" 2>/dev/null || true
+
+{
+  echo '{"version":1,"generated_at":"build","modules":['
+  first=1
+  for name in sched health profile report ppl; do
+    dll="$BUILD_DIR/modules/$name/pgs_${name}_module.dll"
+    hash="$(sha256sum "$dll" | awk '{print $1}')"
+    [ $first -eq 1 ] || echo ','
+    first=0
+    risk="low"; [ "$name" = "ppl" ] && risk="critical"; [ "$name" = "sched" ] && risk="medium"; [ "$name" = "profile" ] && risk="medium"
+    caps='[]'
+    case "$name" in
+      sched) caps='["sched.add","sched.list","sched.remove","sched.enable","sched.disable","guard.register","guard.unregister","guard.intentional","guard.policy","guard.list"]' ;;
+      health) caps='["health.summary","health.stats","guard.list","event.read"]' ;;
+      profile) caps='["profile.set","profile.list","profile.apply","guard.policy"]' ;;
+      report) caps='["report.snapshot","report.backup","event.read","guard.list","health.stats"]' ;;
+      ppl) caps='["driver.kernel","driver.sirius.load","process.ppl.set","process.ppl.clear","ppl.set","ppl.get","ppl.clear"]' ;;
+    esac
+    printf '{"name":"%s","version":"1.0.0","sha256":"%s","publisher":"PGS bundled","source":"bundled","capabilities":%s,"risk":"%s","trustedAt":"build","signature_policy":"hash","require_signed":false}' "$name" "$hash" "$caps" "$risk"
+  done
+  echo ']}'
+} > "$BUILD_DIR/modules/modules.lock"
 
 echo
 echo "Build completed:"

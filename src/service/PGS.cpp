@@ -63,6 +63,103 @@ bool isSha256Hex(const std::string &value)
     return true;
 }
 
+std::string sanitizeGroupName(std::string name)
+{
+    name = ProcessGuard::util::toLowerAscii(ProcessGuard::util::trim(name));
+    if (name.size() > 64)
+    {
+        return std::string();
+    }
+    for (char ch : name)
+    {
+        const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+                        ch == '_' || ch == '-' || ch == '.';
+        if (!ok)
+        {
+            return std::string();
+        }
+    }
+    return name;
+}
+
+std::vector<std::string> splitCsvTrimmed(const std::string &value)
+{
+    std::vector<std::string> out;
+    std::string current;
+    for (char ch : value)
+    {
+        if (ch == ',')
+        {
+            const std::string item = sanitizeGroupName(current);
+            if (!item.empty())
+            {
+                out.push_back(item);
+            }
+            current.clear();
+        }
+        else
+        {
+            current.push_back(ch);
+        }
+    }
+    const std::string item = sanitizeGroupName(current);
+    if (!item.empty())
+    {
+        out.push_back(item);
+    }
+    return out;
+}
+
+std::string joinCsv(const std::vector<std::string> &values)
+{
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < values.size(); ++i)
+    {
+        if (i != 0)
+        {
+            oss << ',';
+        }
+        oss << values[i];
+    }
+    return oss.str();
+}
+
+bool parseInt64Field(const std::string &value, std::int64_t &out)
+{
+    const std::string text = ProcessGuard::util::trim(value);
+    if (text.empty())
+    {
+        return false;
+    }
+    try
+    {
+        out = std::stoll(text);
+        return true;
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+}
+
+bool parseIntField(const std::string &value, int &out)
+{
+    std::int64_t parsed = 0;
+    if (!parseInt64Field(value, parsed) || parsed < std::numeric_limits<int>::min() ||
+        parsed > std::numeric_limits<int>::max())
+    {
+        return false;
+    }
+    out = static_cast<int>(parsed);
+    return true;
+}
+
+bool looksLikeJsonObjectOrArray(const std::string &text)
+{
+    const std::string t = ProcessGuard::util::trim(text);
+    return !t.empty() && ((t.front() == '{' && t.back() == '}') || (t.front() == '[' && t.back() == ']'));
+}
+
 bool secureModulesTree(const std::string &modulesDir)
 {
     if (modulesDir.empty() || !ProcessGuard::util::secureCreateDirectory(modulesDir))
@@ -223,6 +320,127 @@ PGS::~PGS()
     stop();
 }
 
+std::int64_t PGS::currentEpochMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+GuardInfo PGS::desiredGuardFromPersisted(const PersistedGuardState &persisted)
+{
+    GuardInfo guard{};
+    guard.pid = persisted.lastKnownPid;
+    guard.sessionId = persisted.sessionId;
+    guard.path = persisted.path;
+    guard.maxRestarts = persisted.maxRestarts;
+    guard.restartArgs = persisted.restartArgs;
+    guard.fileHash = persisted.fileHash;
+    guard.intentional = persisted.intentional;
+    guard.hashVerified = persisted.hashVerified;
+    guard.guardId = persisted.guardId;
+    guard.appKind = persisted.appKind;
+    guard.aumid = persisted.aumid;
+    guard.restartWindowSec = persisted.restartWindowSec;
+    guard.restartDelayMs = persisted.restartDelayMs;
+    guard.backoff = persisted.backoff;
+    guard.hangTimeoutMs = persisted.hangTimeoutMs;
+    guard.killOnExit = persisted.killOnExit;
+    guard.healthCheckJson = persisted.healthCheckJson;
+    guard.groupName = persisted.groupName;
+    guard.paused = persisted.paused;
+    guard.createdAtMs = persisted.createdAtMs;
+    guard.lastStartMs = persisted.lastStartMs;
+    guard.lastExitMs = persisted.lastExitMs;
+    guard.lastExitCode = persisted.lastExitCode;
+    guard.cumulativeRunMs = persisted.cumulativeRunMs;
+    guard.restartIntervalSumMs = persisted.restartIntervalSumMs;
+    guard.restartIntervalCount = persisted.restartIntervalCount;
+    guard.crashLoop = persisted.crashLoop;
+    guard.restartHookJson = persisted.restartHookJson;
+    return guard;
+}
+
+void PGS::copyGuardToPersisted(const GuardInfo &guard, PersistedGuardState &persisted)
+{
+    persisted.guardId = guard.guardId;
+    persisted.lastKnownPid = guard.pid;
+    persisted.sessionId = guard.sessionId;
+    persisted.path = guard.path;
+    persisted.maxRestarts = guard.maxRestarts;
+    persisted.restartArgs = guard.restartArgs;
+    persisted.fileHash = guard.fileHash;
+    persisted.intentional = guard.intentional;
+    persisted.hashVerified = guard.hashVerified;
+    persisted.appKind = guard.appKind;
+    persisted.aumid = guard.aumid;
+    persisted.restartWindowSec = guard.restartWindowSec;
+    persisted.restartDelayMs = guard.restartDelayMs;
+    persisted.backoff = guard.backoff;
+    persisted.hangTimeoutMs = guard.hangTimeoutMs;
+    persisted.killOnExit = guard.killOnExit;
+    persisted.healthCheckJson = guard.healthCheckJson;
+    persisted.groupName = guard.groupName;
+    persisted.paused = guard.paused;
+    persisted.createdAtMs = guard.createdAtMs;
+    persisted.lastStartMs = guard.lastStartMs;
+    persisted.lastExitMs = guard.lastExitMs;
+    persisted.lastExitCode = guard.lastExitCode;
+    persisted.cumulativeRunMs = guard.cumulativeRunMs;
+    persisted.restartIntervalSumMs = guard.restartIntervalSumMs;
+    persisted.restartIntervalCount = guard.restartIntervalCount;
+    persisted.crashLoop = guard.crashLoop;
+    persisted.restartHookJson = guard.restartHookJson;
+}
+
+void PGS::inheritRestartProfile(GuardInfo &newGuard, const GuardInfo &oldGuard)
+{
+    const std::int64_t nowMs = currentEpochMs();
+    newGuard.healthCheckJson = oldGuard.healthCheckJson;
+    newGuard.groupName = oldGuard.groupName;
+    newGuard.paused = oldGuard.paused;
+    newGuard.createdAtMs = oldGuard.createdAtMs > 0 ? oldGuard.createdAtMs : nowMs;
+    newGuard.lastStartMs = nowMs;
+    newGuard.lastExitMs = oldGuard.lastExitMs;
+    newGuard.lastExitCode = oldGuard.lastExitCode;
+    newGuard.cumulativeRunMs = oldGuard.cumulativeRunMs;
+    newGuard.restartHookJson = oldGuard.restartHookJson;
+    if (oldGuard.lastStartMs > 0)
+    {
+        newGuard.restartIntervalSumMs = oldGuard.restartIntervalSumMs + std::max<std::int64_t>(0, nowMs - oldGuard.lastStartMs);
+        newGuard.restartIntervalCount = oldGuard.restartIntervalCount + 1;
+    }
+    else
+    {
+        newGuard.restartIntervalSumMs = oldGuard.restartIntervalSumMs;
+        newGuard.restartIntervalCount = oldGuard.restartIntervalCount;
+    }
+    const std::int64_t avgMs = newGuard.restartIntervalCount > 0
+        ? (newGuard.restartIntervalSumMs / newGuard.restartIntervalCount)
+        : 0;
+    newGuard.crashLoop = (newGuard.restartIntervalCount >= 3 && avgMs > 0 && avgMs < 60000);
+}
+
+void PGS::markGuardExitForProfile(GuardInfo &guard, DWORD exitCode, std::int64_t exitMs)
+{
+    guard.lastExitMs = exitMs;
+    guard.lastExitCode = static_cast<int>(exitCode);
+    if (guard.lastStartMs > 0 && exitMs > guard.lastStartMs)
+    {
+        guard.cumulativeRunMs += exitMs - guard.lastStartMs;
+    }
+}
+
+std::int64_t PGS::effectiveCumulativeRunMs(const GuardInfo &guard, std::int64_t nowMs)
+{
+    std::int64_t total = guard.cumulativeRunMs;
+    if (guard.handle && guard.lastStartMs > 0 && nowMs > guard.lastStartMs &&
+        WaitForSingleObject(guard.handle, 0) == WAIT_TIMEOUT)
+    {
+        total += nowMs - guard.lastStartMs;
+    }
+    return total;
+}
+
 bool PGS::initialize(const std::string &logFilePath, const std::string &authTokenHash)
 {
     if (m_initialized)
@@ -322,12 +540,13 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         }
     }
 
-    // Prepare <exe>\modules before marking the service initialised. PPL is
-    // opt-in; when it is enabled we recursively harden the tree and refuse
-    // module loading if any existing child file/dir cannot be secured.
+    // Prepare <exe>\modules before marking the service initialised. Module
+    // loading is now a general opt-in; kernel/PPL modules require the separate
+    // high-risk switch. Compatibility --enable-ppl sets both.
     m_modulesDir = moduleDirectoryOfSelf();
+    const bool highRiskModulesEnabled = m_kernelModulesEnabled || m_pplEnabled;
     const bool modulesDirSecured = !m_modulesDir.empty() &&
-        (m_pplEnabled ? secureModulesTree(m_modulesDir) : util::secureCreateDirectory(m_modulesDir));
+        ((m_modulesEnabled || highRiskModulesEnabled) ? secureModulesTree(m_modulesDir) : util::secureCreateDirectory(m_modulesDir));
     if (!modulesDirSecured)
     {
         Logger::warning("PGS: modules directory ACL hardening failed or directory unavailable: " + m_modulesDir);
@@ -339,19 +558,23 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     // can call back into PGS. Built before loadFromDirectory() so every
     // module's PG_Init receives it.
     {
-        PGS_Services svc{};
-        svc.size = static_cast<unsigned int>(sizeof(PGS_Services));
+        PGS_ServicesV3 svc{};
+        svc.size = static_cast<unsigned int>(sizeof(PGS_ServicesV3));
         svc.context = this;
         svc.call = &PGS::callThunk;
         svc.now_ms = &PGS::nowMsThunk;
+        svc.call_json = &PGS::callJsonThunk;
+        svc.emit_event = &PGS::emitEventThunk;
+        svc.get_data_dir = &PGS::getDataDirThunk;
+        svc.log = &PGS::logThunk;
         m_modules.setServices(svc);
     }
     m_modules.setPermissive(m_modulesPermissive);
+    std::vector<std::string> enabledModules = highRiskModulesEnabled ?
+        std::vector<std::string>{"*"} : std::vector<std::string>{"*", "!ppl"};
+    m_modules.setEnabledModules(enabledModules);
     {
-        // PPL module loading is opt-in: it pulls in the Sirius kernel driver
-        // (an ARK-class driver exposing far more than PPL). Only load modules
-        // when the operator explicitly enables PPL via PGS_ENABLE_PPL=1.
-        if (m_pplEnabled && modulesDirSecured)
+        if ((m_modulesEnabled || m_modulesPermissive) && modulesDirSecured)
         {
             const int loaded = m_modules.loadFromDirectory(m_modulesDir);
             if (loaded > 0)
@@ -363,13 +586,13 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
                 Logger::warning("PGS: no modules loaded from " + m_modulesDir);
             }
         }
-        else if (m_pplEnabled)
+        else if (m_modulesEnabled || m_modulesPermissive)
         {
             Logger::error("PGS: module loading refused because modules directory is not secured");
         }
         else
         {
-            Logger::warning("PGS: module loading disabled (PPL opt-in off; set PGS_ENABLE_PPL=1 to enable)");
+            Logger::warning("PGS: module loading disabled (set --enable-modules for normal modules; --enable-kernel-modules or --enable-ppl for PPL)");
         }
     }
     m_initialized = true;
@@ -498,6 +721,9 @@ bool PGS::loadPersistedState()
     // archive (and a stale m_nextGuardId) behind for restorePersistedGuards().
     std::unordered_map<std::uint64_t, PersistedGuardState> parsedGuards;
     std::unordered_map<std::uint64_t, RestartPolicyState> parsedPolicy;
+    std::unordered_map<std::string, GuardGroupState> parsedGroups;
+    std::uint64_t groupCount = 0;
+    std::uint64_t parsedGroupLines = 0;
 
     if (m_stateFilePath.empty())
     {
@@ -623,6 +849,44 @@ bool PGS::loadPersistedState()
             continue;
         }
 
+        if (fields[0] == "GROUP_COUNT")
+        {
+            if (fields.size() >= 2)
+            {
+                parseUnsignedLongLong(fields[1], groupCount);
+            }
+            continue;
+        }
+
+        if (fields[0] == "GROUP")
+        {
+            if (fields.size() < 3)
+            {
+                return false;
+            }
+            GuardGroupState group;
+            group.name = sanitizeGroupName(base64Decode(fields[1]));
+            if (group.name.empty())
+            {
+                return false;
+            }
+            if (!parseBoolFlag(fields[2], group.paused))
+            {
+                return false;
+            }
+            if (fields.size() > 3)
+            {
+                parseIntField(fields[3], group.startupOrder);
+            }
+            if (fields.size() > 4 && fields[4] != "-")
+            {
+                group.dependencies = splitCsvTrimmed(base64Decode(fields[4]));
+            }
+            parsedGroups[group.name] = group;
+            ++parsedGroupLines;
+            continue;
+        }
+
         if (fields[0] == "GUARD")
         {
             if (fields.size() < 10)
@@ -690,6 +954,57 @@ bool PGS::loadPersistedState()
             {
                 const std::string bv = trim(fields[16]);
                 persisted.killOnExit = (bv == "1" || bv == "true" || bv == "yes");
+            }
+            if (fields.size() > 17 && fields[17] != "-")
+            {
+                persisted.healthCheckJson = base64Decode(fields[17]);
+                if (!persisted.healthCheckJson.empty() && !looksLikeJsonObjectOrArray(persisted.healthCheckJson))
+                {
+                    persisted.healthCheckJson.clear();
+                }
+            }
+            if (fields.size() > 18 && fields[18] != "-")
+            {
+                persisted.groupName = sanitizeGroupName(base64Decode(fields[18]));
+            }
+            if (fields.size() > 19)
+            {
+                bool b = false;
+                if (parseBoolFlag(fields[19], b))
+                {
+                    persisted.paused = b;
+                }
+            }
+            if (fields.size() > 20) parseInt64Field(fields[20], persisted.createdAtMs);
+            if (fields.size() > 21) parseInt64Field(fields[21], persisted.lastStartMs);
+            if (fields.size() > 22) parseInt64Field(fields[22], persisted.lastExitMs);
+            if (fields.size() > 23) parseIntField(fields[23], persisted.lastExitCode);
+            if (fields.size() > 24) parseInt64Field(fields[24], persisted.cumulativeRunMs);
+            if (fields.size() > 25) parseInt64Field(fields[25], persisted.restartIntervalSumMs);
+            if (fields.size() > 26) parseIntField(fields[26], persisted.restartIntervalCount);
+            if (fields.size() > 27)
+            {
+                bool b = false;
+                if (parseBoolFlag(fields[27], b))
+                {
+                    persisted.crashLoop = b;
+                }
+            }
+            if (fields.size() > 28 && fields[28] != "-")
+            {
+                persisted.restartHookJson = base64Decode(fields[28]);
+                if (!persisted.restartHookJson.empty() && !looksLikeJsonObjectOrArray(persisted.restartHookJson))
+                {
+                    persisted.restartHookJson.clear();
+                }
+            }
+            if (persisted.createdAtMs <= 0)
+            {
+                persisted.createdAtMs = currentEpochMs();
+            }
+            if (persisted.lastStartMs <= 0 && persisted.lastKnownPid != 0)
+            {
+                persisted.lastStartMs = persisted.createdAtMs;
             }
 
             if (persisted.path.empty() || persisted.guardId == 0)
@@ -762,6 +1077,7 @@ bool PGS::loadPersistedState()
     }
 
     m_persistedGuards = std::move(parsedGuards);
+    m_guardGroups = std::move(parsedGroups);
     m_nextGuardId = std::max<std::uint64_t>(1ull, nextGuardId);
     {
         std::lock_guard<std::mutex> authLock(m_authMutex);
@@ -784,6 +1100,11 @@ bool PGS::loadPersistedState()
 
     Logger::warning("PGS: loaded persisted archive entries=" + std::to_string(m_persistedGuards.size()) +
                     ", state-file=" + m_stateFilePath);
+    if (groupCount != 0 && groupCount != parsedGroupLines)
+    {
+        Logger::warning("PGS: persisted group count mismatch, parsed=" + std::to_string(parsedGroupLines) +
+                        ", declared=" + std::to_string(groupCount));
+    }
     return true;
 }
 
@@ -803,6 +1124,7 @@ void PGS::persistState()
     std::uint64_t nextGuardId = 1;
     std::vector<PersistedGuardState> snapshot;
     std::unordered_map<std::uint64_t, RestartPolicyState> policySnapshot;
+    std::vector<GuardGroupState> groupSnapshot;
     {
         std::lock_guard<std::mutex> guardsLock(m_guardsMutex);
         nextGuardId = m_nextGuardId.load();
@@ -812,10 +1134,18 @@ void PGS::persistState()
             snapshot.push_back(entry.second);
         }
         policySnapshot = m_policyByGuardId;
+        groupSnapshot.reserve(m_guardGroups.size());
+        for (const auto &entry : m_guardGroups)
+        {
+            groupSnapshot.push_back(entry.second);
+        }
     }
 
     std::sort(snapshot.begin(), snapshot.end(), [](const PersistedGuardState &a, const PersistedGuardState &b) {
         return a.guardId < b.guardId;
+    });
+    std::sort(groupSnapshot.begin(), groupSnapshot.end(), [](const GuardGroupState &a, const GuardGroupState &b) {
+        return a.name < b.name;
     });
 
     if (m_stateFilePath.empty())
@@ -843,6 +1173,15 @@ void PGS::persistState()
     out << "AUTH_TOKEN_HASH\t" << authHash << "\n";
     out << "SERVER_PORT\t" << m_serverPort << "\n";
     out << "MODULES_PERMISSIVE\t" << (m_modulesPermissive ? "1" : "0") << "\n";
+    out << "GROUP_COUNT\t" << groupSnapshot.size() << "\n";
+    for (const auto &group : groupSnapshot)
+    {
+        out << "GROUP\t"
+            << base64Encode(group.name) << "\t"
+            << (group.paused ? "1" : "0") << "\t"
+            << group.startupOrder << "\t"
+            << (group.dependencies.empty() ? "-" : base64Encode(joinCsv(group.dependencies))) << "\n";
+    }
     for (const auto &guard : snapshot)
     {
         out << "GUARD\t"
@@ -861,7 +1200,19 @@ void PGS::persistState()
             << guard.restartDelayMs << "\t"
             << (guard.backoff ? "1" : "0") << "\t"
             << guard.hangTimeoutMs << "\t"
-            << (guard.killOnExit ? "1" : "0") << "\n";
+            << (guard.killOnExit ? "1" : "0") << "\t"
+            << (guard.healthCheckJson.empty() ? "-" : base64Encode(guard.healthCheckJson)) << "\t"
+            << (guard.groupName.empty() ? "-" : base64Encode(guard.groupName)) << "\t"
+            << (guard.paused ? "1" : "0") << "\t"
+            << guard.createdAtMs << "\t"
+            << guard.lastStartMs << "\t"
+            << guard.lastExitMs << "\t"
+            << guard.lastExitCode << "\t"
+            << guard.cumulativeRunMs << "\t"
+            << guard.restartIntervalSumMs << "\t"
+            << guard.restartIntervalCount << "\t"
+            << (guard.crashLoop ? "1" : "0") << "\t"
+            << (guard.restartHookJson.empty() ? "-" : base64Encode(guard.restartHookJson)) << "\n";
         const auto pit = policySnapshot.find(guard.guardId);
         if (pit != policySnapshot.end())
         {
@@ -933,25 +1284,20 @@ bool PGS::tryAttachPersistedGuard(const PersistedGuardState &persisted, GuardInf
 
     DWORD sessionId = 0xFFFFFFFF;
     ProcessIdToSessionId(persisted.lastKnownPid, &sessionId);
-    outGuard = GuardInfo{
-        persisted.lastKnownPid,
-        sessionId,
-        actualPath,
-        persisted.maxRestarts,
-        persisted.restartArgs,
-        persisted.fileHash,
-        processHandle,
-        persisted.intentional,
-        persisted.hashVerified,
-        persisted.guardId,
-        persisted.appKind,
-        persisted.aumid,
-        persisted.restartWindowSec,
-        persisted.restartDelayMs,
-        persisted.backoff,
-        persisted.hangTimeoutMs,
-        persisted.killOnExit,
-        nullptr};
+    outGuard = desiredGuardFromPersisted(persisted);
+    outGuard.pid = persisted.lastKnownPid;
+    outGuard.sessionId = sessionId;
+    outGuard.path = actualPath;
+    outGuard.handle = processHandle;
+    outGuard.jobHandle = nullptr;
+    if (outGuard.createdAtMs <= 0)
+    {
+        outGuard.createdAtMs = currentEpochMs();
+    }
+    if (outGuard.lastStartMs <= 0)
+    {
+        outGuard.lastStartMs = outGuard.createdAtMs;
+    }
     // v3: reopen (or create) the survivor's per-guard Job so monitoring of the
     // whole process family resumes after a service crash.
     assignGuardToJob(outGuard);
@@ -992,16 +1338,7 @@ bool PGS::restorePersistedGuards()
             auto it = m_persistedGuards.find(restored.guardId);
             if (it != m_persistedGuards.end())
             {
-                it->second.lastKnownPid = restored.pid;
-                it->second.sessionId = restored.sessionId;
-                it->second.path = restored.path;
-                it->second.appKind = restored.appKind;
-                it->second.aumid = restored.aumid;
-                it->second.restartWindowSec = restored.restartWindowSec;
-                it->second.restartDelayMs = restored.restartDelayMs;
-                it->second.backoff = restored.backoff;
-                it->second.hangTimeoutMs = restored.hangTimeoutMs;
-                it->second.killOnExit = restored.killOnExit;
+                copyGuardToPersisted(restored, it->second);
             }
             Logger::warning("PGS: restored persisted live guard pid=" + std::to_string(restored.pid) +
                             ", guard-id=" + std::to_string(restored.guardId));
@@ -1022,25 +1359,35 @@ bool PGS::restorePersistedGuards()
             continue;
         }
 
-        GuardInfo desired{
-            0,
-            persisted.sessionId,
-            persisted.path,
-            persisted.maxRestarts,
-            persisted.restartArgs,
-            persisted.fileHash,
-            nullptr,
-            false,
-            persisted.hashVerified,
-            persisted.guardId,
-            persisted.appKind,
-            persisted.aumid,
-            persisted.restartWindowSec,
-            persisted.restartDelayMs,
-            persisted.backoff,
-            persisted.hangTimeoutMs,
-            persisted.killOnExit,
-            nullptr};
+        GuardInfo desired = desiredGuardFromPersisted(persisted);
+        desired.pid = 0;
+        desired.handle = nullptr;
+        desired.jobHandle = nullptr;
+        desired.intentional = false;
+
+        bool restorePaused = desired.paused;
+        {
+            std::lock_guard<std::mutex> lock(m_guardsMutex);
+            const auto git = desired.groupName.empty() ? m_guardGroups.end() : m_guardGroups.find(desired.groupName);
+            restorePaused = restorePaused || (git != m_guardGroups.end() && git->second.paused);
+            if (restorePaused)
+            {
+                auto &stored = m_persistedGuards[desired.guardId];
+                stored = persisted;
+                stored.lastKnownPid = 0;
+                stored.intentional = false;
+            }
+        }
+        if (restorePaused)
+        {
+            Logger::warning("PGS: persisted missing guard kept paused during restore, guard-id=" +
+                            std::to_string(persisted.guardId));
+            recordEvent("guard.restore-paused",
+                        "guard_id=" + std::to_string(persisted.guardId) +
+                        ";path=" + persisted.path);
+            changed = true;
+            continue;
+        }
 
         bool shouldRestart = true;
         int restartIndex = 1;
@@ -1114,22 +1461,8 @@ bool PGS::restorePersistedGuards()
             auto &policy = m_policyByGuardId[restarted.guardId];
             policy.maxRestarts = persisted.maxRestarts;
             auto &stored = m_persistedGuards[restarted.guardId];
-            stored.guardId = restarted.guardId;
-            stored.lastKnownPid = restarted.pid;
-            stored.sessionId = restarted.sessionId;
-            stored.path = restarted.path;
-            stored.maxRestarts = restarted.maxRestarts;
-            stored.restartArgs = restarted.restartArgs;
-            stored.fileHash = restarted.fileHash;
+            copyGuardToPersisted(restarted, stored);
             stored.intentional = false;
-            stored.hashVerified = restarted.hashVerified;
-            stored.appKind = restarted.appKind;
-            stored.aumid = restarted.aumid;
-            stored.restartWindowSec = restarted.restartWindowSec;
-            stored.restartDelayMs = restarted.restartDelayMs;
-            stored.backoff = restarted.backoff;
-            stored.hangTimeoutMs = restarted.hangTimeoutMs;
-            stored.killOnExit = restarted.killOnExit;
             Logger::warning("PGS: restored persisted missing guard by restart pid=" + std::to_string(restarted.pid) +
                             ", guard-id=" + std::to_string(restarted.guardId));
             recordEvent("guard.restore-restart",
@@ -1321,22 +1654,8 @@ void PGS::monitorLoop()
                     m_guards[restarted.pid] = restarted;
                     assignGuardToJob(m_guards[restarted.pid]);
                     auto &persisted = m_persistedGuards[restarted.guardId];
-                    persisted.guardId = restarted.guardId;
-                    persisted.lastKnownPid = restarted.pid;
-                    persisted.sessionId = restarted.sessionId;
-                    persisted.path = restarted.path;
-                    persisted.maxRestarts = restarted.maxRestarts;
-                    persisted.restartArgs = restarted.restartArgs;
-                    persisted.fileHash = restarted.fileHash;
+                    copyGuardToPersisted(restarted, persisted);
                     persisted.intentional = false;
-                    persisted.hashVerified = restarted.hashVerified;
-                    persisted.appKind = restarted.appKind;
-                    persisted.aumid = restarted.aumid;
-                    persisted.restartWindowSec = restarted.restartWindowSec;
-                    persisted.restartDelayMs = restarted.restartDelayMs;
-                    persisted.backoff = restarted.backoff;
-                    persisted.hangTimeoutMs = restarted.hangTimeoutMs;
-                    persisted.killOnExit = restarted.killOnExit;
                 }
                 persistState();
                 Logger::warning("PGS: auto-attached restarted guard pid=" + std::to_string(restarted.pid));
@@ -1400,6 +1719,12 @@ void PGS::monitorLoop()
                     continue;
                 }
 
+                DWORD exitCode = 0;
+                if (it->second.handle)
+                {
+                    GetExitCodeProcess(it->second.handle, &exitCode);
+                }
+                markGuardExitForProfile(it->second, exitCode, currentEpochMs());
                 deadGuards.push_back(it->second);
                 it = m_guards.erase(it);
             }
@@ -1424,6 +1749,7 @@ void PGS::monitorLoop()
             auto it = m_guards.find(candidate.pid);
             if (it != m_guards.end() && it->second.guardId == candidate.guardId)
             {
+                markGuardExitForProfile(it->second, 1, currentEpochMs());
                 deadGuards.push_back(it->second);
                 m_guards.erase(it);
             }
@@ -1433,6 +1759,13 @@ void PGS::monitorLoop()
         // processes / waiting on system APIs cannot block register/list/get.
         for (const auto &guard : deadGuards)
         {
+            bool guardPaused = guard.paused;
+            {
+                std::lock_guard<std::mutex> lock(m_guardsMutex);
+                const auto git = guard.groupName.empty() ? m_guardGroups.end() : m_guardGroups.find(guard.groupName);
+                guardPaused = guardPaused || (git != m_guardGroups.end() && git->second.paused);
+            }
+
             if (guard.intentional)
             {
                 if (guard.handle)
@@ -1448,6 +1781,30 @@ void PGS::monitorLoop()
                 persistState();
                 Logger::warning("PGS: guard exited intentionally, pid=" + std::to_string(guard.pid));
                 recordEvent("guard.intentional-exit",
+                            "pid=" + std::to_string(guard.pid) +
+                            ";guard_id=" + std::to_string(guard.guardId) +
+                            ";path=" + guard.path);
+                continue;
+            }
+
+            if (guardPaused)
+            {
+                if (guard.handle)
+                {
+                    CloseHandle(guard.handle);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_guardsMutex);
+                    auto &persisted = m_persistedGuards[guard.guardId];
+                    copyGuardToPersisted(guard, persisted);
+                    persisted.lastKnownPid = 0;
+                    persisted.intentional = false;
+                    persisted.paused = guard.paused;
+                }
+                closeGuardJob(guard.guardId, true);
+                persistState();
+                Logger::warning("PGS: guard exited while paused, restart suppressed pid=" + std::to_string(guard.pid));
+                recordEvent("guard.paused-exit",
                             "pid=" + std::to_string(guard.pid) +
                             ";guard_id=" + std::to_string(guard.guardId) +
                             ";path=" + guard.path);
@@ -1559,6 +1916,7 @@ void PGS::monitorLoop()
                     auto it = m_persistedGuards.find(guard.guardId);
                     if (it != m_persistedGuards.end())
                     {
+                        copyGuardToPersisted(guard, it->second);
                         it->second.lastKnownPid = 0;
                         it->second.intentional = false;
                     }
@@ -1584,22 +1942,8 @@ void PGS::monitorLoop()
                     m_guards[newGuard.pid] = newGuard;
                     assignGuardToJob(m_guards[newGuard.pid]);
                     auto &persisted = m_persistedGuards[newGuard.guardId];
-                    persisted.guardId = newGuard.guardId;
-                    persisted.lastKnownPid = newGuard.pid;
-                    persisted.sessionId = newGuard.sessionId;
-                    persisted.path = newGuard.path;
-                    persisted.maxRestarts = newGuard.maxRestarts;
-                    persisted.restartArgs = newGuard.restartArgs;
-                    persisted.fileHash = newGuard.fileHash;
+                    copyGuardToPersisted(newGuard, persisted);
                     persisted.intentional = false;
-                    persisted.hashVerified = newGuard.hashVerified;
-                    persisted.appKind = newGuard.appKind;
-                    persisted.aumid = newGuard.aumid;
-                    persisted.restartWindowSec = newGuard.restartWindowSec;
-                    persisted.restartDelayMs = newGuard.restartDelayMs;
-                    persisted.backoff = newGuard.backoff;
-                    persisted.hangTimeoutMs = newGuard.hangTimeoutMs;
-                    persisted.killOnExit = newGuard.killOnExit;
                 }
                 persistState();
                 Logger::warning("PGS: auto-attached restarted guard pid=" + std::to_string(newGuard.pid));
@@ -1732,25 +2076,13 @@ bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGu
 
     DWORD targetSession = 0xFFFFFFFF;
     ProcessIdToSessionId(pi.dwProcessId, &targetSession);
-    newGuard = GuardInfo{
-        pi.dwProcessId,
-        targetSession,
-        info.path,
-        info.maxRestarts,
-        info.restartArgs,
-        info.fileHash,
-        pi.hProcess,
-        false,
-        info.hashVerified,
-        info.guardId,
-        info.appKind,
-        info.aumid,
-        info.restartWindowSec,
-        info.restartDelayMs,
-        info.backoff,
-        info.hangTimeoutMs,
-        info.killOnExit,
-        nullptr};
+    newGuard = info;
+    newGuard.pid = pi.dwProcessId;
+    newGuard.sessionId = targetSession;
+    newGuard.handle = pi.hProcess;
+    newGuard.intentional = false;
+    newGuard.jobHandle = nullptr;
+    inheritRestartProfile(newGuard, info);
 
     Logger::warning("PGS: restart launched in fallback session, pid=" + std::to_string(pi.dwProcessId) +
                     ", session=" + std::to_string(targetSession));
@@ -1873,25 +2205,13 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
         return false;
     }
 
-    newGuard = GuardInfo{
-        pi.dwProcessId,
-        targetSessionId,
-        info.path,
-        info.maxRestarts,
-        info.restartArgs,
-        info.fileHash,
-        pi.hProcess,
-        false,
-        info.hashVerified,
-        info.guardId,
-        info.appKind,
-        info.aumid,
-        info.restartWindowSec,
-        info.restartDelayMs,
-        info.backoff,
-        info.hangTimeoutMs,
-        info.killOnExit,
-        nullptr};
+    newGuard = info;
+    newGuard.pid = pi.dwProcessId;
+    newGuard.sessionId = targetSessionId;
+    newGuard.handle = pi.hProcess;
+    newGuard.intentional = false;
+    newGuard.jobHandle = nullptr;
+    inheritRestartProfile(newGuard, info);
 
     Logger::warning("PGS: restart launched in user session, pid=" + std::to_string(pi.dwProcessId) +
                     ", session=" + std::to_string(targetSessionId));
@@ -2116,6 +2436,65 @@ int PGS::callThunk(void *context, const char *request, char *response, size_t re
     // processMessage always returns an "OK ..."/"ERR ..." string; the rc here
     // signals transport success, not command success (mirrors PGSClient).
     return 0;
+}
+
+int PGS::callJsonThunk(void *context, const char *requestJson, char *responseJson, size_t responseSize)
+{
+    PGS *self = static_cast<PGS *>(context);
+    if (!self || !responseJson || responseSize == 0)
+    {
+        return 1;
+    }
+    std::string response = self->handleModuleCommand(std::string("invoke-json ") + (requestJson ? requestJson : ""));
+    size_t n = response.size();
+    if (n >= responseSize)
+    {
+        n = responseSize - 1;
+    }
+    memcpy(responseJson, response.c_str(), n);
+    responseJson[n] = '\0';
+    return 0;
+}
+
+int PGS::emitEventThunk(void *context, const char *eventJson)
+{
+    PGS *self = static_cast<PGS *>(context);
+    if (!self)
+    {
+        return 1;
+    }
+    self->recordEvent("module.event", std::string("json_b64=") + util::base64Encode(eventJson ? eventJson : ""));
+    return 0;
+}
+
+const char *PGS::getDataDirThunk(void *context)
+{
+    PGS *self = static_cast<PGS *>(context);
+    static thread_local std::string dir;
+    if (!self)
+    {
+        dir.clear();
+        return dir.c_str();
+    }
+    dir = std::filesystem::path(self->m_stateFilePath).parent_path().string();
+    if (dir.empty())
+    {
+        dir = ".";
+    }
+    return dir.c_str();
+}
+
+void PGS::logThunk(void * /*context*/, int level, const char *message)
+{
+    const std::string text = std::string("PGS module: ") + (message ? message : "");
+    if (level >= 3)
+    {
+        Logger::error(text);
+    }
+    else
+    {
+        Logger::warning(text);
+    }
 }
 
 long long PGS::nowMsThunk(void * /*context*/)
@@ -2646,25 +3025,14 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
 
     DWORD sessionId = 0xFFFFFFFF;
     ProcessIdToSessionId(activatedPid, &sessionId);
-    newGuard = GuardInfo{
-        activatedPid,
-        sessionId,
-        info.path,
-        info.maxRestarts,
-        info.restartArgs,
-        info.fileHash,
-        procHandle,
-        false,
-        info.hashVerified,
-        info.guardId,
-        AppKind::WinApp,
-        info.aumid,
-        info.restartWindowSec,
-        info.restartDelayMs,
-        info.backoff,
-        info.hangTimeoutMs,
-        info.killOnExit,
-        nullptr};
+    newGuard = info;
+    newGuard.pid = activatedPid;
+    newGuard.sessionId = sessionId;
+    newGuard.handle = procHandle;
+    newGuard.intentional = false;
+    newGuard.appKind = AppKind::WinApp;
+    newGuard.jobHandle = nullptr;
+    inheritRestartProfile(newGuard, info);
     Logger::warning("PGS: winapp restart activated pid=" + std::to_string(activatedPid) +
                     ", aumid=" + info.aumid);
     return true;

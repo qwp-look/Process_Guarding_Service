@@ -43,6 +43,7 @@ private:
     void runCommand(const QStringList &args);
     void appendOutput(const QString &text);
     QString trUi(const QString &en, const QString &zh) const;
+    QString defaultMethod() const;
     QString pidArg() const;
 
     const QString m_folder;
@@ -53,11 +54,14 @@ private:
 
     QTextBrowser *m_html = nullptr;
     QTextEdit *m_output = nullptr;
+    QLineEdit *m_methodEdit = nullptr;
     QLineEdit *m_requestEdit = nullptr;
     QLineEdit *m_pidEdit = nullptr;
     QComboBox *m_signerCombo = nullptr;
+    QLabel *m_riskLabel = nullptr;
     QLabel *m_lblPid = nullptr;
     QLabel *m_lblSigner = nullptr;
+    QLabel *m_lblMethod = nullptr;
     QLabel *m_lblRequest = nullptr;
     QPushButton *m_btnReload = nullptr;
     QPushButton *m_btnList = nullptr;

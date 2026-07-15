@@ -153,7 +153,7 @@ try {
     Write-Host '[release-smoke] sched load ok'
 
     $pplLoad = Invoke-Pgs -CommandArgs @('module', 'load', '--path', $pplPath) -AllowError
-    if ($pplLoad.Code -eq 0 -or $pplLoad.Text -notmatch 'PGS_ENABLE_PPL') {
+    if ($pplLoad.Code -eq 0 -or $pplLoad.Text -notmatch 'enable-kernel-modules|enable-risk critical|PGS_ENABLE_KERNEL_MODULES|PGS_ENABLE_PPL|enable-ppl') {
         throw "unexpected PPL gate response code=$($pplLoad.Code): $($pplLoad.Text)"
     }
     Write-Host '[release-smoke] ppl gate ok'

@@ -24,6 +24,7 @@
 - [构建指南](developer/BUILD.md)：MSYS2、Qt、构建目录、打包脚本。
 - [协议与契约](developer/PROTOCOL.md)：CLI/API/module action 的线协议和兼容性。
 - [模块系统](developer/MODULE_SYSTEM.md)：模块 ABI、allowlist、bundled modules、PPL。
+- [模块生态基础](MODULE_ECOSYSTEM.md)：module manifest、lockfile、manager extension、JSON-RPC 风格调用。
 - [测试与验证](developer/TESTING.md)：verify、smoke、contract、pressure、VM acceptance。
 
 ## 交接文档
@@ -32,6 +33,7 @@
 
 - [安全收口交接](SECURITY_HARDENING_BACKLOG.md)
 - [未完成/未验证功能交接](UNFINISHED_FEATURES_BACKLOG.md)
+- [剩余升级计划](REMAINING_UPGRADE_PLAN.md)
 
 ## 旧入口说明
 

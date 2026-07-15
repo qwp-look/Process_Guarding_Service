@@ -495,9 +495,10 @@ label{display:grid;gap:6px;font-size:12px;text-transform:uppercase;color:var(--m
 .actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}button{border:0;border-radius:999px;padding:10px 16px;background:var(--accent);color:#f8fff8;cursor:pointer}
 button.secondary{background:#dae8dc;color:var(--ink)}button.warn{background:#8b3d1f}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .card{padding:14px;border-radius:14px;background:#e0ece2}.card b{display:block;font-size:24px}.hint{color:var(--muted);font-size:13px}
-table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px 12px;border-bottom:1px solid #efe6d8;text-align:left;vertical-align:top}th{background:#f1eadb}
+table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px 12px;border-bottom:1px solid #efe6d8;text-align:left;vertical-align:top;white-space:nowrap}td.path{white-space:normal;min-width:260px}th{background:#f1eadb}
 .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:14px}.log{min-height:240px;background:#1c221f;color:#d6f3dd;border-radius:14px;padding:12px;white-space:pre-wrap;overflow:auto;font-family:Consolas,monospace}
 .timeline{display:grid;gap:8px;max-height:300px;overflow:auto}.event{border:1px solid var(--border);border-radius:12px;background:#fff;padding:10px}.event .time{font-size:12px;color:var(--muted)}.event .action{font-weight:700;margin-top:4px}.event .meta{font-size:12px;color:var(--muted);margin-top:4px}
+.check-list{display:grid;gap:8px;max-height:320px;overflow:auto}.check{display:grid;grid-template-columns:76px 1fr;gap:8px;align-items:start;border:1px solid var(--border);border-radius:12px;background:#fff;padding:10px}.status{border-radius:999px;padding:4px 8px;text-align:center;font-size:12px;text-transform:uppercase;background:#eef0e9;color:var(--muted)}.status.ok{background:#dbeedd;color:#1f6b35}.status.warn,.status.info{background:#f1e4bf;color:#7a5514}.status.fail{background:#f1d1c7;color:#8b2d1f}
 @media (max-width:1100px){.layout,.cards,.grid2{grid-template-columns:1fr}}
 </style>
 </head>
@@ -505,8 +506,9 @@ table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px 12p
 <header><h1>ProcessGuard Web Console</h1><div class="sub">A real browser-based local control surface. The backend stays outside PGS and reuses the existing toolchain instead of teaching HTTP logic to the guard core.</div></header>
 <div class="layout">
 <div class="grid" style="gap:16px">
-<section class="panel"><h2>Overview</h2><div class="cards"><div class="card"><b id="metric-guards">0</b>Active Guards</div><div class="card"><b id="metric-service">unknown</b>Service</div><div class="card"><b id="metric-ping">unknown</b>PGS Ping</div></div><div class="actions"><button onclick="refreshAll()">Refresh All</button><button class="secondary" onclick="pingPgs()">Ping</button><button class="secondary" onclick="serviceStatus()">Service Status</button></div></section>
-<section class="panel"><h2>Guard Table</h2><div class="hint">This table shows currently active guards. It refreshes every 2 seconds.</div><div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>PID</th><th>Path</th><th>Args</th><th>Restarts</th><th>Max</th><th>Alive</th><th>Session</th><th>Hash</th><th>App</th><th>AUMID</th><th>Window</th><th>Delay</th><th>Backoff</th><th>Hang</th><th>Kill</th></tr></thead><tbody id="guard-body"></tbody></table></div></section>
+<section class="panel"><h2>Overview</h2><div class="cards"><div class="card"><b id="metric-guards">0</b>Active Guards</div><div class="card"><b id="metric-service">unknown</b>Service</div><div class="card"><b id="metric-ping">unknown</b>PGS Ping</div><div class="card"><b id="metric-doctor">unknown</b>Doctor</div></div><div class="actions"><button onclick="refreshAll()">Refresh All</button><button class="secondary" onclick="pingPgs()">Ping</button><button class="secondary" onclick="serviceStatus()">Service Status</button><button class="secondary" onclick="refreshDoctor()">Doctor</button></div></section>
+<section class="panel"><h2>Doctor</h2><div class="hint">Read-only diagnostics for service reachability, trust files, runtime DLLs, and module loader state.</div><div class="check-list" id="doctor-list" style="margin-top:12px"></div></section>
+<section class="panel"><h2>Guard Table</h2><div class="hint">This table shows active guards and v3 policy fields. It refreshes every 2 seconds.</div><div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>PID</th><th>Path</th><th>Args</th><th>Restarts</th><th>Max</th><th>Alive</th><th>Session</th><th>Hash</th><th>App</th><th>AUMID</th><th>Job</th><th>Window</th><th>Delay</th><th>Backoff</th><th>Hang</th><th>Kill</th></tr></thead><tbody id="guard-body"></tbody></table></div></section>
 <section class="panel"><h2>Launch And Protect</h2><div class="grid grid2"><label>Path<input id="start-path" placeholder="C:/apps/worker.exe"></label><label>Command<input id="start-command" placeholder="&quot;C:/apps/worker.exe&quot; --safe"></label><label>Start Args<input id="start-args" placeholder="--mode worker"></label><label>Restart Args<input id="start-restart-args" placeholder="optional"></label><label>Max Restarts<input id="start-max" value="3"></label><label>Restart Window<input id="start-window" placeholder="0"></label><label>Restart Delay<input id="start-delay" placeholder="0"></label><label>Hang Timeout<input id="start-hang" placeholder="0"></label><label>AUMID<input id="start-aumid" placeholder="PackageFamilyName!App"></label><label><input id="start-backoff" type="checkbox"> Restart Backoff</label><label><input id="start-kill" type="checkbox"> Kill On Exit</label><label><input id="start-winapp" type="checkbox"> WindowsApps</label></div><div class="actions"><button onclick="blessStart()">Start + Bless</button></div></section>
 </div>
 <div class="grid" style="gap:16px">
@@ -522,15 +524,17 @@ table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px 12p
 <script>
 window.PGS_API_TOKEN="__PGS_API_TOKEN__";
 window.PGS_CSRF_TOKEN="__PGS_CSRF_TOKEN__";
-const logBox=document.getElementById('log-box');const guardBody=document.getElementById('guard-body');const auditList=document.getElementById('audit-list');
+const logBox=document.getElementById('log-box');const guardBody=document.getElementById('guard-body');const auditList=document.getElementById('audit-list');const doctorList=document.getElementById('doctor-list');
 function logLine(m){const t=new Date().toLocaleTimeString();logBox.textContent+=`[${t}] ${m}\n`;logBox.scrollTop=logBox.scrollHeight}
 async function api(path,options={}){const hdrs=Object.assign({'Content-Type':'application/json'},options.headers||{});if(window.PGS_API_TOKEN){hdrs['X-PGS-Token']=window.PGS_API_TOKEN}if(window.PGS_CSRF_TOKEN){hdrs['X-PGS-CSRF']=window.PGS_CSRF_TOKEN}const r=await fetch(path,Object.assign({},options,{headers:hdrs,credentials:'same-origin'}));const text=await r.text();let data={};try{data=text?JSON.parse(text):{}}catch{data={ok:false,message:text}}if(!r.ok||data.ok===false){throw new Error(data.message||text||`request failed: ${r.status}`)}return data}
 function guardPayload(){const p={pid:document.getElementById('guard-pid').value.trim(),path:document.getElementById('guard-path').value.trim(),max_restarts:document.getElementById('guard-max').value.trim(),restart_args:document.getElementById('guard-restart-args').value.trim(),restart_window:document.getElementById('guard-window').value.trim(),restart_delay:document.getElementById('guard-delay').value.trim(),hang_timeout:document.getElementById('guard-hang').value.trim()};if(document.getElementById('guard-backoff').checked)p.restart_backoff='1';if(document.getElementById('guard-kill').checked)p.kill_on_exit='1';if(document.getElementById('guard-winapp').checked)p.winapp='1';const a=document.getElementById('guard-aumid').value.trim();if(a)p.aumid=a;return p}
-function appendCell(row,value){const cell=document.createElement('td');cell.textContent=value==null?'':String(value);row.appendChild(cell)}
-function renderGuards(items){const rows=[];for(const i of items){const row=document.createElement('tr');appendCell(row,i.pid);appendCell(row,i.path);appendCell(row,i.restart_args);appendCell(row,i.restart_count||'0');appendCell(row,i.max_restarts);appendCell(row,i.alive);appendCell(row,i.session);appendCell(row,i.hash);appendCell(row,i.app_kind);appendCell(row,i.aumid);appendCell(row,i.restart_window);appendCell(row,i.restart_delay);appendCell(row,i.backoff);appendCell(row,i.hang_timeout);appendCell(row,i.kill_on_exit);rows.push(row)}guardBody.replaceChildren(...rows)}
+function appendCell(row,value,cls=''){const cell=document.createElement('td');if(cls){cell.className=cls}cell.textContent=value==null?'':String(value);row.appendChild(cell)}
+function renderGuards(items){const rows=[];for(const i of items){const row=document.createElement('tr');appendCell(row,i.pid);appendCell(row,i.path,'path');appendCell(row,i.restart_args);appendCell(row,i.restart_count||'0');appendCell(row,i.max_restarts);appendCell(row,i.alive);appendCell(row,i.session);appendCell(row,i.hash);appendCell(row,i.app_kind||'win32');appendCell(row,i.aumid);appendCell(row,i.job_attached);appendCell(row,i.restart_window);appendCell(row,i.restart_delay);appendCell(row,i.backoff);appendCell(row,i.hang_timeout);appendCell(row,i.kill_on_exit);rows.push(row)}guardBody.replaceChildren(...rows)}
+function renderDoctor(checks){if(!Array.isArray(checks)||!checks.length){doctorList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:'Doctor has not run yet.'}));return}let worst='ok';const nodes=[];for(const c of checks){const item=document.createElement('div');item.className='check';const badge=document.createElement('div');const status=String(c.status||'info').toLowerCase();badge.className=`status ${status}`;badge.textContent=status;const body=document.createElement('div');const title=document.createElement('div');title.textContent=c.id||'check';title.style.fontWeight='700';const msg=document.createElement('div');msg.className='hint';msg.textContent=c.message||'';body.append(title,msg);item.append(badge,body);nodes.push(item);if(status==='fail'){worst='fail'}else if(status==='warn'&&worst==='ok'){worst='warn'}}doctorList.replaceChildren(...nodes);document.getElementById('metric-doctor').textContent=worst}
 function renderAudit(events,enabled){if(!enabled){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:'Audit log is not configured for this server.'}));return}if(!events.length){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:'No audit events yet.'}));return}const nodes=[];for(const e of events.slice().reverse()){const item=document.createElement('div');item.className='event';const time=document.createElement('div');time.className='time';time.textContent=e.time||'';const action=document.createElement('div');action.className='action';action.textContent=e.action||e.raw||'';const meta=document.createElement('div');meta.className='meta';meta.textContent=`user ${e.user||'-'} from ${e.from||'-'}`;item.append(time,action,meta);nodes.push(item)}auditList.replaceChildren(...nodes)}
 async function refreshAudit(){try{const d=await api('/api/audit?limit=80',{headers:{'Content-Type':'application/json'}});renderAudit(Array.isArray(d.events)?d.events:[],d.enabled!==false)}catch(e){auditList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:`audit unavailable: ${e.message}`}))}}
-async function refreshAll(){await Promise.allSettled([pingPgs(),serviceStatus(),refreshGuards(),refreshAudit()])}
+async function refreshDoctor(){try{const d=await api('/api/doctor');renderDoctor(d.checks);logLine('doctor completed')}catch(e){document.getElementById('metric-doctor').textContent='error';doctorList.replaceChildren(Object.assign(document.createElement('div'),{className:'hint',textContent:`doctor unavailable: ${e.message}`}));logLine(`doctor failed: ${e.message}`)}}
+async function refreshAll(){await Promise.allSettled([pingPgs(),serviceStatus(),refreshGuards(),refreshAudit(),refreshDoctor()])}
 async function pingPgs(){try{const d=await api('/api/ping');document.getElementById('metric-ping').textContent='ok';logLine(d.message||'ping ok')}catch(e){document.getElementById('metric-ping').textContent='down';logLine(`ping failed: ${e.message}`)}}
 async function serviceStatus(){try{const d=await api('/api/service/status');document.getElementById('metric-service').textContent=d.state||'unknown';logLine(`service status: ${d.state||d.message}`)}catch(e){document.getElementById('metric-service').textContent='error';logLine(`service status failed: ${e.message}`)}}
 async function refreshGuards(){try{const d=await api('/api/guards');const items=Array.isArray(d.guards)?d.guards:[];document.getElementById('metric-guards').textContent=String(items.length);renderGuards(items)}catch(e){logLine(`guard refresh failed: ${e.message}`)}}
@@ -547,7 +551,7 @@ async function scheduleList(){try{const d=await api('/api/schedule');logLine(d.s
 async function scheduleAdd(){const body={type:document.getElementById('sched-type').value.trim(),expr:document.getElementById('sched-expr').value.trim(),count:document.getElementById('sched-count').value.trim(),action:document.getElementById('sched-action').value.trim()};try{const d=await api('/api/schedule',{method:'POST',body:JSON.stringify(body)});logLine(d.stdout||d.message||'schedule added')}catch(e){logLine(`schedule add failed: ${e.message}`)}}
 async function scheduleToggle(action){const id=document.getElementById('sched-id').value.trim();try{const d=await api(`/api/schedule/${action}`,{method:'POST',body:JSON.stringify({id})});logLine(d.stdout||d.message||`schedule ${action} ok`)}catch(e){logLine(`schedule ${action} failed: ${e.message}`)}}
 async function scheduleRemove(){const id=document.getElementById('sched-id').value.trim();try{const d=await api('/api/schedule/remove',{method:'POST',body:JSON.stringify({id})});logLine(d.stdout||d.message||'schedule removed')}catch(e){logLine(`schedule remove failed: ${e.message}`)}}
-setInterval(refreshGuards,2000);setInterval(refreshAudit,5000);refreshAll();
+setInterval(refreshGuards,2000);setInterval(refreshAudit,5000);setInterval(refreshDoctor,10000);refreshAll();
 </script>
 </body></html>
 )HTML");
@@ -587,6 +591,43 @@ WebServer::WebServer(Options options, QObject *parent)
         bytes[i] = static_cast<char>(QRandomGenerator::global()->generate() & 0xFF);
     }
     m_apiToken = QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+}
+
+bool WebServer::isLocalPageRequestAllowed(const PgsHttp::Request &request) const
+{
+    if (m_options.remote)
+    {
+        return true;
+    }
+    const QString host = request.value("Host").trimmed();
+    const QString expectedHost = hostWithPort(m_options.bindAddress, m_options.httpPort);
+    const QString expectedAlt = QStringLiteral("localhost:%1").arg(m_options.httpPort);
+    if (!host.isEmpty() && host != expectedHost && host != expectedAlt)
+    {
+        return false;
+    }
+    const QString origin = request.value("Origin").trimmed();
+    if (!origin.isEmpty())
+    {
+        const QString selfOrigin = QStringLiteral("http://%1").arg(expectedHost);
+        const QString selfOriginAlt = QStringLiteral("http://%1").arg(expectedAlt);
+        if (origin != selfOrigin && origin != selfOriginAlt)
+        {
+            return false;
+        }
+    }
+    const QString referer = request.value("Referer").trimmed();
+    if (!referer.isEmpty())
+    {
+        const QString selfOrigin = QStringLiteral("http://%1").arg(expectedHost);
+        const QString selfOriginAlt = QStringLiteral("http://%1").arg(expectedAlt);
+        if (!referer.startsWith(selfOrigin, Qt::CaseInsensitive) &&
+            !referer.startsWith(selfOriginAlt, Qt::CaseInsensitive))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Authorize an /api/* request: require the X-PGS-Token header to match the
@@ -633,7 +674,13 @@ QHttpServerResponse WebServer::handleIndexHtml() const
     QString html = indexHtml();
     html.replace(QStringLiteral("__PGS_API_TOKEN__"), m_options.remote ? QString() : m_apiToken);
     html.replace(QStringLiteral("__PGS_CSRF_TOKEN__"), m_options.remote ? m_apiToken : QString());
-    return QHttpServerResponse(QByteArray("text/html; charset=utf-8"), html.toUtf8());
+    QHttpServerResponse response(QByteArray("text/html; charset=utf-8"), html.toUtf8());
+    QHttpHeaders headers = response.headers();
+    headers.replaceOrAppend(QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store"));
+    headers.replaceOrAppend(QByteArrayLiteral("X-Content-Type-Options"), QByteArrayLiteral("nosniff"));
+    headers.replaceOrAppend(QByteArrayLiteral("Content-Security-Policy"), QByteArrayLiteral("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"));
+    response.setHeaders(std::move(headers));
+    return response;
 }
 bool WebServer::start()
 {
@@ -729,14 +776,26 @@ bool WebServer::start()
             {
                 if (!qgetenv("PGS_WEB_TRACE").isEmpty())
                     QTextStream(stderr) << "PGS web route / entered\n";
-                if (m_options.remote && !authorizeApi(request, "/"))
+                if (m_options.remote)
+                {
+                    if (!authorizeApi(request, "/"))
+                        return jsonUnauthorized();
+                }
+                else if (!isLocalPageRequestAllowed(request))
+                {
                     return jsonUnauthorized();
+                }
                 return handleIndexHtml();
             }
             if (path == QStringLiteral("/api/health") && request.method() == Method::Get)
             {
                 if (!authorizeApi(request, "/api/health")) return jsonUnauthorized();
                 return handleHealth();
+            }
+            if (path == QStringLiteral("/api/doctor") && request.method() == Method::Get)
+            {
+                if (!authorizeApi(request, "/api/doctor")) return jsonUnauthorized();
+                return handleDoctor();
             }
             if (path == QStringLiteral("/api/cluster/health") && request.method() == Method::Get)
             {
@@ -1118,6 +1177,53 @@ QHttpServerResponse WebServer::handleClusterHealth()
 QHttpServerResponse WebServer::handlePing()
 {
     return jsonCommandResult(runPgsDirect(QStringLiteral("ping")), QStringLiteral("PGS ping completed"));
+}
+
+QHttpServerResponse WebServer::handleDoctor()
+{
+    QJsonArray checks;
+    auto add = [&](const QString &id, const QString &status, const QString &message) {
+        QJsonObject check;
+        check.insert(QStringLiteral("id"), id);
+        check.insert(QStringLiteral("status"), status);
+        check.insert(QStringLiteral("message"), message);
+        checks.append(check);
+    };
+
+    const CommandResult ping = runPgsDirect(QStringLiteral("ping"));
+    add(QStringLiteral("pgs_connect"),
+        (ping.started && ping.finished && ping.exitCode == 0) ? QStringLiteral("ok") : QStringLiteral("fail"),
+        ping.stdOut.trimmed().isEmpty() ? ping.errorText : ping.stdOut.trimmed());
+
+    const CommandResult stats = runPgsDirect(QStringLiteral("stats"));
+    add(QStringLiteral("stats"),
+        (stats.started && stats.finished && stats.exitCode == 0) ? QStringLiteral("ok") : QStringLiteral("warn"),
+        stats.stdOut.trimmed().isEmpty() ? stats.errorText : stats.stdOut.trimmed());
+
+    const CommandResult moduleVerify = runPgsDirect(QStringLiteral("module verify"));
+    add(QStringLiteral("module_loader"),
+        (moduleVerify.started && moduleVerify.finished && moduleVerify.exitCode == 0) ? QStringLiteral("ok") : QStringLiteral("warn"),
+        moduleVerify.stdOut.trimmed().isEmpty() ? moduleVerify.errorText : moduleVerify.stdOut.trimmed());
+
+    const CommandResult service = runTool(resolvedServiceToolPath(), {QStringLiteral("status")});
+    add(QStringLiteral("service"),
+        (service.started && service.finished && service.exitCode == 0) ? QStringLiteral("ok") : QStringLiteral("warn"),
+        service.stdOut.trimmed().isEmpty() ? service.errorText : service.stdOut.trimmed());
+
+    const QFileInfo blessTool(resolvedBlessToolPath());
+    add(QStringLiteral("bless_tool"), blessTool.exists() ? QStringLiteral("ok") : QStringLiteral("warn"), blessTool.absoluteFilePath());
+    const QFileInfo modulesDir(QCoreApplication::applicationDirPath() + QStringLiteral("/modules"));
+    add(QStringLiteral("modules_dir"), modulesDir.exists() ? QStringLiteral("ok") : QStringLiteral("warn"), modulesDir.absoluteFilePath());
+    add(QStringLiteral("modules_allow"), QFileInfo(modulesDir.absoluteFilePath() + QStringLiteral("/modules.allow")).exists() ? QStringLiteral("ok") : QStringLiteral("warn"), modulesDir.absoluteFilePath() + QStringLiteral("/modules.allow"));
+    add(QStringLiteral("modules_lock"), QFileInfo(modulesDir.absoluteFilePath() + QStringLiteral("/modules.lock")).exists() ? QStringLiteral("ok") : QStringLiteral("warn"), modulesDir.absoluteFilePath() + QStringLiteral("/modules.lock"));
+    add(QStringLiteral("ppl_driver"), QFileInfo(modulesDir.absoluteFilePath() + QStringLiteral("/ppl/Sirius.sys")).exists() ? QStringLiteral("info") : QStringLiteral("warn"), modulesDir.absoluteFilePath() + QStringLiteral("/ppl/Sirius.sys"));
+    add(QStringLiteral("qt_runtime"), (QFileInfo(QCoreApplication::applicationDirPath() + QStringLiteral("/Qt6Core.dll")).exists() || QFileInfo(QCoreApplication::applicationDirPath() + QStringLiteral("/Qt5Core.dll")).exists()) ? QStringLiteral("ok") : QStringLiteral("info"), QStringLiteral("Qt runtime beside web executable"));
+    add(QStringLiteral("openssl_runtime"), (QFileInfo(QCoreApplication::applicationDirPath() + QStringLiteral("/libssl-3-x64.dll")).exists() || QFileInfo(QCoreApplication::applicationDirPath() + QStringLiteral("/libssl-3.dll")).exists()) ? QStringLiteral("ok") : QStringLiteral("info"), QStringLiteral("OpenSSL runtime beside web executable"));
+
+    QJsonObject obj;
+    obj.insert(QStringLiteral("ok"), true);
+    obj.insert(QStringLiteral("checks"), checks);
+    return QHttpServerResponse(obj);
 }
 
 QHttpServerResponse WebServer::handleGuards()

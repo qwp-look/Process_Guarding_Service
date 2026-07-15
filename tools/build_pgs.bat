@@ -128,6 +128,7 @@ copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\sched\libgcc_s_seh
 copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\sched\libwinpthread-1.dll" >nul 2>&1
 copy /Y modules\sched\module.html "%BUILD_DIR%\modules\sched\module.html" >nul
 copy /Y modules\sched\module.manifest "%BUILD_DIR%\modules\sched\module.manifest" >nul
+copy /Y modules\sched\module.manifest.json "%BUILD_DIR%\modules\sched\module.manifest.json" >nul
 
 REM Health module: lightweight service status wrapper around stats/list/events.
 echo [12/15] Building pgs_health_module.dll...
@@ -143,6 +144,7 @@ copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\health\libgcc_s_se
 copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\health\libwinpthread-1.dll" >nul 2>&1
 copy /Y modules\health\module.html "%BUILD_DIR%\modules\health\module.html" >nul
 copy /Y modules\health\module.manifest "%BUILD_DIR%\modules\health\module.manifest" >nul
+copy /Y modules\health\module.manifest.json "%BUILD_DIR%\modules\health\module.manifest.json" >nul
 
 REM Profile module: named restart-policy profiles, persisted beside the module.
 echo [13/15] Building pgs_profile_module.dll...
@@ -158,6 +160,7 @@ copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\profile\libgcc_s_s
 copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\profile\libwinpthread-1.dll" >nul 2>&1
 copy /Y modules\profile\module.html "%BUILD_DIR%\modules\profile\module.html" >nul
 copy /Y modules\profile\module.manifest "%BUILD_DIR%\modules\profile\module.manifest" >nul
+copy /Y modules\profile\module.manifest.json "%BUILD_DIR%\modules\profile\module.manifest.json" >nul
 
 REM Report module: base64 snapshots/backup exports from stats/list/events.
 echo [14/15] Building pgs_report_module.dll...
@@ -173,6 +176,7 @@ copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\report\libgcc_s_se
 copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\report\libwinpthread-1.dll" >nul 2>&1
 copy /Y modules\report\module.html "%BUILD_DIR%\modules\report\module.html" >nul
 copy /Y modules\report\module.manifest "%BUILD_DIR%\modules\report\module.manifest" >nul
+copy /Y modules\report\module.manifest.json "%BUILD_DIR%\modules\report\module.manifest.json" >nul
 
 REM PPL module: built as a separate DLL (-shared) into build\modules, then
 REM Sirius.sys and the MinGW runtime DLLs are copied next to it so PGS can
@@ -198,6 +202,7 @@ if errorlevel 1 (
 copy /Y modules\ppl\Sirius.sys "%BUILD_DIR%\modules\ppl\Sirius.sys" >nul
 copy /Y modules\ppl\module.html "%BUILD_DIR%\modules\ppl\module.html" >nul
 copy /Y modules\ppl\module.manifest "%BUILD_DIR%\modules\ppl\module.manifest" >nul
+copy /Y modules\ppl\module.manifest.json "%BUILD_DIR%\modules\ppl\module.manifest.json" >nul
 REM MinGW runtime DLLs: copy into build\ and build\modules\ so the .exe and the
 REM pgs_ppl_module.dll can run without MSYS2 in PATH.
 copy /Y "%MINGW_BIN%\libstdc++-6.dll" "%BUILD_DIR%\libstdc++-6.dll" >nul 2>&1
@@ -206,6 +211,12 @@ copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\libwinpthread-1.dll" >nul
 copy /Y "%MINGW_BIN%\libstdc++-6.dll" "%BUILD_DIR%\modules\ppl\libstdc++-6.dll" >nul 2>&1
 copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\ppl\libgcc_s_seh-1.dll" >nul 2>&1
 copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\ppl\libwinpthread-1.dll" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\write_modules_lock.ps1 -ModulesRoot "%BUILD_DIR%\modules" -Output "%BUILD_DIR%\modules\modules.lock" -GeneratedAt build
+if errorlevel 1 (
+    echo Failed: write modules.lock
+    popd
+    exit /b 1
+)
 
 echo.
 echo Build completed:

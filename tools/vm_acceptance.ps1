@@ -398,7 +398,7 @@ try {
     Assert-True ($badAuth.Code -ne 0 -or $badAuth.Text -notmatch '^OK pong') 'wrong token was accepted'
 
     $pplLoad = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'load', '--path', $PplDll) -AllowError
-    Assert-True ($pplLoad.Code -ne 0 -and $pplLoad.Text -match 'PGS_ENABLE_PPL|enable-ppl') "PPL gate did not reject default load: $($pplLoad.Text)"
+    Assert-True ($pplLoad.Code -ne 0 -and $pplLoad.Text -match 'enable-kernel-modules|enable-risk critical|PGS_ENABLE_KERNEL_MODULES|PGS_ENABLE_PPL|enable-ppl') "PPL gate did not reject default load: $($pplLoad.Text)"
 
     if ($EnablePpl) {
         Write-Step 'PPL opt-in runtime smoke'

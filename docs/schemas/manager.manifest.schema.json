@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pgs.local/schemas/manager.manifest.schema.json",
+  "title": "PGS module manager manifest",
+  "type": "object",
+  "required": ["name", "version", "abi", "capabilities"],
+  "properties": {
+    "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+    "version": {"type": "string"},
+    "abi": {"type": "integer", "const": 1},
+    "summary": {"type": "string"},
+    "publisher": {"type": "string"},
+    "capabilities": {"type": "array", "items": {"type": "string"}},
+    "risk": {"type": "string", "enum": ["low", "medium", "high"]}
+  }
+}

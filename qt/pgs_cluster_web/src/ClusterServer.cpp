@@ -90,6 +90,49 @@ QString hostForUrl(const QString &host)
     return trimmed;
 }
 
+QString hostWithPort(const QString &host, quint16 port)
+{
+    return QStringLiteral("%1:%2").arg(hostForUrl(host)).arg(port);
+}
+
+bool localDashboardRequestAllowed(const PgsHttp::Request &request, const QString &listenAddress, quint16 port, bool tls)
+{
+    const QString host = request.value("Host").trimmed();
+    const QString expectedHost = hostWithPort(listenAddress, port);
+    const QString expectedAlt = QStringLiteral("localhost:%1").arg(port);
+    if (!host.isEmpty() && host != expectedHost && host != expectedAlt)
+        return false;
+    const QString scheme = tls ? QStringLiteral("https") : QStringLiteral("http");
+    const QString origin = request.value("Origin").trimmed();
+    if (!origin.isEmpty())
+    {
+        const QString selfOrigin = QStringLiteral("%1://%2").arg(scheme, expectedHost);
+        const QString selfOriginAlt = QStringLiteral("%1://%2").arg(scheme, expectedAlt);
+        if (origin != selfOrigin && origin != selfOriginAlt)
+            return false;
+    }
+    const QString referer = request.value("Referer").trimmed();
+    if (!referer.isEmpty())
+    {
+        const QString selfOrigin = QStringLiteral("%1://%2").arg(scheme, expectedHost);
+        const QString selfOriginAlt = QStringLiteral("%1://%2").arg(scheme, expectedAlt);
+        if (!referer.startsWith(selfOrigin, Qt::CaseInsensitive) &&
+            !referer.startsWith(selfOriginAlt, Qt::CaseInsensitive))
+            return false;
+    }
+    return true;
+}
+
+QHttpServerResponse hardenHtmlResponse(QHttpServerResponse response)
+{
+    QHttpHeaders headers = response.headers();
+    headers.replaceOrAppend(QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store"));
+    headers.replaceOrAppend(QByteArrayLiteral("X-Content-Type-Options"), QByteArrayLiteral("nosniff"));
+    headers.replaceOrAppend(QByteArrayLiteral("Content-Security-Policy"), QByteArrayLiteral("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"));
+    response.setHeaders(std::move(headers));
+    return response;
+}
+
 QHostAddress parseBindAddress(const QString &listenAddress)
 {
     const QString normalized = listenAddress.trimmed().toLower();
@@ -355,8 +398,15 @@ bool ClusterServer::start()
             {
                 if (!qgetenv("PGS_WEB_TRACE").isEmpty())
                     QTextStream(stderr) << "PGS cluster route / entered\n";
-                if (m_remoteBind && !isApiAuthorized(req))
+                if (m_remoteBind)
+                {
+                    if (!isApiAuthorized(req))
+                        return jsonUnauthorized();
+                }
+                else if (!localDashboardRequestAllowed(req, m_listenAddress, m_listenPort, m_tlsEnabled))
+                {
                     return jsonUnauthorized();
+                }
                 return handleDashboard();
             }
             if (path == QStringLiteral("/api/cluster/summary") && req.method() == Method::Get)
@@ -1073,5 +1123,5 @@ refresh();setInterval(refresh,1000);
 </script></body></html>)HTML";
     QByteArray body(html);
     body.replace("__PGS_CLUSTER_API_TOKEN__", m_apiTokenGenerated ? m_apiToken.toUtf8() : QByteArray());
-    return QHttpServerResponse(QByteArray("text/html; charset=utf-8"), body);
+    return hardenHtmlResponse(QHttpServerResponse(QByteArray("text/html; charset=utf-8"), body));
 }

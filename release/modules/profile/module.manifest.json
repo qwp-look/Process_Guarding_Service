@@ -1,0 +1,14 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "profile",
+  "version": "1.0.0",
+  "abi": 2,
+  "summary": "Named restart policy profiles.",
+  "risk": "medium",
+  "capabilities": ["profile.set", "profile.list", "profile.apply", "guard.policy"],
+  "methods": [
+    {"name": "profile.set", "risk": "medium", "sync": true, "required_capabilities": ["profile.set"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "profile.list", "risk": "low", "sync": true, "required_capabilities": ["profile.list"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "profile.apply", "risk": "medium", "sync": true, "required_capabilities": ["profile.apply", "guard.policy"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

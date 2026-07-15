@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pgs.local/schemas/modules.lock.schema.json",
+  "title": "PGS modules lock",
+  "type": "object",
+  "required": ["version", "modules"],
+  "properties": {
+    "version": {"type": "integer", "const": 1},
+    "generated_at": {"type": "string"},
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "version", "sha256", "capabilities", "risk"],
+        "properties": {
+          "name": {"type": "string"},
+          "version": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+          "publisher": {"type": "string"},
+          "source": {"type": "string"},
+          "capabilities": {"type": "array", "items": {"type": "string"}},
+          "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+          "trustedAt": {"type": "string"},
+          "signature_policy": {"type": "string", "enum": ["hash", "signed", "signed-or-hash"]},
+          "require_signed": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

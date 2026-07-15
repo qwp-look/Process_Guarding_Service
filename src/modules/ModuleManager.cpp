@@ -27,6 +27,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -42,6 +43,119 @@ namespace ProcessGuard
     namespace
     {
         thread_local std::vector<const void *> g_invokeRuntimeStack;
+        std::string jsonStringValue(const std::string &text, const std::string &key);
+
+        bool hasCapability(const std::vector<std::string> &caps, const std::string &required)
+        {
+            return std::find(caps.begin(), caps.end(), required) != caps.end() ||
+                   std::find(caps.begin(), caps.end(), "core.call.any") != caps.end();
+        }
+
+        std::string commandVerb(const char *request)
+        {
+            std::string text = util::trim(request ? request : "");
+            const std::size_t sp = text.find_first_of(" \t");
+            if (sp != std::string::npos)
+            {
+                text = text.substr(0, sp);
+            }
+            return util::toLowerAscii(text);
+        }
+
+        bool commandAllowedForCapabilities(const std::vector<std::string> &caps, const char *request)
+        {
+            const std::string verb = commandVerb(request);
+            if (verb.empty()) return false;
+            if (verb == "ping") return true;
+            if (verb == "list" || verb == "get") return hasCapability(caps, "guard.list");
+            if (verb == "stats") return hasCapability(caps, "health.stats");
+            if (verb == "events") return hasCapability(caps, "event.read");
+            if (verb == "register" || verb == "bless" || verb == "start-register") return hasCapability(caps, "guard.register");
+            if (verb == "policy" || verb == "set-policy") return hasCapability(caps, "guard.policy");
+            if (verb == "unregister" || verb == "unbless") return hasCapability(caps, "guard.unregister");
+            if (verb == "intentional") return hasCapability(caps, "guard.intentional") || hasCapability(caps, "guard.unregister");
+            if (verb == "health-check") return hasCapability(caps, "guard.health");
+            if (verb == "group") return hasCapability(caps, "guard.group");
+            if (verb == "restart-hook") return hasCapability(caps, "guard.hook");
+            if (verb == "module") return hasCapability(caps, "module.invoke");
+            if (verb == "ppl") return hasCapability(caps, "driver.kernel");
+            return false;
+        }
+
+        struct ServiceContext
+        {
+            PGS_ServicesV3 host{};
+            PGS_ServicesV3 exposed{};
+            std::string moduleName;
+            std::vector<std::string> capabilities;
+        };
+
+        void writeResponse(char *response, size_t responseSize, const std::string &message)
+        {
+            if (!response || responseSize == 0) return;
+            const std::size_t n = std::min(responseSize - 1, message.size());
+            std::memcpy(response, message.data(), n);
+            response[n] = '\0';
+        }
+
+        int moduleCallThunk(void *context, const char *request, char *response, size_t responseSize)
+        {
+            ServiceContext *ctx = static_cast<ServiceContext *>(context);
+            if (!ctx || !ctx->host.call || !response || responseSize == 0)
+            {
+                return 1;
+            }
+            if (!commandAllowedForCapabilities(ctx->capabilities, request))
+            {
+                writeResponse(response, responseSize, "ERR module capability denied: " + ctx->moduleName + " -> " + commandVerb(request));
+                return 0;
+            }
+            return ctx->host.call(ctx->host.context, request, response, responseSize);
+        }
+
+        int moduleCallJsonThunk(void *context, const char *requestJson, char *response, size_t responseSize)
+        {
+            ServiceContext *ctx = static_cast<ServiceContext *>(context);
+            if (!ctx || !ctx->host.call_json || !response || responseSize == 0)
+            {
+                return 1;
+            }
+            const std::string method = jsonStringValue(requestJson ? requestJson : "", "method");
+            if (method.empty() || !hasCapability(ctx->capabilities, method))
+            {
+                writeResponse(response, responseSize, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":\"CAPABILITY_DENIED\",\"message\":\"module capability denied\"}}");
+                return 0;
+            }
+            return ctx->host.call_json(ctx->host.context, requestJson, response, responseSize);
+        }
+
+        int moduleEmitEventThunk(void *context, const char *eventJson)
+        {
+            ServiceContext *ctx = static_cast<ServiceContext *>(context);
+            return (!ctx || !ctx->host.emit_event) ? 1 : ctx->host.emit_event(ctx->host.context, eventJson);
+        }
+
+        const char *moduleGetDataDirThunk(void *context)
+        {
+            ServiceContext *ctx = static_cast<ServiceContext *>(context);
+            return (!ctx || !ctx->host.get_data_dir) ? "" : ctx->host.get_data_dir(ctx->host.context);
+        }
+
+        void moduleLogThunk(void *context, int level, const char *message)
+        {
+            ServiceContext *ctx = static_cast<ServiceContext *>(context);
+            if (ctx && ctx->host.log)
+            {
+                const std::string prefixed = ctx->moduleName + ": " + (message ? message : "");
+                ctx->host.log(ctx->host.context, level, prefixed.c_str());
+            }
+        }
+
+        long long moduleNowMsThunk(void *context)
+        {
+            ServiceContext *ctx = static_cast<ServiceContext *>(context);
+            return (!ctx || !ctx->host.now_ms) ? 0 : ctx->host.now_ms(ctx->host.context);
+        }
 
         bool runtimeOnCurrentInvokeStack(const void *runtime)
         {
@@ -174,6 +288,7 @@ namespace ProcessGuard
         {
             bool hasName = false;
             bool hasInvoke = false;
+            bool hasInvokeJson = false;
             bool hasManifest = false;
         };
 
@@ -193,8 +308,9 @@ namespace ProcessGuard
 
             out.hasName = GetProcAddress(h, "PG_GetName") != nullptr;
             out.hasInvoke = GetProcAddress(h, "PG_Invoke") != nullptr;
+            out.hasInvokeJson = GetProcAddress(h, "PG_InvokeJson") != nullptr;
             out.hasManifest = GetProcAddress(h, "PG_GetManifest") != nullptr;
-            if (!out.hasName || !out.hasInvoke)
+            if (!out.hasName || (!out.hasInvoke && !out.hasInvokeJson))
             {
                 closeHandle();
                 err = "missing required PG_ exports";
@@ -215,6 +331,210 @@ namespace ProcessGuard
             return dir + "\\module.manifest";
         }
 
+        std::string moduleSidecarJsonManifestPath(const std::string &modulePath)
+        {
+            const std::string dir = util::parentDirectoryUtf8(modulePath);
+            return dir.empty() ? std::string("module.manifest.json") : (dir + "\\module.manifest.json");
+        }
+
+        std::string modulesLockPath(const std::string &dir)
+        {
+            return dir.empty() ? std::string("modules.lock") : (dir + "\\modules.lock");
+        }
+
+        std::string jsonStringValue(const std::string &text, const std::string &key)
+        {
+            const std::string needle = "\"" + key + "\"";
+            std::size_t pos = text.find(needle);
+            if (pos == std::string::npos)
+            {
+                return std::string();
+            }
+            pos = text.find(':', pos + needle.size());
+            if (pos == std::string::npos)
+            {
+                return std::string();
+            }
+            ++pos;
+            while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+            {
+                ++pos;
+            }
+            if (pos >= text.size() || text[pos] != '"')
+            {
+                return std::string();
+            }
+            ++pos;
+            std::string out;
+            bool escaped = false;
+            for (; pos < text.size(); ++pos)
+            {
+                const char ch = text[pos];
+                if (escaped)
+                {
+                    switch (ch)
+                    {
+                    case '"': out.push_back('"'); break;
+                    case '\\': out.push_back('\\'); break;
+                    case '/': out.push_back('/'); break;
+                    case 'b': out.push_back('\b'); break;
+                    case 'f': out.push_back('\f'); break;
+                    case 'n': out.push_back('\n'); break;
+                    case 'r': out.push_back('\r'); break;
+                    case 't': out.push_back('\t'); break;
+                    default: out.push_back(ch); break;
+                    }
+                    escaped = false;
+                    continue;
+                }
+                if (ch == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+                if (ch == '"')
+                {
+                    break;
+                }
+                out.push_back(ch);
+            }
+            return out;
+        }
+
+        std::string jsonNumberValue(const std::string &text, const std::string &key)
+        {
+            const std::string needle = "\"" + key + "\"";
+            std::size_t pos = text.find(needle);
+            if (pos == std::string::npos)
+            {
+                return std::string();
+            }
+            pos = text.find(':', pos + needle.size());
+            if (pos == std::string::npos)
+            {
+                return std::string();
+            }
+            ++pos;
+            while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+            {
+                ++pos;
+            }
+            std::size_t end = pos;
+            while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end])))
+            {
+                ++end;
+            }
+            return end > pos ? text.substr(pos, end - pos) : std::string();
+        }
+
+        std::string jsonArrayCsv(const std::string &text, const std::string &key)
+        {
+            const std::string needle = "\"" + key + "\"";
+            std::size_t pos = text.find(needle);
+            if (pos == std::string::npos)
+            {
+                return std::string();
+            }
+            pos = text.find('[', pos + needle.size());
+            if (pos == std::string::npos)
+            {
+                return std::string();
+            }
+            const std::size_t end = text.find(']', pos + 1);
+            if (end == std::string::npos)
+            {
+                return std::string();
+            }
+            const std::string arrayText = text.substr(pos + 1, end - pos - 1);
+            std::vector<std::string> values;
+            std::size_t cursor = 0;
+            while (cursor < arrayText.size())
+            {
+                std::size_t quote = arrayText.find('"', cursor);
+                if (quote == std::string::npos)
+                {
+                    break;
+                }
+                const std::size_t close = arrayText.find('"', quote + 1);
+                if (close == std::string::npos)
+                {
+                    break;
+                }
+                values.push_back(arrayText.substr(quote + 1, close - quote - 1));
+                cursor = close + 1;
+            }
+            std::ostringstream oss;
+            for (std::size_t i = 0; i < values.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    oss << ',';
+                }
+                oss << values[i];
+            }
+            return oss.str();
+        }
+
+        bool jsonBoolValue(const std::string &text, const std::string &key, bool defaultValue)
+        {
+            const std::string needle = "\"" + key + "\"";
+            std::size_t pos = text.find(needle);
+            if (pos == std::string::npos)
+            {
+                return defaultValue;
+            }
+            pos = text.find(':', pos + needle.size());
+            if (pos == std::string::npos)
+            {
+                return defaultValue;
+            }
+            const std::string tail = util::toLowerAscii(util::trim(text.substr(pos + 1, 8)));
+            if (tail.rfind("true", 0) == 0)
+            {
+                return true;
+            }
+            if (tail.rfind("false", 0) == 0)
+            {
+                return false;
+            }
+            return defaultValue;
+        }
+
+        std::string jsonEscape(const std::string &value)
+        {
+            std::ostringstream out;
+            for (unsigned char ch : value)
+            {
+                switch (ch)
+                {
+                case '\\': out << "\\\\"; break;
+                case '"': out << "\\\""; break;
+                case '\b': out << "\\b"; break;
+                case '\f': out << "\\f"; break;
+                case '\n': out << "\\n"; break;
+                case '\r': out << "\\r"; break;
+                case '\t': out << "\\t"; break;
+                default:
+                    if (ch < 0x20)
+                    {
+                        out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(ch)
+                            << std::dec << std::setfill(' ');
+                    }
+                    else
+                    {
+                        out << static_cast<char>(ch);
+                    }
+                    break;
+                }
+            }
+            return out.str();
+        }
+
+        std::string moduleMethodFromJson(const std::string &requestJson)
+        {
+            return jsonStringValue(requestJson, "method");
+        }
+
         bool readSmallTextFile(const std::string &path, std::string &out)
         {
             out.clear();
@@ -227,6 +547,28 @@ namespace ProcessGuard
             oss << in.rdbuf();
             out = oss.str();
             return true;
+        }
+
+        ModuleManager::ModuleManifest parseJsonSidecarManifest(const std::string &jsonText)
+        {
+            const std::string name = jsonStringValue(jsonText, "name");
+            const std::string version = jsonStringValue(jsonText, "version");
+            const std::string summary = jsonStringValue(jsonText, "summary");
+            const std::string caps = jsonArrayCsv(jsonText, "capabilities");
+            std::string abi = jsonStringValue(jsonText, "abi");
+            if (abi.empty())
+            {
+                abi = jsonNumberValue(jsonText, "abi");
+            }
+            std::ostringstream kv;
+            if (!name.empty()) kv << "name=" << name << ";";
+            if (!version.empty()) kv << "version=" << version << ";";
+            if (!abi.empty()) kv << "abi=" << abi << ";";
+            if (!summary.empty()) kv << "summary=" << summary << ";";
+            if (!caps.empty()) kv << "capabilities=" << caps << ";";
+            ModuleManager::ModuleManifest manifest = ModuleManager::parseManifest(kv.str());
+            manifest.raw = jsonText;
+            return manifest;
         }
     } // namespace
 
@@ -509,9 +851,19 @@ namespace ProcessGuard
 
         out.hasNameExport = probed.hasName;
         out.hasInvokeExport = probed.hasInvoke;
+        out.hasInvokeJsonExport = probed.hasInvokeJson;
         out.hasManifestExport = probed.hasManifest;
         std::string sidecarManifest;
-        if (readSmallTextFile(moduleSidecarManifestPath(path), sidecarManifest))
+        std::string sidecarJsonManifest;
+        if (readSmallTextFile(moduleSidecarJsonManifestPath(path), sidecarJsonManifest))
+        {
+            out.manifest = parseJsonSidecarManifest(sidecarJsonManifest);
+            out.name = out.manifest.name;
+            out.version = out.manifest.version;
+            out.abiVersion = out.manifest.abiVersion;
+            out.hasAbiVersion = out.manifest.hasAbiVersion;
+        }
+        if (out.manifest.name.empty() && readSmallTextFile(moduleSidecarManifestPath(path), sidecarManifest))
         {
             out.manifest = parseManifest(sidecarManifest);
             out.name = out.manifest.name;
@@ -536,6 +888,20 @@ namespace ProcessGuard
         {
             m_modulesRoot = dir;
             m_allowlistLoaded = false;
+        }
+    }
+
+    void ModuleManager::setEnabledModules(std::vector<std::string> names)
+    {
+        std::unique_lock<std::shared_mutex> lock(m_mutex);
+        m_enabledModules.clear();
+        for (std::string &name : names)
+        {
+            name = lower(util::trim(name));
+            if (!name.empty() && std::find(m_enabledModules.begin(), m_enabledModules.end(), name) == m_enabledModules.end())
+            {
+                m_enabledModules.push_back(name);
+            }
         }
     }
     // Probe whether a candidate DLL exports the given symbol WITHOUT running its
@@ -578,6 +944,13 @@ namespace ProcessGuard
             return false;
         }
 
+        const std::string candidateKey = moduleKeyFromPath(path);
+        if (!isModuleEnabled(candidateKey))
+        {
+            err = "module disabled by risk/module enablement policy: " + candidateKey;
+            return false;
+        }
+
         // v3 security gate: refuse to LoadLibrary a module that is not on the
         // allowlist (fail-closed when the allowlist is empty and we are not in
         // permissive/development mode), and enforce an Authenticode signature
@@ -586,7 +959,7 @@ namespace ProcessGuard
         std::string allowKey;
         if (!m_permissive)
         {
-            allowKey = moduleKeyFromPath(path);
+            allowKey = candidateKey;
             if (allowKey.empty())
             {
                 err = "module not in allowlist (cannot derive key)";
@@ -636,9 +1009,10 @@ namespace ProcessGuard
         e.init = reinterpret_cast<int (*)(void *)>(reinterpret_cast<void *>(GetProcAddress(handle, "PG_Init")));
         e.shutdown = reinterpret_cast<void (*)(void)>(reinterpret_cast<void *>(GetProcAddress(handle, "PG_Shutdown")));
         e.invoke = reinterpret_cast<int (*)(const char *, char *, size_t)>(reinterpret_cast<void *>(GetProcAddress(handle, "PG_Invoke")));
+        e.invokeJson = reinterpret_cast<int (*)(const char *, char *, size_t)>(reinterpret_cast<void *>(GetProcAddress(handle, "PG_InvokeJson")));
 
-        // A module without an invoke entry is useless to PGS.
-        if (!e.getName || !e.invoke)
+        // A module without any invoke entry is useless to PGS.
+        if (!e.getName || (!e.invoke && !e.invokeJson))
         {
             FreeLibrary(handle);
             err = "missing required PG_ exports";
@@ -667,6 +1041,31 @@ namespace ProcessGuard
             const char *manifestPtr = e.getManifest();
             e.manifest = parseManifest(manifestPtr ? manifestPtr : "");
         }
+        std::string sidecarJson;
+        if (readSmallTextFile(moduleSidecarJsonManifestPath(path), sidecarJson))
+        {
+            ModuleManifest sidecar = parseJsonSidecarManifest(sidecarJson);
+            if (!sidecar.name.empty() && lower(sidecar.name) != lower(e.name))
+            {
+                FreeLibrary(handle);
+                err = "module sidecar manifest name mismatch: " + sidecar.name + " != " + e.name;
+                return false;
+            }
+            if (sidecar.hasAbiVersion && e.hasAbiVersion && sidecar.abiVersion != e.abiVersion)
+            {
+                FreeLibrary(handle);
+                err = "module sidecar manifest ABI mismatch: manifest " + std::to_string(sidecar.abiVersion) +
+                      ", export " + std::to_string(e.abiVersion);
+                return false;
+            }
+            if (!sidecar.raw.empty())
+            {
+                if (e.manifest.raw.empty() || !sidecar.capabilities.empty())
+                {
+                    e.manifest = std::move(sidecar);
+                }
+            }
+        }
         if (!e.manifest.name.empty() && lower(e.manifest.name) != lower(e.name))
         {
             FreeLibrary(handle);
@@ -690,11 +1089,12 @@ namespace ProcessGuard
             e.abiVersion = e.manifest.abiVersion;
             e.hasAbiVersion = true;
         }
-        if (e.hasAbiVersion && e.abiVersion != PG_MODULE_ABI_VERSION)
+        if (e.hasAbiVersion && (e.abiVersion < PG_MODULE_ABI_MIN_SUPPORTED || e.abiVersion > PG_MODULE_ABI_VERSION_JSON))
         {
             FreeLibrary(handle);
             err = "module ABI mismatch: got " + std::to_string(e.abiVersion) +
-                  ", expected " + std::to_string(PG_MODULE_ABI_VERSION);
+                  ", supported " + std::to_string(PG_MODULE_ABI_MIN_SUPPORTED) + ".." +
+                  std::to_string(PG_MODULE_ABI_VERSION_JSON);
             return false;
         }
 
@@ -729,14 +1129,32 @@ namespace ProcessGuard
         // Run the module's one-time init. A non-zero return aborts the load.
         if (e.init)
         {
-            // ABI v2: hand the services struct to v2 modules. v1 modules
-            // ignore the argument. nullptr when PGS has not set services.
-            void *initArg = m_servicesReady ? static_cast<void *>(&m_services) : nullptr;
+            void *initArg = nullptr;
+            std::shared_ptr<ServiceContext> serviceContext;
+            if (m_servicesReady)
+            {
+                serviceContext = std::make_shared<ServiceContext>();
+                serviceContext->host = m_services;
+                serviceContext->moduleName = e.name;
+                serviceContext->capabilities = e.manifest.capabilities;
+                serviceContext->exposed = m_services;
+                serviceContext->exposed.size = static_cast<unsigned int>(sizeof(PGS_ServicesV3));
+                serviceContext->exposed.context = serviceContext.get();
+                serviceContext->exposed.call = &moduleCallThunk;
+                serviceContext->exposed.now_ms = &moduleNowMsThunk;
+                serviceContext->exposed.call_json = &moduleCallJsonThunk;
+                serviceContext->exposed.emit_event = &moduleEmitEventThunk;
+                serviceContext->exposed.get_data_dir = &moduleGetDataDirThunk;
+                serviceContext->exposed.log = &moduleLogThunk;
+                e.serviceContext = serviceContext;
+                initArg = static_cast<void *>(&serviceContext->exposed);
+            }
             const int rc = e.init(initArg);
             if (rc != 0)
             {
                 if (e.shutdown)
                     e.shutdown();
+                e.serviceContext.reset();
                 FreeLibrary(handle);
                 err = "PG_Init failed, rc=" + std::to_string(rc);
                 return false;
@@ -937,7 +1355,7 @@ namespace ProcessGuard
         std::vector<ModuleInfo> out;
         out.reserve(m_modules.size());
         for (const Entry &e : m_modules)
-            out.push_back({e.name, e.version, e.path, e.abiVersion, e.hasAbiVersion, e.manifest});
+            out.push_back({e.name, e.version, e.path, e.abiVersion, e.hasAbiVersion, e.manifest, e.invokeJson != nullptr, false});
         return out;
     }
 
@@ -1015,6 +1433,112 @@ namespace ProcessGuard
         return true;
     }
 
+    bool ModuleManager::invokeJson(const std::string &name, const std::string &requestJson,
+                                   std::string &responseJson, std::string &err)
+    {
+        responseJson.clear();
+        if (requestJson.size() > PG_MODULE_DEFAULT_MAX_JSON_BYTES)
+        {
+            err = "module JSON request too large";
+            return false;
+        }
+
+        const std::string key = lower(name);
+        int (*invokeJsonFn)(const char *, char *, size_t) = nullptr;
+        int (*invokeFn)(const char *, char *, size_t) = nullptr;
+        std::shared_ptr<Entry::RuntimeState> runtime;
+        {
+            std::shared_lock<std::shared_mutex> lock(m_mutex);
+            for (const Entry &e : m_modules)
+            {
+                if (lower(e.name) == key)
+                {
+                    invokeJsonFn = e.invokeJson;
+                    invokeFn = e.invoke;
+                    runtime = e.runtime;
+                    break;
+                }
+            }
+        }
+        if ((!invokeJsonFn && !invokeFn) || !runtime)
+        {
+            err = "module not found: " + name;
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> rtLock(runtime->mutex);
+            if (runtime->unloading)
+            {
+                err = "module unloading: " + name;
+                return false;
+            }
+            ++runtime->activeInvokes;
+        }
+
+        g_invokeRuntimeStack.push_back(runtime.get());
+        struct ActiveInvokeGuard
+        {
+            std::shared_ptr<Entry::RuntimeState> runtime;
+            ~ActiveInvokeGuard()
+            {
+                if (!runtime)
+                {
+                    return;
+                }
+                std::lock_guard<std::mutex> rtLock(runtime->mutex);
+                --runtime->activeInvokes;
+                runtime->cv.notify_all();
+                const auto it = std::find(g_invokeRuntimeStack.begin(), g_invokeRuntimeStack.end(), runtime.get());
+                if (it != g_invokeRuntimeStack.end())
+                {
+                    g_invokeRuntimeStack.erase(it);
+                }
+            }
+        } guard{runtime};
+
+        std::vector<char> buf(PG_MODULE_DEFAULT_MAX_JSON_BYTES + 1, '\0');
+        int rc = 0;
+        if (invokeJsonFn)
+        {
+            rc = invokeJsonFn(requestJson.c_str(), buf.data(), buf.size());
+            responseJson.assign(buf.data());
+            if (rc != 0 && responseJson.empty())
+            {
+                responseJson = "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":\"MODULE_INVOKE_FAILED\",\"message\":\"module JSON invoke failed rc=" + std::to_string(rc) + "\"}}";
+            }
+            return true;
+        }
+
+        const std::string method = moduleMethodFromJson(requestJson);
+        std::string op = method;
+        const std::size_t dot = op.find_last_of('.');
+        if (dot != std::string::npos && dot + 1 < op.size())
+        {
+            op = op.substr(dot + 1);
+        }
+        const std::string fallbackRequest = "op=" + op + ";method=" + method +
+                                            ";params_json_b64=" + util::base64Encode(requestJson);
+        std::vector<char> kvBuf(8192, '\0');
+        rc = invokeFn(fallbackRequest.c_str(), kvBuf.data(), kvBuf.size());
+        const std::string raw(kvBuf.data());
+        const std::string id = jsonStringValue(requestJson, "id");
+        const std::string idJson = id.empty() ? std::string("null") : ("\"" + jsonEscape(id) + "\"");
+        if (rc != 0 || raw.rfind("ERR", 0) == 0)
+        {
+            const std::string msg = raw.empty() ? ("module invoke failed rc=" + std::to_string(rc)) : raw;
+            responseJson = "{\"jsonrpc\":\"2.0\",\"id\":" + idJson +
+                           ",\"error\":{\"code\":\"MODULE_ERROR\",\"message\":\"" +
+                           jsonEscape(msg) + "\"}}";
+        }
+        else
+        {
+            responseJson = "{\"jsonrpc\":\"2.0\",\"id\":" + idJson +
+                           ",\"result\":{\"legacy_response\":\"" + jsonEscape(raw) + "\"}}";
+        }
+        return true;
+    }
+
     // ---- v3 allowlist + Authenticode helpers --------------------------------
 
     std::string ModuleManager::moduleKeyFromPath(const std::string &path)
@@ -1059,6 +1583,28 @@ namespace ProcessGuard
         return nullptr;
     }
 
+    bool ModuleManager::isModuleEnabled(const std::string &moduleKey) const
+    {
+        const std::string key = lower(util::trim(moduleKey));
+        if (key.empty())
+        {
+            return false;
+        }
+        if (m_permissive)
+        {
+            return true;
+        }
+        if (std::find(m_enabledModules.begin(), m_enabledModules.end(), "!" + key) != m_enabledModules.end())
+        {
+            return false;
+        }
+        if (std::find(m_enabledModules.begin(), m_enabledModules.end(), "*") != m_enabledModules.end())
+        {
+            return true;
+        }
+        return std::find(m_enabledModules.begin(), m_enabledModules.end(), key) != m_enabledModules.end();
+    }
+
     bool ModuleManager::isInsideConfiguredModulesRoot(const std::string &path) const
     {
         return pathInsideRoot(path, m_modulesRoot);
@@ -1072,6 +1618,53 @@ namespace ProcessGuard
         //   name|<sha256Hex>|signed
         //   name||signed      (signature required, no pinned hash)
         // Empty allowlist => fail-closed (permissive mode is the only escape).
+        const std::string lockFile = modulesLockPath(dir);
+        std::vector<AllowEntry> lockEntries;
+        {
+            std::ifstream in(lockFile, std::ios::in | std::ios::binary);
+            std::string body;
+            if (in.is_open())
+            {
+                std::ostringstream oss;
+                oss << in.rdbuf();
+                body = oss.str();
+            }
+            std::size_t pos = 0;
+            while (!body.empty())
+            {
+                const std::size_t namePos = body.find("\"name\"", pos);
+                if (namePos == std::string::npos)
+                {
+                    break;
+                }
+                const std::size_t objStart = body.rfind('{', namePos);
+                const std::size_t objEnd = body.find('}', namePos);
+                if (objStart == std::string::npos || objEnd == std::string::npos)
+                {
+                    break;
+                }
+                const std::string obj = body.substr(objStart, objEnd - objStart + 1);
+                AllowEntry entry;
+                entry.name = util::toLowerAscii(util::trim(jsonStringValue(obj, "name")));
+                entry.sha256 = util::toLowerAscii(util::trim(jsonStringValue(obj, "sha256")));
+                const std::string signaturePolicy = util::toLowerAscii(util::trim(jsonStringValue(obj, "signature_policy")));
+                entry.requireSigned = jsonBoolValue(obj, "require_signed", false) ||
+                                      jsonBoolValue(obj, "signed", false) ||
+                                      signaturePolicy == "signed";
+                if (!entry.name.empty() && (entry.sha256.empty() || isSha256Hex(entry.sha256)))
+                {
+                    lockEntries.push_back(std::move(entry));
+                }
+                pos = objEnd + 1;
+            }
+        }
+        if (!lockEntries.empty())
+        {
+            m_allowlist = std::move(lockEntries);
+            m_allowlistLoaded = true;
+            return;
+        }
+
         const std::string file = (dir.empty() ? std::string() : (dir + "\\")) + "modules.allow";
         std::vector<std::string> diagnostics;
         m_allowlist = loadAllowlistEntries(file, &diagnostics);
