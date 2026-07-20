@@ -60,7 +60,9 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       m_blessProcess(new QProcess(this)),
       m_serviceProcess(new QProcess(this)),
-      m_tableProcess(new QProcess(this))
+      m_tableProcess(new QProcess(this)),
+      m_doctorProcess(new QProcess(this)),
+      m_guardActionProcess(new QProcess(this))
 {
     setupUi();
     loadSavedPrefs();
@@ -221,6 +223,78 @@ void MainWindow::attachProcessHandlers()
         }
         m_tableStdoutBuffer.clear();
         m_tableStderrBuffer.clear();
+    });
+
+    connect(m_doctorProcess, &QProcess::readyReadStandardOutput, this, [this]() {
+        m_doctorStdoutBuffer += QString::fromUtf8(m_doctorProcess->readAllStandardOutput());
+    });
+    connect(m_doctorProcess, &QProcess::readyReadStandardError, this, [this]() {
+        m_doctorStderrBuffer += QString::fromUtf8(m_doctorProcess->readAllStandardError());
+    });
+    connect(m_doctorProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        QString msg = trUi("doctor process error: ", "诊断进程错误：");
+        switch (error)
+        {
+        case QProcess::FailedToStart: msg += "FailedToStart"; break;
+        case QProcess::Crashed: msg += "Crashed"; break;
+        case QProcess::Timedout: msg += "Timedout"; break;
+        case QProcess::WriteError: msg += "WriteError"; break;
+        case QProcess::ReadError: msg += "ReadError"; break;
+        case QProcess::UnknownError:
+        default: msg += "UnknownError"; break;
+        }
+        m_doctorBusyNoticeShown = false;
+        appendDoctorOutput(msg);
+    });
+    connect(m_doctorProcess, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
+        const QString statusText = (status == QProcess::NormalExit) ? "NormalExit" : "CrashExit";
+        m_doctorBusyNoticeShown = false;
+        if (m_doctorParseJson && exitCode == 0 && status == QProcess::NormalExit)
+        {
+            populateDoctorTableFromJson(m_doctorStdoutBuffer.trimmed(), m_doctorStderrBuffer.trimmed());
+        }
+        else
+        {
+            const QString out = (m_doctorStdoutBuffer + m_doctorStderrBuffer).trimmed();
+            if (!out.isEmpty()) appendDoctorOutput(out);
+        }
+        appendDoctorOutput(trUi("doctor command finished: exitCode=", "诊断命令结束：exitCode=") +
+                           QString::number(exitCode) + ", status=" + statusText);
+        const bool wasRepair = !m_doctorParseJson;
+        m_doctorStdoutBuffer.clear();
+        m_doctorStderrBuffer.clear();
+        if (wasRepair && exitCode == 0 && status == QProcess::NormalExit)
+        {
+            QTimer::singleShot(0, this, [this]() { runDoctorCommand({"doctor", "--json"}, true); });
+        }
+    });
+
+    connect(m_guardActionProcess, &QProcess::readyReadStandardOutput, this, [this]() {
+        m_guardActionStdoutBuffer += QString::fromUtf8(m_guardActionProcess->readAllStandardOutput());
+    });
+    connect(m_guardActionProcess, &QProcess::readyReadStandardError, this, [this]() {
+        m_guardActionStderrBuffer += QString::fromUtf8(m_guardActionProcess->readAllStandardError());
+    });
+    connect(m_guardActionProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        Q_UNUSED(error);
+        m_guardActionBusyNoticeShown = false;
+        statusBar()->showMessage(trUi("guard action process error", "守护操作进程错误"), 5000);
+    });
+    connect(m_guardActionProcess, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus status) {
+        m_guardActionBusyNoticeShown = false;
+        QString detail = (m_guardActionStdoutBuffer + m_guardActionStderrBuffer).trimmed();
+        if (detail.isEmpty())
+        {
+            detail = trUi("guard action finished", "守护操作完成");
+        }
+        if (exitCode != 0 || status != QProcess::NormalExit)
+        {
+            detail = trUi("guard action failed: ", "守护操作失败：") + detail;
+        }
+        statusBar()->showMessage(detail.left(260), 5000);
+        m_guardActionStdoutBuffer.clear();
+        m_guardActionStderrBuffer.clear();
+        runTableRefresh(false);
     });
 }
 
@@ -458,14 +532,25 @@ void MainWindow::setupUi()
     auto *tableButtons = new QHBoxLayout();
     m_btnTableRefresh = new QPushButton(tablePage);
     m_btnTableClear = new QPushButton(tablePage);
+    m_labelGuardActionId = new QLabel(tablePage);
+    m_guardActionIdEdit = new QLineEdit(tablePage);
+    m_guardActionIdEdit->setPlaceholderText(QStringLiteral("guard_id"));
+    m_btnGuardRetry = new QPushButton(tablePage);
+    m_btnGuardClearQuarantine = new QPushButton(tablePage);
     tableButtons->addWidget(m_btnTableRefresh);
     tableButtons->addWidget(m_btnTableClear);
+    tableButtons->addWidget(m_labelGuardActionId);
+    tableButtons->addWidget(m_guardActionIdEdit);
+    tableButtons->addWidget(m_btnGuardRetry);
+    tableButtons->addWidget(m_btnGuardClearQuarantine);
+    tableButtons->addStretch();
 
     m_guardTable = new QTableWidget(tablePage);
-    m_guardTable->setColumnCount(16);
+    m_guardTable->setColumnCount(25);
     m_guardTable->setHorizontalHeaderLabels(QStringList{
-        "PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified",
-        "App", "AUMID", "Job", "Window", "Delay", "Backoff", "Hang", "KillOnExit"});
+        "ID", "PID", "Status", "Quarantine", "FailureCode", "Failures", "NextRetry", "Health", "HealthFailures",
+        "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified", "App", "AUMID", "Job",
+        "Window", "Delay", "Backoff", "Hang", "KillOnExit", "LastFailure"});
     m_guardTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_guardTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_guardTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -473,6 +558,51 @@ void MainWindow::setupUi()
 
     tableLayout->addWidget(tableConfigBox);
     tableLayout->addLayout(tableButtons);
+
+    m_healthPolicyBox = new QGroupBox(tablePage);
+    auto *healthGrid = new QGridLayout(m_healthPolicyBox);
+    m_labelHealthPid = new QLabel(m_healthPolicyBox);
+    healthGrid->addWidget(m_labelHealthPid, 0, 0);
+    m_healthPidEdit = new QLineEdit(m_healthPolicyBox);
+    m_healthPidEdit->setPlaceholderText(QStringLiteral("pid"));
+    healthGrid->addWidget(m_healthPidEdit, 0, 1);
+    m_healthEnabledCheck = new QCheckBox(m_healthPolicyBox);
+    m_healthEnabledCheck->setChecked(true);
+    healthGrid->addWidget(m_healthEnabledCheck, 0, 2);
+    m_healthTypeCombo = new QComboBox(m_healthPolicyBox);
+    m_healthTypeCombo->addItems(QStringList{QStringLiteral("process"), QStringLiteral("tcp"), QStringLiteral("http")});
+    healthGrid->addWidget(m_healthTypeCombo, 0, 3);
+    m_healthActionCombo = new QComboBox(m_healthPolicyBox);
+    m_healthActionCombo->addItems(QStringList{QStringLiteral("event"), QStringLiteral("restart"), QStringLiteral("quarantine"), QStringLiteral("none")});
+    healthGrid->addWidget(m_healthActionCombo, 0, 4);
+    m_healthIntervalEdit = new QLineEdit(m_healthPolicyBox);
+    m_healthIntervalEdit->setPlaceholderText(QStringLiteral("interval_ms"));
+    m_healthIntervalEdit->setText(QStringLiteral("5000"));
+    healthGrid->addWidget(m_healthIntervalEdit, 1, 0);
+    m_healthTimeoutEdit = new QLineEdit(m_healthPolicyBox);
+    m_healthTimeoutEdit->setPlaceholderText(QStringLiteral("timeout_ms"));
+    m_healthTimeoutEdit->setText(QStringLiteral("1000"));
+    healthGrid->addWidget(m_healthTimeoutEdit, 1, 1);
+    m_healthFailuresEdit = new QLineEdit(m_healthPolicyBox);
+    m_healthFailuresEdit->setPlaceholderText(QStringLiteral("failures"));
+    m_healthFailuresEdit->setText(QStringLiteral("3"));
+    healthGrid->addWidget(m_healthFailuresEdit, 1, 2);
+    m_healthHostEdit = new QLineEdit(m_healthPolicyBox);
+    m_healthHostEdit->setPlaceholderText(QStringLiteral("tcp host"));
+    healthGrid->addWidget(m_healthHostEdit, 1, 3);
+    m_healthPortEdit = new QLineEdit(m_healthPolicyBox);
+    m_healthPortEdit->setPlaceholderText(QStringLiteral("tcp port"));
+    healthGrid->addWidget(m_healthPortEdit, 1, 4);
+    m_healthUrlEdit = new QLineEdit(m_healthPolicyBox);
+    m_healthUrlEdit->setPlaceholderText(QStringLiteral("http url"));
+    healthGrid->addWidget(m_healthUrlEdit, 2, 0, 1, 3);
+    m_btnHealthSet = new QPushButton(m_healthPolicyBox);
+    m_btnHealthGet = new QPushButton(m_healthPolicyBox);
+    m_btnHealthClear = new QPushButton(m_healthPolicyBox);
+    healthGrid->addWidget(m_btnHealthSet, 2, 3);
+    healthGrid->addWidget(m_btnHealthGet, 2, 4);
+    healthGrid->addWidget(m_btnHealthClear, 2, 5);
+    tableLayout->addWidget(m_healthPolicyBox);
     tableLayout->addWidget(m_guardTable, 1);
 
     m_tabs->addTab(tablePage, "");
@@ -481,6 +611,55 @@ void MainWindow::setupUi()
     auto *modulePage = new QWidget(m_tabs);
     setupModuleTab(modulePage);
     m_tabs->addTab(modulePage, "");
+
+    // Doctor tab.
+    auto *doctorPage = new QWidget(m_tabs);
+    auto *doctorLayout = new QVBoxLayout(doctorPage);
+    auto *doctorBox = new QGroupBox(doctorPage);
+    auto *doctorGrid = new QGridLayout(doctorBox);
+    m_titleDoctor = new QLabel(doctorBox);
+    doctorGrid->addWidget(m_titleDoctor, 0, 0, 1, 2);
+    m_labelDoctorToolPath = new QLabel(doctorBox);
+    doctorGrid->addWidget(m_labelDoctorToolPath, 1, 0);
+    m_doctorToolPathEdit = new QLineEdit(blessToolPath(), doctorBox);
+    doctorGrid->addWidget(m_doctorToolPathEdit, 1, 1);
+    m_labelDoctorToken = new QLabel(doctorBox);
+    doctorGrid->addWidget(m_labelDoctorToken, 2, 0);
+    m_doctorTokenEdit = new QLineEdit(doctorBox);
+    m_doctorTokenEdit->setEchoMode(QLineEdit::Password);
+    doctorGrid->addWidget(m_doctorTokenEdit, 2, 1);
+    m_labelDoctorModulesDir = new QLabel(doctorBox);
+    doctorGrid->addWidget(m_labelDoctorModulesDir, 3, 0);
+    m_doctorModulesDirEdit = new QLineEdit(defaultModuleDir(), doctorBox);
+    doctorGrid->addWidget(m_doctorModulesDirEdit, 3, 1);
+
+    auto *doctorButtons = new QHBoxLayout();
+    m_btnDoctorRun = new QPushButton(doctorPage);
+    m_btnDoctorRepairState = new QPushButton(doctorPage);
+    m_btnDoctorRepairModulesAcl = new QPushButton(doctorPage);
+    m_btnDoctorRepairModulesLock = new QPushButton(doctorPage);
+    m_btnDoctorClear = new QPushButton(doctorPage);
+    doctorButtons->addWidget(m_btnDoctorRun);
+    doctorButtons->addWidget(m_btnDoctorRepairState);
+    doctorButtons->addWidget(m_btnDoctorRepairModulesAcl);
+    doctorButtons->addWidget(m_btnDoctorRepairModulesLock);
+    doctorButtons->addWidget(m_btnDoctorClear);
+    doctorButtons->addStretch();
+
+    m_doctorTable = new QTableWidget(doctorPage);
+    m_doctorTable->setColumnCount(3);
+    m_doctorTable->setHorizontalHeaderLabels(QStringList{"Status", "Check", "Message"});
+    m_doctorTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_doctorTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_doctorTable->horizontalHeader()->setStretchLastSection(true);
+
+    m_doctorOutput = new QTextEdit(doctorPage);
+    m_doctorOutput->setReadOnly(true);
+    doctorLayout->addWidget(doctorBox);
+    doctorLayout->addLayout(doctorButtons);
+    doctorLayout->addWidget(m_doctorTable, 1);
+    doctorLayout->addWidget(m_doctorOutput, 1);
+    m_tabs->addTab(doctorPage, "");
     rootLayout->addWidget(m_tabs);
 
     setCentralWidget(central);
@@ -506,6 +685,14 @@ void MainWindow::setupUi()
     connect(m_tableToolPathEdit, &QLineEdit::editingFinished, this, [this]() {
         QSettings settings("OpenStarlight", "PGSAdminQt");
         settings.setValue("tableToolPath", m_tableToolPathEdit->text().trimmed());
+    });
+    connect(m_doctorToolPathEdit, &QLineEdit::editingFinished, this, [this]() {
+        QSettings settings("OpenStarlight", "PGSAdminQt");
+        settings.setValue("doctorToolPath", m_doctorToolPathEdit->text().trimmed());
+    });
+    connect(m_doctorModulesDirEdit, &QLineEdit::editingFinished, this, [this]() {
+        QSettings settings("OpenStarlight", "PGSAdminQt");
+        settings.setValue("doctorModulesDir", m_doctorModulesDirEdit->text().trimmed());
     });
 
     connect(m_btnPing, &QPushButton::clicked, this, [this]() {
@@ -702,6 +889,55 @@ void MainWindow::setupUi()
         m_guardTable->setRowCount(0);
         m_guardTableColumnsSized = false;
     });
+    connect(m_guardTable, &QTableWidget::itemSelectionChanged, this, [this]() {
+        const QString guardId = selectedGuardId();
+        if (!guardId.isEmpty())
+        {
+            m_guardActionIdEdit->setText(guardId);
+        }
+        const QString pid = selectedGuardPid();
+        if (!pid.isEmpty())
+        {
+            m_healthPidEdit->setText(pid);
+        }
+    });
+    connect(m_btnGuardRetry, &QPushButton::clicked, this, [this]() {
+        runGuardTableAction(QStringLiteral("retry"));
+    });
+    connect(m_btnGuardClearQuarantine, &QPushButton::clicked, this, [this]() {
+        runGuardTableAction(QStringLiteral("clear-quarantine"));
+    });
+    connect(m_btnHealthSet, &QPushButton::clicked, this, [this]() {
+        runHealthCheckAction(QStringLiteral("set"));
+    });
+    connect(m_btnHealthGet, &QPushButton::clicked, this, [this]() {
+        runHealthCheckAction(QStringLiteral("get"));
+    });
+    connect(m_btnHealthClear, &QPushButton::clicked, this, [this]() {
+        runHealthCheckAction(QStringLiteral("clear"));
+    });
+    connect(m_btnDoctorRun, &QPushButton::clicked, this, [this]() {
+        runDoctorCommand({"doctor", "--json"}, true);
+    });
+    connect(m_btnDoctorRepairState, &QPushButton::clicked, this, [this]() {
+        runDoctorCommand({"doctor", "repair-state-acl", "--json"}, false);
+    });
+    connect(m_btnDoctorRepairModulesAcl, &QPushButton::clicked, this, [this]() {
+        QStringList args{"doctor", "repair-modules-acl", "--json"};
+        const QString dir = m_doctorModulesDirEdit->text().trimmed();
+        if (!dir.isEmpty()) args << "--modules-dir" << dir;
+        runDoctorCommand(args, false);
+    });
+    connect(m_btnDoctorRepairModulesLock, &QPushButton::clicked, this, [this]() {
+        QStringList args{"doctor", "repair-modules-lock", "--json"};
+        const QString dir = m_doctorModulesDirEdit->text().trimmed();
+        if (!dir.isEmpty()) args << "--modules-dir" << dir;
+        runDoctorCommand(args, false);
+    });
+    connect(m_btnDoctorClear, &QPushButton::clicked, this, [this]() {
+        m_doctorTable->setRowCount(0);
+        m_doctorOutput->clear();
+    });
     m_tableRefreshTimer = new QTimer(this);
     m_tableRefreshTimer->setInterval(m_tableIntervalCombo->currentData().toInt());
     connect(m_tableRefreshTimer, &QTimer::timeout, this, [this]() {
@@ -835,6 +1071,8 @@ void MainWindow::loadSavedPrefs()
     const QString tableTool = settings.value("tableToolPath").toString().trimmed();
     const QString moduleTool = settings.value("moduleToolPath").toString().trimmed();
     const QString moduleDir = settings.value("moduleDir").toString().trimmed();
+    const QString doctorTool = settings.value("doctorToolPath").toString().trimmed();
+    const QString doctorModulesDir = settings.value("doctorModulesDir").toString().trimmed();
     const int tableIntervalMs = settings.value("tableRefreshIntervalMs", 1000).toInt();
     if (m_themeCombo)
     {
@@ -874,6 +1112,22 @@ void MainWindow::loadSavedPrefs()
     {
         m_moduleDirEdit->setText(moduleDir);
     }
+    if (m_doctorToolPathEdit)
+    {
+        const QString savedDoctorTool = doctorTool.isEmpty() ? blessTool : doctorTool;
+        if (!savedDoctorTool.isEmpty())
+        {
+            m_doctorToolPathEdit->setText(savedDoctorTool);
+        }
+    }
+    if (m_doctorModulesDirEdit)
+    {
+        const QString savedDoctorModulesDir = doctorModulesDir.isEmpty() ? moduleDir : doctorModulesDir;
+        if (!savedDoctorModulesDir.isEmpty())
+        {
+            m_doctorModulesDirEdit->setText(savedDoctorModulesDir);
+        }
+    }
     if (m_tableIntervalCombo)
     {
         const int idx = m_tableIntervalCombo->findData(tableIntervalMs);
@@ -898,6 +1152,7 @@ void MainWindow::applyLanguage()
     m_tabs->setTabText(1, trUi("Service Console", "服务管理"));
     m_tabs->setTabText(2, trUi("Guard Table", "守护表格"));
     m_tabs->setTabText(3, trUi("Module Management", "模块管理"));
+    m_tabs->setTabText(4, trUi("Doctor", "诊断修复"));
     m_titleModule->setText(trUi("Module Management", "模块管理"));
     m_labelModuleToolPath->setText(trUi("pgs_bless path", "pgs_bless 路径"));
     m_labelModuleToken->setText(trUi("token", "token"));
@@ -913,6 +1168,7 @@ void MainWindow::applyLanguage()
     m_titleTarget->setText(trUi("Target", "目标参数"));
     m_titleService->setText(trUi("PGS_Service Tool", "PGS_Service 工具"));
     m_titleTable->setText(trUi("Guard Table Source", "守护表格数据源"));
+    m_titleDoctor->setText(trUi("Doctor / Repair", "诊断 / 修复"));
 
     m_labelToolPath->setText(trUi("pgs_bless path", "pgs_bless 路径"));
     m_labelToken->setText(trUi("token", "当前 token"));
@@ -938,6 +1194,10 @@ void MainWindow::applyLanguage()
     m_labelTableToolPath->setText(trUi("pgs_bless path", "pgs_bless 路径"));
     m_labelTableToken->setText(trUi("token", "token"));
     m_labelTableInterval->setText(trUi("auto refresh", "自动刷新"));
+    m_labelGuardActionId->setText(trUi("guard id", "守护 ID"));
+    m_labelDoctorToolPath->setText(trUi("pgs_bless path", "pgs_bless 路径"));
+    m_labelDoctorToken->setText(trUi("token", "token"));
+    m_labelDoctorModulesDir->setText(trUi("modules directory", "模块目录"));
 
     m_restartArgsEdit->setPlaceholderText(trUi("--mode worker", "--mode worker"));
     m_launchArgsEdit->setPlaceholderText(trUi("--flag value", "--参数 值"));
@@ -967,11 +1227,29 @@ void MainWindow::applyLanguage()
     m_btnServiceClear->setText(trUi("Clear Log", "清空日志"));
     m_btnTableRefresh->setText(trUi("Refresh", "刷新"));
     m_btnTableClear->setText(trUi("Clear Table", "清空表格"));
+    m_btnGuardRetry->setText(trUi("Retry", "重试"));
+    m_btnGuardClearQuarantine->setText(trUi("Clear Quarantine", "清除隔离"));
+    m_healthPolicyBox->setTitle(trUi("Health policy", "健康策略"));
+    m_labelHealthPid->setText(trUi("PID:", "PID："));
+    m_healthEnabledCheck->setText(trUi("Enabled", "启用"));
+    m_btnHealthSet->setText(trUi("Set Health", "设置健康检查"));
+    m_btnHealthGet->setText(trUi("Get", "查询"));
+    m_btnHealthClear->setText(trUi("Clear", "清除"));
+    m_btnDoctorRun->setText(trUi("Run Doctor", "运行诊断"));
+    m_btnDoctorRepairState->setText(trUi("Repair State ACL", "修复状态 ACL"));
+    m_btnDoctorRepairModulesAcl->setText(trUi("Repair Modules ACL", "修复模块 ACL"));
+    m_btnDoctorRepairModulesLock->setText(trUi("Repair modules.lock", "修复 modules.lock"));
+    m_btnDoctorClear->setText(trUi("Clear", "清空"));
     m_guardTable->setHorizontalHeaderLabels(isChineseUi()
-                                                ? QStringList{"PID", "路径", "哈希", "已重启", "最大重启", "存活", "会话", "哈希校验",
-                                                              "应用", "AUMID", "Job", "窗口", "延迟", "退避", "假活", "退出连杀"}
-                                                : QStringList{"PID", "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified",
-                                                              "App", "AUMID", "Job", "Window", "Delay", "Backoff", "Hang", "KillOnExit"});
+                                                ? QStringList{"ID", "PID", "状态", "隔离", "失败码", "失败数", "下次重试", "健康", "健康失败",
+                                                              "路径", "哈希", "已重启", "最大重启", "存活", "会话", "哈希校验",
+                                                              "应用", "AUMID", "Job", "窗口", "延迟", "退避", "假活", "退出连杀", "最后失败"}
+                                                : QStringList{"ID", "PID", "Status", "Quarantine", "FailureCode", "Failures", "NextRetry", "Health", "HealthFailures",
+                                                              "Path", "Hash", "Restarts", "Max", "Alive", "Session", "HashVerified",
+                                                              "App", "AUMID", "Job", "Window", "Delay", "Backoff", "Hang", "KillOnExit", "LastFailure"});
+    m_doctorTable->setHorizontalHeaderLabels(isChineseUi()
+                                                  ? QStringList{"状态", "检查", "消息"}
+                                                  : QStringList{"Status", "Check", "Message"});
     QSettings settings("OpenStarlight", "PGSAdminQt");
     settings.setValue("language", isChineseUi() ? 0 : 1);
 }
@@ -1177,6 +1455,194 @@ void MainWindow::runServiceCommand(const QStringList &args)
     m_serviceProcess->start(program, args);
 }
 
+void MainWindow::runDoctorCommand(const QStringList &args, bool parseJson)
+{
+    if (m_doctorProcess->state() != QProcess::NotRunning)
+    {
+        if (!m_doctorBusyNoticeShown)
+        {
+            appendDoctorOutput(trUi("previous doctor command still running", "上一个诊断命令仍在执行"));
+            m_doctorBusyNoticeShown = true;
+        }
+        return;
+    }
+    m_doctorBusyNoticeShown = false;
+    m_doctorParseJson = parseJson;
+    m_doctorStdoutBuffer.clear();
+    m_doctorStderrBuffer.clear();
+
+    QString program = m_doctorToolPathEdit->text().trimmed();
+    if (program.isEmpty())
+    {
+        program = blessToolPath();
+    }
+    if (!QFileInfo::exists(program))
+    {
+        appendDoctorOutput(trUi("pgs_bless not found: ", "未找到 pgs_bless：") + program);
+        return;
+    }
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString token = m_doctorTokenEdit->text();
+    if (!token.isEmpty())
+    {
+        env.insert(QStringLiteral("PGS_AUTH_TOKEN"), token);
+    }
+
+    appendDoctorOutput(">>> " + program + " " + redactedArgsForLog(args).join(' '));
+    m_doctorProcess->setWorkingDirectory(QFileInfo(program).absolutePath());
+    m_doctorProcess->setProcessEnvironment(env);
+    m_doctorProcess->start(program, args);
+}
+
+void MainWindow::runGuardTableAction(const QString &action)
+{
+    if (m_guardActionProcess->state() != QProcess::NotRunning)
+    {
+        if (!m_guardActionBusyNoticeShown)
+        {
+            statusBar()->showMessage(trUi("previous guard action still running", "上一个守护操作仍在执行"), 3000);
+            m_guardActionBusyNoticeShown = true;
+        }
+        return;
+    }
+    m_guardActionBusyNoticeShown = false;
+    const QString guardId = m_guardActionIdEdit->text().trimmed().isEmpty() ? selectedGuardId() : m_guardActionIdEdit->text().trimmed();
+    if (guardId.isEmpty())
+    {
+        statusBar()->showMessage(trUi("guard id is required", "需要守护 ID"), 3000);
+        return;
+    }
+
+    QString program = m_tableToolPathEdit->text().trimmed();
+    if (program.isEmpty())
+    {
+        program = blessToolPath();
+    }
+    if (!QFileInfo::exists(program))
+    {
+        statusBar()->showMessage(trUi("pgs_bless not found for guard action", "守护操作未找到 pgs_bless"), 5000);
+        return;
+    }
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString token = m_tableTokenEdit->text();
+    if (!token.isEmpty())
+    {
+        env.insert(QStringLiteral("PGS_AUTH_TOKEN"), token);
+    }
+    QStringList args{"guard", action, "--id", guardId};
+    statusBar()->showMessage(">>> " + redactedArgsForLog(args).join(' '), 3000);
+    m_guardActionStdoutBuffer.clear();
+    m_guardActionStderrBuffer.clear();
+    m_guardActionProcess->setWorkingDirectory(QFileInfo(program).absolutePath());
+    m_guardActionProcess->setProcessEnvironment(env);
+    m_guardActionProcess->start(program, args);
+}
+
+void MainWindow::runHealthCheckAction(const QString &action)
+{
+    if (m_guardActionProcess->state() != QProcess::NotRunning)
+    {
+        if (!m_guardActionBusyNoticeShown)
+        {
+            statusBar()->showMessage(trUi("previous guard command still running", "上一个守护命令仍在执行"), 3000);
+            m_guardActionBusyNoticeShown = true;
+        }
+        return;
+    }
+    m_guardActionBusyNoticeShown = false;
+    const QString pid = m_healthPidEdit->text().trimmed().isEmpty() ? selectedGuardPid() : m_healthPidEdit->text().trimmed();
+    if (pid.isEmpty())
+    {
+        statusBar()->showMessage(trUi("PID is required for health-check", "健康检查需要 PID"), 3000);
+        return;
+    }
+
+    QString program = m_tableToolPathEdit->text().trimmed();
+    if (program.isEmpty())
+    {
+        program = blessToolPath();
+    }
+    if (!QFileInfo::exists(program))
+    {
+        statusBar()->showMessage(trUi("pgs_bless not found for health-check", "健康检查未找到 pgs_bless"), 5000);
+        return;
+    }
+
+    QStringList args{"health-check", action, "--pid", pid};
+    if (action == QStringLiteral("set"))
+    {
+        QJsonObject cfg;
+        cfg.insert(QStringLiteral("enabled"), m_healthEnabledCheck->isChecked());
+        const QString type = m_healthTypeCombo->currentText();
+        cfg.insert(QStringLiteral("type"), type);
+        cfg.insert(QStringLiteral("action"), m_healthActionCombo->currentText());
+        auto addIntField = [&](const QString &key, QLineEdit *edit, bool required) -> bool {
+            const QString value = edit ? edit->text().trimmed() : QString();
+            if (value.isEmpty())
+            {
+                if (required) statusBar()->showMessage(key + trUi(" is required", " 必填"), 3000);
+                return !required;
+            }
+            bool ok = false;
+            const qlonglong parsed = value.toLongLong(&ok);
+            if (!ok)
+            {
+                statusBar()->showMessage(key + trUi(" must be a number", " 必须是数字"), 3000);
+                return false;
+            }
+            cfg.insert(key, static_cast<double>(parsed));
+            return true;
+        };
+        if (!addIntField(QStringLiteral("interval_ms"), m_healthIntervalEdit, false) ||
+            !addIntField(QStringLiteral("timeout_ms"), m_healthTimeoutEdit, false) ||
+            !addIntField(QStringLiteral("failures"), m_healthFailuresEdit, false))
+        {
+            return;
+        }
+        if (type == QStringLiteral("tcp"))
+        {
+            const QString host = m_healthHostEdit->text().trimmed();
+            if (host.isEmpty())
+            {
+                statusBar()->showMessage(trUi("TCP host is required", "TCP host 必填"), 3000);
+                return;
+            }
+            cfg.insert(QStringLiteral("host"), host);
+            if (!addIntField(QStringLiteral("port"), m_healthPortEdit, true))
+            {
+                return;
+            }
+        }
+        else if (type == QStringLiteral("http"))
+        {
+            const QString url = m_healthUrlEdit->text().trimmed();
+            if (url.isEmpty())
+            {
+                statusBar()->showMessage(trUi("HTTP url is required", "HTTP URL 必填"), 3000);
+                return;
+            }
+            cfg.insert(QStringLiteral("url"), url);
+        }
+        args << QStringLiteral("--config-json")
+             << QString::fromUtf8(QJsonDocument(cfg).toJson(QJsonDocument::Compact));
+    }
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString token = m_tableTokenEdit->text();
+    if (!token.isEmpty())
+    {
+        env.insert(QStringLiteral("PGS_AUTH_TOKEN"), token);
+    }
+    statusBar()->showMessage(">>> " + redactedArgsForLog(args).join(' '), 3000);
+    m_guardActionStdoutBuffer.clear();
+    m_guardActionStderrBuffer.clear();
+    m_guardActionProcess->setWorkingDirectory(QFileInfo(program).absolutePath());
+    m_guardActionProcess->setProcessEnvironment(env);
+    m_guardActionProcess->start(program, args);
+}
+
 void MainWindow::startServiceResetSequence()
 {
     if (m_serviceProcess->state() != QProcess::NotRunning || m_serviceSequenceRunning)
@@ -1219,6 +1685,12 @@ void MainWindow::appendServiceOutput(const QString &text)
 {
     const QString stamp = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
     m_serviceOutput->append("[" + stamp + "] " + text.trimmed());
+}
+
+void MainWindow::appendDoctorOutput(const QString &text)
+{
+    const QString stamp = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+    m_doctorOutput->append("[" + stamp + "] " + text.trimmed());
 }
 
 void MainWindow::runTableRefresh(bool silentIfBusy)
@@ -1266,6 +1738,13 @@ void MainWindow::runTableRefresh(bool silentIfBusy)
 
 void MainWindow::populateGuardTableFromJson(const QString &jsonText, const QString &stderrText)
 {
+    auto jsonValue = [](const QJsonObject &obj, const char *key) -> QString {
+        const QJsonValue value = obj.value(QString::fromLatin1(key));
+        if (value.isString()) return value.toString();
+        if (value.isDouble()) return QString::number(value.toDouble(), 'f', 0);
+        if (value.isBool()) return value.toBool() ? QStringLiteral("1") : QStringLiteral("0");
+        return QString();
+    };
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isArray())
@@ -1295,45 +1774,57 @@ void MainWindow::populateGuardTableFromJson(const QString &jsonText, const QStri
             m_guardTable->setItem(i, col, item);
             return item;
         };
-        setCell(0, obj.value("pid").toString());
-        setCell(1, obj.value("path").toString());
-        setCell(2, obj.value("hash").toString());
-        // Restart count: yellow when within 1 of the limit (and limit != no/unlimited).
-        const QString restartText = obj.value("restart_count").toString();
-        const QString maxText = obj.value("max_restarts").toString();
+        const QString statusText = jsonValue(obj, "status");
+        const QString quarantinedText = jsonValue(obj, "quarantined");
+        const bool quarantined = quarantinedText == "1" || statusText.compare("quarantined", Qt::CaseInsensitive) == 0;
+        const QColor quarantineColor = quarantined ? QColor(0xd4, 0x3a, 0x3a) : QColor();
+        setCell(0, jsonValue(obj, "guard_id"), quarantineColor);
+        setCell(1, jsonValue(obj, "pid"), quarantineColor);
+        setCell(2, statusText, quarantineColor);
+        setCell(3, quarantinedText, quarantineColor);
+        setCell(4, jsonValue(obj, "last_failure_code"), quarantineColor);
+        setCell(5, jsonValue(obj, "failure_count"), quarantineColor);
+        setCell(6, jsonValue(obj, "next_retry_ms"));
+        const QString healthText = jsonValue(obj, "health_status");
+        QColor healthColor;
+        if (healthText.compare("healthy", Qt::CaseInsensitive) == 0) healthColor = QColor(0x16, 0x8c, 0x2e);
+        else if (!healthText.isEmpty() && healthText.compare("disabled", Qt::CaseInsensitive) != 0) healthColor = QColor(0xd9, 0x6a, 0x10);
+        setCell(7, healthText, healthColor);
+        setCell(8, jsonValue(obj, "health_failure_count"), healthColor);
+        setCell(9, jsonValue(obj, "path"));
+        setCell(10, jsonValue(obj, "hash"));
+        const QString restartText = jsonValue(obj, "restart_count");
+        const QString maxText = jsonValue(obj, "max_restarts");
         QColor restartColor;
         {
             bool rok = false, mok = false;
-            int rc = restartText.toInt(&rok);
-            int mc = maxText.toInt(&mok);
-            if (rok && mok && mc > 0 && rc >= mc - 1)
-                restartColor = QColor(0xc8, 0x8a, 0x00); // amber
+            const int rc = restartText.toInt(&rok);
+            const int mc = maxText.toInt(&mok);
+            if (rok && mok && mc > 0 && rc >= mc - 1) restartColor = QColor(0xc8, 0x8a, 0x00);
         }
-        setCell(3, restartText, restartColor);
-        setCell(4, maxText);
-        // Alive status: green=alive, red=dead.
-        const QString aliveText = obj.value("alive").toString();
-        QColor aliveColor = (aliveText == "1" || aliveText.compare("true", Qt::CaseInsensitive) == 0)
-                                ? QColor(0x16, 0x8c, 0x2e) : QColor(0xd4, 0x3a, 0x3a);
-        setCell(5, aliveText, aliveColor);
-        setCell(6, obj.value("session").toString());
-        // Hash verification: orange when failed (hash_verified != 1/true).
-        const QString hashText = obj.value("hash_verified").toString();
+        setCell(11, restartText, restartColor);
+        setCell(12, maxText);
+        const QString aliveText = jsonValue(obj, "alive");
+        const QColor aliveColor = (aliveText == "1" || aliveText.compare("true", Qt::CaseInsensitive) == 0)
+                                      ? QColor(0x16, 0x8c, 0x2e) : QColor(0xd4, 0x3a, 0x3a);
+        setCell(13, aliveText, aliveColor);
+        setCell(14, jsonValue(obj, "session"));
+        const QString hashText = jsonValue(obj, "hash_verified");
         QColor hashColor;
-        if (hashText != "1" && hashText.compare("true", Qt::CaseInsensitive) != 0)
-            hashColor = QColor(0xd9, 0x6a, 0x10); // orange
-        setCell(7, hashText, hashColor);
-        setCell(8, obj.value("app_kind").toString());
-        setCell(9, obj.value("aumid").toString());
-        const QString jobText = obj.value("job_attached").toString();
+        if (hashText != "1" && hashText.compare("true", Qt::CaseInsensitive) != 0) hashColor = QColor(0xd9, 0x6a, 0x10);
+        setCell(15, hashText, hashColor);
+        setCell(16, jsonValue(obj, "app_kind"));
+        setCell(17, jsonValue(obj, "aumid"));
+        const QString jobText = jsonValue(obj, "job_attached");
         const QColor jobColor = (jobText == "1" || jobText.compare("true", Qt::CaseInsensitive) == 0)
                                     ? QColor(0x16, 0x8c, 0x2e) : QColor(0xd9, 0x6a, 0x10);
-        setCell(10, jobText, jobColor);
-        setCell(11, obj.value("restart_window").toString());
-        setCell(12, obj.value("restart_delay").toString());
-        setCell(13, obj.value("backoff").toString());
-        setCell(14, obj.value("hang_timeout").toString());
-        setCell(15, obj.value("kill_on_exit").toString());
+        setCell(18, jobText, jobColor);
+        setCell(19, jsonValue(obj, "restart_window"));
+        setCell(20, jsonValue(obj, "restart_delay"));
+        setCell(21, jsonValue(obj, "backoff"));
+        setCell(22, jsonValue(obj, "hang_timeout"));
+        setCell(23, jsonValue(obj, "kill_on_exit"));
+        setCell(24, jsonValue(obj, "last_failure"), quarantineColor);
     }
     if (!m_guardTableColumnsSized || !m_lastTableRefreshWasAuto)
     {
@@ -1347,4 +1838,78 @@ void MainWindow::populateGuardTableFromJson(const QString &jsonText, const QStri
     {
         statusBar()->showMessage(trUi("guard table refreshed", "守护表格已刷新"), 2000);
     }
+}
+
+QString MainWindow::selectedGuardId() const
+{
+    if (!m_guardTable)
+    {
+        return QString();
+    }
+    const QList<QTableWidgetItem *> selected = m_guardTable->selectedItems();
+    if (selected.isEmpty())
+    {
+        return QString();
+    }
+    const int row = selected.first()->row();
+    QTableWidgetItem *item = m_guardTable->item(row, 0);
+    return item ? item->text().trimmed() : QString();
+}
+
+QString MainWindow::selectedGuardPid() const
+{
+    if (!m_guardTable)
+    {
+        return QString();
+    }
+    const QList<QTableWidgetItem *> selected = m_guardTable->selectedItems();
+    if (selected.isEmpty())
+    {
+        return QString();
+    }
+    const int row = selected.first()->row();
+    QTableWidgetItem *item = m_guardTable->item(row, 1);
+    return item ? item->text().trimmed() : QString();
+}
+
+void MainWindow::populateDoctorTableFromJson(const QString &jsonText, const QString &stderrText)
+{
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+    {
+        QString message = trUi("doctor JSON parse failed", "诊断 JSON 解析失败");
+        const QString detail = stderrText.trimmed().isEmpty() ? jsonText.left(240) : stderrText.trimmed().left(240);
+        if (!detail.isEmpty()) message += QStringLiteral(": ") + detail;
+        appendDoctorOutput(message);
+        statusBar()->showMessage(message, 5000);
+        return;
+    }
+    const QJsonArray checks = doc.object().value(QStringLiteral("checks")).toArray();
+    m_doctorTable->setRowCount(checks.size());
+    QString worst = QStringLiteral("ok");
+    for (int i = 0; i < checks.size(); ++i)
+    {
+        const QJsonObject obj = checks.at(i).toObject();
+        const QString status = obj.value(QStringLiteral("status")).toString(QStringLiteral("info")).toLower();
+        const QString id = obj.value(QStringLiteral("id")).toString();
+        const QString message = obj.value(QStringLiteral("message")).toString();
+        QColor color;
+        if (status == QStringLiteral("ok")) color = QColor(0x16, 0x8c, 0x2e);
+        else if (status == QStringLiteral("fail")) color = QColor(0xd4, 0x3a, 0x3a);
+        else if (status == QStringLiteral("warn")) color = QColor(0xd9, 0x6a, 0x10);
+        auto setCell = [&](int col, const QString &value) {
+            auto *item = new QTableWidgetItem(value);
+            if (color.isValid()) item->setForeground(QBrush(color));
+            m_doctorTable->setItem(i, col, item);
+        };
+        setCell(0, status);
+        setCell(1, id);
+        setCell(2, message);
+        if (status == QStringLiteral("fail")) worst = QStringLiteral("fail");
+        else if (status == QStringLiteral("warn") && worst == QStringLiteral("ok")) worst = QStringLiteral("warn");
+    }
+    m_doctorTable->resizeColumnsToContents();
+    appendDoctorOutput(trUi("doctor checks refreshed; worst=", "诊断已刷新；最严重状态=") + worst);
+    statusBar()->showMessage(trUi("doctor refreshed", "诊断已刷新"), 2000);
 }

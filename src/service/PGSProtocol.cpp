@@ -22,6 +22,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <fstream>
 
@@ -264,6 +265,428 @@ bool writeOrUpdateModulesLock(const std::filesystem::path &lockPath,
         return false;
     }
     return true;
+}
+
+constexpr std::int64_t kDefaultOperationTtlMs = 24LL * 60LL * 60LL * 1000LL;
+constexpr std::int64_t kMinArtifactRetentionTtlMs = 60LL * 1000LL;
+constexpr std::int64_t kMaxArtifactRetentionTtlMs = 7LL * 24LL * 60LL * 60LL * 1000LL;
+constexpr std::size_t kMaxOperations = 1024;
+constexpr std::uint64_t kMaxArtifactBytes = 16ull * 1024ull * 1024ull;
+constexpr std::uint64_t kMaxArtifactTotalBytes = 256ull * 1024ull * 1024ull;
+constexpr std::uint64_t kMaxArtifactChunkBytes = 32768ull;
+
+bool isOpaqueId(const std::string &id, const std::string &prefix)
+{
+    if (id.size() != prefix.size() + 32 || id.rfind(prefix, 0) != 0)
+    {
+        return false;
+    }
+    for (std::size_t i = prefix.size(); i < id.size(); ++i)
+    {
+        if (!std::isxdigit(static_cast<unsigned char>(id[i])))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string jsonNumberTextLocal(const std::string &text, const std::string &key)
+{
+    const std::string needle = "\"" + key + "\"";
+    std::size_t pos = text.find(needle);
+    if (pos == std::string::npos)
+    {
+        return std::string();
+    }
+    pos = text.find(':', pos + needle.size());
+    if (pos == std::string::npos)
+    {
+        return std::string();
+    }
+    ++pos;
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
+    const std::size_t start = pos;
+    if (pos < text.size() && text[pos] == '-') ++pos;
+    while (pos < text.size() && std::isdigit(static_cast<unsigned char>(text[pos]))) ++pos;
+    return pos > start ? text.substr(start, pos - start) : std::string();
+}
+
+std::string jsonRawValueLocal(const std::string &text, const std::string &key)
+{
+    const std::string needle = "\"" + key + "\"";
+    std::size_t pos = text.find(needle);
+    if (pos == std::string::npos) return std::string();
+    pos = text.find(':', pos + needle.size());
+    if (pos == std::string::npos) return std::string();
+    ++pos;
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
+    if (pos >= text.size()) return std::string();
+    const char open = text[pos];
+    if (open == '{' || open == '[')
+    {
+        const char close = open == '{' ? '}' : ']';
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (std::size_t i = pos; i < text.size(); ++i)
+        {
+            const char ch = text[i];
+            if (inString)
+            {
+                if (escaped) { escaped = false; continue; }
+                if (ch == '\\') { escaped = true; continue; }
+                if (ch == '"') inString = false;
+                continue;
+            }
+            if (ch == '"') { inString = true; continue; }
+            if (ch == open) ++depth;
+            else if (ch == close)
+            {
+                --depth;
+                if (depth == 0) return text.substr(pos, i - pos + 1);
+            }
+        }
+        return std::string();
+    }
+    if (open == '"')
+    {
+        bool escaped = false;
+        for (std::size_t i = pos + 1; i < text.size(); ++i)
+        {
+            if (escaped) { escaped = false; continue; }
+            if (text[i] == '\\') { escaped = true; continue; }
+            if (text[i] == '"') return text.substr(pos, i - pos + 1);
+        }
+        return std::string();
+    }
+    std::size_t end = pos;
+    while (end < text.size() && text[end] != ',' && text[end] != '}' && text[end] != ']') ++end;
+    return trim(text.substr(pos, end - pos));
+}
+
+std::vector<std::string> jsonStringArrayLocal(const std::string &text, const std::string &key)
+{
+    std::vector<std::string> out;
+    const std::string raw = jsonRawValueLocal(text, key);
+    if (raw.size() < 2 || raw.front() != '[') return out;
+    std::size_t pos = 1;
+    while (pos < raw.size())
+    {
+        while (pos < raw.size() && (std::isspace(static_cast<unsigned char>(raw[pos])) || raw[pos] == ',')) ++pos;
+        if (pos >= raw.size() || raw[pos] != '"') break;
+        ++pos;
+        std::string value;
+        bool escaped = false;
+        for (; pos < raw.size(); ++pos)
+        {
+            const char ch = raw[pos];
+            if (escaped)
+            {
+                switch (ch)
+                {
+                case '"': value.push_back('"'); break;
+                case '\\': value.push_back('\\'); break;
+                case 'n': value.push_back('\n'); break;
+                case 'r': value.push_back('\r'); break;
+                case 't': value.push_back('\t'); break;
+                default: value.push_back(ch); break;
+                }
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') { escaped = true; continue; }
+            if (ch == '"') { ++pos; out.push_back(value); break; }
+            value.push_back(ch);
+        }
+    }
+    return out;
+}
+
+std::int64_t jsonInt64Local(const std::string &text, const std::string &key, std::int64_t fallback)
+{
+    const std::string value = jsonNumberTextLocal(text, key);
+    if (value.empty()) return fallback;
+    try { return std::stoll(value); } catch (const std::exception &) { return fallback; }
+}
+
+std::string safeDisplayFilename(std::string value)
+{
+    value = trim(value);
+    if (value.empty()) return "artifact.bin";
+    std::string out;
+    for (char ch : value)
+    {
+        const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                        (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-';
+        out.push_back(ok ? ch : '_');
+    }
+    if (out == "." || out == "..") return "artifact.bin";
+    if (out.size() > 96) out.resize(96);
+    return out.empty() ? std::string("artifact.bin") : out;
+}
+
+std::filesystem::path artifactRootForStateFile(const std::string &stateFilePath)
+{
+    std::filesystem::path root = std::filesystem::path(stateFilePath).parent_path();
+    if (root.empty()) root = L".";
+    return root / L"artifacts";
+}
+
+std::filesystem::path artifactPolicyPathForStateFile(const std::string &stateFilePath)
+{
+    std::filesystem::path root = std::filesystem::path(stateFilePath).parent_path();
+    if (root.empty()) root = L".";
+    return root / L"artifact_policy.cfg";
+}
+
+std::filesystem::path artifactContentPath(const std::filesystem::path &root, const std::string &id)
+{
+    return root / utf8ToWide(id + ".bin");
+}
+
+std::filesystem::path artifactMetaPath(const std::filesystem::path &root, const std::string &id)
+{
+    return root / utf8ToWide(id + ".json");
+}
+
+std::string artifactRecordJson(const PGS::ArtifactRecord &rec)
+{
+    return "{\"id\":\"" + jsonEscapeLocal(rec.id) +
+           "\",\"module\":\"" + jsonEscapeLocal(rec.module) +
+           "\",\"method\":\"" + jsonEscapeLocal(rec.method) +
+           "\",\"content_type\":\"" + jsonEscapeLocal(rec.contentType) +
+           "\",\"filename\":\"" + jsonEscapeLocal(rec.filename) +
+           "\",\"size\":" + std::to_string(rec.size) +
+           ",\"sha256\":\"" + jsonEscapeLocal(rec.sha256) +
+           "\",\"created_ms\":" + std::to_string(rec.createdMs) +
+           ",\"expires_ms\":" + std::to_string(rec.expiresMs) +
+           ",\"trace_id\":\"" + jsonEscapeLocal(rec.traceId) +
+           "\",\"operation_id\":\"" + jsonEscapeLocal(rec.operationId) +
+           "\",\"storage_hash\":\"" + jsonEscapeLocal(rec.storageHash) +
+           "\",\"storage_hash_verified\":" + (rec.storageHashVerified ? "true" : "false") + "}";
+}
+
+std::string operationRecordJson(const PGS::OperationRecord &rec)
+{
+    std::ostringstream artifacts;
+    artifacts << '[';
+    for (std::size_t i = 0; i < rec.artifactIds.size(); ++i)
+    {
+        if (i != 0) artifacts << ',';
+        artifacts << '"' << jsonEscapeLocal(rec.artifactIds[i]) << '"';
+    }
+    artifacts << ']';
+    std::string json = "{\"id\":\"" + jsonEscapeLocal(rec.id) +
+        "\",\"module\":\"" + jsonEscapeLocal(rec.module) +
+        "\",\"method\":\"" + jsonEscapeLocal(rec.method) +
+        "\",\"status\":\"" + jsonEscapeLocal(rec.status) + "\"";
+    if (rec.progress >= 0) json += ",\"progress\":" + std::to_string(rec.progress);
+    json += ",\"message\":\"" + jsonEscapeLocal(rec.message) +
+            "\",\"artifact_ids\":" + artifacts.str() +
+            ",\"created_ms\":" + std::to_string(rec.createdMs) +
+            ",\"updated_ms\":" + std::to_string(rec.updatedMs) +
+            ",\"expires_ms\":" + std::to_string(rec.expiresMs) +
+            ",\"trace_id\":\"" + jsonEscapeLocal(rec.traceId) +
+            "\",\"caller\":\"" + jsonEscapeLocal(rec.caller) + "\"";
+    if (!rec.resultJson.empty()) json += ",\"result\":" + rec.resultJson;
+    if (!rec.errorCode.empty() || !rec.errorMessage.empty())
+    {
+        json += ",\"error\":{\"code\":\"" + jsonEscapeLocal(rec.errorCode) +
+                "\",\"message\":\"" + jsonEscapeLocal(rec.errorMessage) + "\"}";
+    }
+    json += '}';
+    return json;
+}
+
+std::string jsonRpcResultLocal(const std::string &id, const std::string &resultJson)
+{
+    const std::string idJson = id.empty() ? std::string("null") : ("\"" + jsonEscapeLocal(id) + "\"");
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + idJson + ",\"result\":" + resultJson + "}";
+}
+
+bool artifactRecordFromJson(const std::string &json, PGS::ArtifactRecord &rec)
+{
+    rec = PGS::ArtifactRecord{};
+    rec.id = jsonStringValueLocal(json, "id");
+    if (!isOpaqueId(rec.id, "art_"))
+    {
+        return false;
+    }
+    rec.module = jsonStringValueLocal(json, "module");
+    rec.method = jsonStringValueLocal(json, "method");
+    rec.contentType = jsonStringValueLocal(json, "content_type");
+    rec.filename = jsonStringValueLocal(json, "filename");
+    rec.sha256 = jsonStringValueLocal(json, "sha256");
+    rec.traceId = jsonStringValueLocal(json, "trace_id");
+    rec.operationId = jsonStringValueLocal(json, "operation_id");
+    rec.storageHash = jsonStringValueLocal(json, "storage_hash");
+    rec.storageHashVerified = trim(jsonRawValueLocal(json, "storage_hash_verified")) == "true";
+    rec.size = static_cast<std::uint64_t>(std::max<std::int64_t>(0, jsonInt64Local(json, "size", 0)));
+    rec.createdMs = jsonInt64Local(json, "created_ms", 0);
+    rec.expiresMs = jsonInt64Local(json, "expires_ms", 0);
+    return true;
+}
+
+bool readWholeFile(const std::filesystem::path &path, std::string &out)
+{
+    std::ifstream in(path, std::ios::in | std::ios::binary);
+    if (!in.is_open())
+    {
+        return false;
+    }
+    std::ostringstream oss;
+    oss << in.rdbuf();
+    out = oss.str();
+    return true;
+}
+
+bool writeWholeFile(const std::filesystem::path &path, const std::string &data)
+{
+    std::ofstream out(path, std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!out.is_open())
+    {
+        return false;
+    }
+    out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    out.flush();
+    return out.good();
+}
+
+std::string makeOpaqueId(const std::string &prefix)
+{
+    std::string hex = randomBytesHex(16);
+    if (hex.empty())
+    {
+        hex = sha256Hex(prefix + std::to_string(epochMs())).substr(0, 32);
+    }
+    return prefix + hex;
+}
+
+std::uint64_t regularFileSize(const std::filesystem::path &path)
+{
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec))
+    {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(std::filesystem::file_size(path, ec));
+}
+
+void removeArtifactFiles(const std::filesystem::path &root, const std::string &artifactId, PGS::ArtifactCleanupResult &result)
+{
+    std::error_code ec;
+    const std::filesystem::path content = artifactContentPath(root, artifactId);
+    const std::filesystem::path meta = artifactMetaPath(root, artifactId);
+    result.reclaimedBytes += regularFileSize(content);
+    std::filesystem::remove(content, ec);
+    std::filesystem::remove(meta, ec);
+    ++result.removed;
+}
+
+void appendCleanupDetail(std::string &detail, const std::string &item)
+{
+    if (item.empty())
+    {
+        return;
+    }
+    if (!detail.empty())
+    {
+        detail += ',';
+    }
+    detail += item;
+}
+
+std::string artifactPolicySummaryValues(std::int64_t ttlMs, bool autoCleanup, bool verifyOnStatus)
+{
+    return "ttl_ms=" + std::to_string(ttlMs) +
+           ";auto_cleanup=" + (autoCleanup ? std::string("1") : std::string("0")) +
+           ";verify_on_status=" + (verifyOnStatus ? std::string("1") : std::string("0")) +
+           ";max_artifact_bytes=" + std::to_string(kMaxArtifactBytes) +
+           ";max_total_bytes=" + std::to_string(kMaxArtifactTotalBytes);
+}
+
+std::string artifactPolicyJson(std::int64_t ttlMs, bool autoCleanup, bool verifyOnStatus)
+{
+    return "{\"ttl_ms\":" + std::to_string(ttlMs) +
+           ",\"auto_cleanup\":" + std::string(autoCleanup ? "true" : "false") +
+           ",\"verify_on_status\":" + std::string(verifyOnStatus ? "true" : "false") +
+           ",\"max_artifact_bytes\":" + std::to_string(kMaxArtifactBytes) +
+           ",\"max_total_bytes\":" + std::to_string(kMaxArtifactTotalBytes) + "}";
+}
+
+std::string artifactStatusJson(const PGS::ArtifactStoreStatus &status,
+                               std::int64_t ttlMs,
+                               bool autoCleanup,
+                               bool verifyOnStatus)
+{
+    return "{\"store_exists\":" + std::string(status.storeExists ? "true" : "false") +
+           ",\"root_secured\":" + std::string(status.rootSecured ? "true" : "false") +
+           ",\"count\":" + std::to_string(status.count) +
+           ",\"total_bytes\":" + std::to_string(status.totalBytes) +
+           ",\"expired\":" + std::to_string(status.expired) +
+           ",\"corrupt\":" + std::to_string(status.corrupt) +
+           ",\"orphaned\":" + std::to_string(status.orphaned) +
+           ",\"verified\":" + std::to_string(status.verified) +
+           ",\"ttl_ms\":" + std::to_string(ttlMs) +
+           ",\"auto_cleanup\":" + std::string(autoCleanup ? "true" : "false") +
+           ",\"verify_on_status\":" + std::string(verifyOnStatus ? "true" : "false") +
+           ",\"max_artifact_bytes\":" + std::to_string(kMaxArtifactBytes) +
+           ",\"max_total_bytes\":" + std::to_string(kMaxArtifactTotalBytes) + "}";
+}
+
+bool isTerminalOperationStatus(const std::string &status)
+{
+    return status == "succeeded" || status == "failed" || status == "cancelled" || status == "expired";
+}
+
+bool parseTtlMsText(const std::string &text, std::int64_t &out)
+{
+    const std::string value = trim(text);
+    if (value.empty())
+    {
+        return false;
+    }
+    try
+    {
+        std::size_t used = 0;
+        const long long parsed = std::stoll(value, &used, 10);
+        if (used != value.size() || parsed < kMinArtifactRetentionTtlMs || parsed > kMaxArtifactRetentionTtlMs)
+        {
+            return false;
+        }
+        out = static_cast<std::int64_t>(parsed);
+        return true;
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+}
+
+bool parseArtifactBoolText(const std::string &text, bool &out)
+{
+    const std::string value = toLowerAscii(trim(text));
+    if (value == "1" || value == "true" || value == "yes" || value == "on")
+    {
+        out = true;
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "no" || value == "off")
+    {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+std::string clampMessage(std::string text)
+{
+    if (text.size() > 512)
+    {
+        text.resize(512);
+    }
+    return text;
 }
 
 bool copyModulePayloadToStage(const std::filesystem::path &sourceDll, const std::filesystem::path &stageDir, std::string &err)
@@ -728,10 +1151,6 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
         {
             aumid = base64Decode(fields[11]);
         }
-        if (appKind == AppKind::WinApp && aumid.empty())
-        {
-            return "ERR missing AUMID for winapp";
-        }
 
         return handleRegister(pid, trim(fields[1]), maxRestarts, restartArgs, declaredHash,
                               appKind, aumid, restartWindowSec, restartDelayMs, backoff,
@@ -919,6 +1338,11 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
         return handleHealthCheckCommand(args);
     }
 
+    if (command == "guard")
+    {
+        return handleGuardCommand(args);
+    }
+
     if (command == "group")
     {
         return handleGroupCommand(args);
@@ -1087,6 +1511,30 @@ std::string PGS::handleRegister(
     DWORD sessionId = 0xFFFFFFFF;
     ProcessIdToSessionId(pid, &sessionId);
 
+    std::string storedAumid = aumid;
+    if (appKind == AppKind::WinApp)
+    {
+        util::AppxAumidInfo appx{};
+        std::string aumidError;
+        if (util::deriveAumidForWindowsAppPath(actualPath, appx, aumidError))
+        {
+            if (storedAumid.empty())
+            {
+                storedAumid = appx.aumid;
+            }
+            else if (toLowerAscii(storedAumid) != toLowerAscii(appx.aumid))
+            {
+                Logger::warning("PGS: register rejected, AUMID mismatch for path=" + actualPath +
+                                ", provided=" + storedAumid + ", derived=" + appx.aumid);
+                return "ERR AUMID does not match AppxManifest.xml";
+            }
+        }
+        else if (storedAumid.empty())
+        {
+            return "ERR missing AUMID for winapp: " + aumidError;
+        }
+    }
+
     const std::string storedHash = declaredHash;
     {
         std::lock_guard<std::mutex> lock(m_guardsMutex);
@@ -1109,7 +1557,7 @@ std::string PGS::handleRegister(
         updated.hashVerified = hashVerified;
         updated.guardId = guardId;
         updated.appKind = appKind;
-        updated.aumid = aumid;
+        updated.aumid = storedAumid;
         updated.restartWindowSec = restartWindowSec;
         updated.restartDelayMs = restartDelayMs;
         updated.backoff = backoff;
@@ -1119,6 +1567,13 @@ std::string PGS::handleRegister(
         if (existing != m_guards.end())
         {
             updated.healthCheckJson = existing->second.healthCheckJson;
+            updated.healthStatus = existing->second.healthStatus;
+            updated.healthLastMessage = existing->second.healthLastMessage;
+            updated.healthLastCheckMs = existing->second.healthLastCheckMs;
+            updated.healthLastOkMs = existing->second.healthLastOkMs;
+            updated.healthLastFailureMs = existing->second.healthLastFailureMs;
+            updated.healthNextCheckMs = existing->second.healthNextCheckMs;
+            updated.healthFailureCount = existing->second.healthFailureCount;
             updated.groupName = existing->second.groupName;
             updated.paused = existing->second.paused;
             updated.createdAtMs = existing->second.createdAtMs > 0 ? existing->second.createdAtMs : nowMs;
@@ -1135,6 +1590,7 @@ std::string PGS::handleRegister(
         {
             updated.createdAtMs = nowMs;
             updated.lastStartMs = nowMs;
+            resetHealthRuntimeState(updated);
         }
 
         if (existing != m_guards.end())
@@ -1261,9 +1717,25 @@ std::string PGS::handleSetPolicy(DWORD pid, int maxRestarts, const std::string &
         {
             finalAumid.clear();
         }
-        if (finalAppKind == AppKind::WinApp && finalAumid.empty())
+        if (finalAppKind == AppKind::WinApp)
         {
-            return "ERR missing AUMID for winapp";
+            util::AppxAumidInfo appx{};
+            std::string aumidError;
+            if (util::deriveAumidForWindowsAppPath(it->second.path, appx, aumidError))
+            {
+                if (finalAumid.empty())
+                {
+                    finalAumid = appx.aumid;
+                }
+                else if (toLowerAscii(finalAumid) != toLowerAscii(appx.aumid))
+                {
+                    return "ERR AUMID does not match AppxManifest.xml";
+                }
+            }
+            else if (finalAumid.empty())
+            {
+                return "ERR missing AUMID for winapp: " + aumidError;
+            }
         }
 
         it->second.maxRestarts = maxRestarts;
@@ -1357,7 +1829,25 @@ std::string PGS::handleList()
 {
     std::lock_guard<std::mutex> lock(m_guardsMutex);
     std::ostringstream oss;
-    oss << "OK count=" << m_guards.size();
+    std::vector<std::uint64_t> activeGuardIds;
+    activeGuardIds.reserve(m_guards.size());
+    std::size_t extraArchived = 0;
+    for (const auto &entry : m_guards)
+    {
+        activeGuardIds.push_back(entry.second.guardId);
+    }
+    for (const auto &entry : m_persistedGuards)
+    {
+        if (!entry.second.quarantined)
+        {
+            continue;
+        }
+        if (std::find(activeGuardIds.begin(), activeGuardIds.end(), entry.first) == activeGuardIds.end())
+        {
+            ++extraArchived;
+        }
+    }
+    oss << "OK count=" << (m_guards.size() + extraArchived);
     for (const auto &entry : m_guards)
     {
         const auto policyIt = m_policyByGuardId.find(entry.second.guardId);
@@ -1365,6 +1855,19 @@ std::string PGS::handleList()
         const auto groupIt = entry.second.groupName.empty() ? m_guardGroups.end() : m_guardGroups.find(entry.second.groupName);
         const bool groupPaused = (groupIt != m_guardGroups.end() && groupIt->second.paused);
         oss << "\n" << makeGuardSummaryLine(entry.second, restartCount, groupPaused);
+    }
+    for (const auto &entry : m_persistedGuards)
+    {
+        const PersistedGuardState &guard = entry.second;
+        if (!guard.quarantined || std::find(activeGuardIds.begin(), activeGuardIds.end(), entry.first) != activeGuardIds.end())
+        {
+            continue;
+        }
+        const auto policyIt = m_policyByGuardId.find(guard.guardId);
+        const int restartCount = (policyIt == m_policyByGuardId.end()) ? 0 : policyIt->second.restartCount;
+        const auto groupIt = guard.groupName.empty() ? m_guardGroups.end() : m_guardGroups.find(guard.groupName);
+        const bool groupPaused = (groupIt != m_guardGroups.end() && groupIt->second.paused);
+        oss << "\n" << makePersistedGuardSummaryLine(guard, restartCount, groupPaused);
     }
     return oss.str();
 }
@@ -1384,9 +1887,147 @@ std::string PGS::handleGet(DWORD pid)
     return "OK\n" + makeGuardSummaryLine(it->second, restartCount, groupPaused);
 }
 
+void PGS::clearFailureState(GuardInfo &guard)
+{
+    guard.quarantined = false;
+    guard.lastFailureCode.clear();
+    guard.lastFailure.clear();
+    guard.nextRetryMs = 0;
+    guard.failureCount = 0;
+}
+
+void PGS::clearFailureState(PersistedGuardState &guard)
+{
+    guard.quarantined = false;
+    guard.lastFailureCode.clear();
+    guard.lastFailure.clear();
+    guard.nextRetryMs = 0;
+    guard.failureCount = 0;
+}
+
+void PGS::markGuardQuarantined(PersistedGuardState &guard, const std::string &code, const std::string &reason, std::int64_t nowMs)
+{
+    guard.quarantined = true;
+    guard.lastFailureCode = code.empty() ? "restart.failed" : code;
+    guard.lastFailure = reason.empty() ? "guard restart failed" : reason;
+    guard.nextRetryMs = nowMs > 0 ? nowMs + 60000 : 0;
+    if (guard.failureCount < std::numeric_limits<int>::max())
+    {
+        ++guard.failureCount;
+    }
+    guard.lastKnownPid = 0;
+    guard.intentional = false;
+}
+
+void PGS::quarantineGuardLocked(const GuardInfo &guard, const std::string &code, const std::string &reason)
+{
+    auto &persisted = m_persistedGuards[guard.guardId];
+    const int previousFailureCount = persisted.failureCount;
+    copyGuardToPersisted(guard, persisted);
+    persisted.failureCount = previousFailureCount;
+    markGuardQuarantined(persisted, code, reason, currentEpochMs());
+    m_guards.erase(guard.pid);
+    recordEvent("guard.quarantine",
+                "pid=" + std::to_string(guard.pid) +
+                ";guard_id=" + std::to_string(guard.guardId) +
+                ";path=" + guard.path +
+                ";code=" + persisted.lastFailureCode +
+                ";reason_b64=" + base64Encode(persisted.lastFailure));
+}
+
+std::string PGS::retryQuarantinedGuard(std::uint64_t guardId)
+{
+    PersistedGuardState persisted;
+    {
+        std::lock_guard<std::mutex> lock(m_guardsMutex);
+        const auto it = m_persistedGuards.find(guardId);
+        if (it == m_persistedGuards.end())
+        {
+            return "ERR guard id not found";
+        }
+        if (!it->second.quarantined)
+        {
+            return "ERR guard is not quarantined";
+        }
+        persisted = it->second;
+    }
+
+    GuardInfo desired = desiredGuardFromPersisted(persisted);
+    desired.pid = 0;
+    desired.handle = nullptr;
+    desired.jobHandle = nullptr;
+    desired.intentional = false;
+    clearFailureState(desired);
+
+    GuardInfo restarted;
+    std::string failureCode;
+    std::string failureMessage;
+    if (!restartGuard(desired, 1, restarted, failureCode, failureMessage))
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_guardsMutex);
+            auto it = m_persistedGuards.find(guardId);
+            if (it != m_persistedGuards.end())
+            {
+                markGuardQuarantined(it->second, failureCode.empty() ? "retry.failed" : failureCode,
+                                     failureMessage.empty() ? "manual retry failed" : failureMessage, currentEpochMs());
+            }
+        }
+        persistState();
+        recordEvent("guard.retry-failed", "guard_id=" + std::to_string(guardId) + ";path=" + persisted.path);
+        return "ERR guard retry failed";
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_guardsMutex);
+        auto existing = m_guards.find(restarted.pid);
+        if (existing != m_guards.end() && existing->second.handle)
+        {
+            CloseHandle(existing->second.handle);
+        }
+        m_guards[restarted.pid] = restarted;
+        clearFailureState(m_guards[restarted.pid]);
+        assignGuardToJob(m_guards[restarted.pid]);
+        auto &policy = m_policyByGuardId[guardId];
+        policy.maxRestarts = restarted.maxRestarts;
+        policy.restartCount = 0;
+        policy.recentRestartMs.clear();
+        auto &stored = m_persistedGuards[guardId];
+        copyGuardToPersisted(m_guards[restarted.pid], stored);
+        clearFailureState(stored);
+    }
+    persistState();
+    recordEvent("guard.retry", "guard_id=" + std::to_string(guardId) + ";pid=" + std::to_string(restarted.pid));
+    return "OK guard retried guard_id=" + std::to_string(guardId) + ";pid=" + std::to_string(restarted.pid);
+}
+
+std::string PGS::clearQuarantinedGuard(std::uint64_t guardId)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_guardsMutex);
+        const auto it = m_persistedGuards.find(guardId);
+        if (it == m_persistedGuards.end())
+        {
+            return "ERR guard id not found";
+        }
+        if (!it->second.quarantined)
+        {
+            return "ERR guard is not quarantined";
+        }
+        m_persistedGuards.erase(it);
+        m_policyByGuardId.erase(guardId);
+    }
+    closeGuardJob(guardId, true);
+    persistState();
+    recordEvent("guard.clear-quarantine", "guard_id=" + std::to_string(guardId) + ";retired=1");
+    return "OK quarantine cleared guard_id=" + std::to_string(guardId) + ";retired=1";
+}
+
 std::string PGS::makeGuardSummaryLine(const GuardInfo &guard, int restartCount, bool groupPaused)
 {
     const bool alive = (guard.handle && WaitForSingleObject(guard.handle, 0) == WAIT_TIMEOUT);
+    const std::string status = guard.quarantined ? "quarantined" :
+        ((guard.paused || groupPaused) ? "paused" : (alive ? "active" : "missing"));
     const std::int64_t nowMs = currentEpochMs();
     const std::int64_t cumulativeMs = effectiveCumulativeRunMs(guard, nowMs);
     const std::int64_t avgRestartIntervalMs = guard.restartIntervalCount > 0
@@ -1394,6 +2035,8 @@ std::string PGS::makeGuardSummaryLine(const GuardInfo &guard, int restartCount, 
         : 0;
     std::ostringstream oss;
     oss << "PID=" << guard.pid
+        << ";GUARD_ID=" << guard.guardId
+        << ";STATUS=" << status
         << ";SESSION=" << guard.sessionId
         << ";ALIVE=" << (alive ? "1" : "0")
         << ";INTENTIONAL=" << (guard.intentional ? "1" : "0")
@@ -1412,6 +2055,13 @@ std::string PGS::makeGuardSummaryLine(const GuardInfo &guard, int restartCount, 
         << ";KILL_ON_EXIT=" << (guard.killOnExit ? "1" : "0")
         << ";JOB_ATTACHED=" << (guard.jobHandle ? "1" : "0")
         << ";HEALTH_CHECK_B64=" << base64Encode(guard.healthCheckJson)
+        << ";HEALTH_STATUS=" << (guard.healthStatus.empty() ? "disabled" : guard.healthStatus)
+        << ";HEALTH_LAST_MESSAGE_B64=" << base64Encode(guard.healthLastMessage)
+        << ";HEALTH_LAST_CHECK=" << guard.healthLastCheckMs
+        << ";HEALTH_LAST_OK=" << guard.healthLastOkMs
+        << ";HEALTH_LAST_FAILURE=" << guard.healthLastFailureMs
+        << ";HEALTH_NEXT_CHECK=" << guard.healthNextCheckMs
+        << ";HEALTH_FAILURE_COUNT=" << guard.healthFailureCount
         << ";GROUP=" << (guard.groupName.empty() ? "-" : guard.groupName)
         << ";GROUP_PAUSED=" << (groupPaused ? "1" : "0")
         << ";PAUSED=" << ((guard.paused || groupPaused) ? "1" : "0")
@@ -1423,8 +2073,22 @@ std::string PGS::makeGuardSummaryLine(const GuardInfo &guard, int restartCount, 
         << ";CUMULATIVE_RUN_MS=" << cumulativeMs
         << ";AVG_RESTART_INTERVAL_MS=" << avgRestartIntervalMs
         << ";CRASH_LOOP=" << (guard.crashLoop ? "1" : "0")
-        << ";RESTART_HOOK_B64=" << base64Encode(guard.restartHookJson);
+        << ";RESTART_HOOK_B64=" << base64Encode(guard.restartHookJson)
+        << ";QUARANTINED=" << (guard.quarantined ? "1" : "0")
+        << ";LAST_FAILURE_CODE=" << (guard.lastFailureCode.empty() ? "-" : guard.lastFailureCode)
+        << ";LAST_FAILURE_B64=" << base64Encode(guard.lastFailure)
+        << ";NEXT_RETRY_MS=" << guard.nextRetryMs
+        << ";FAILURE_COUNT=" << guard.failureCount;
     return oss.str();
+}
+
+std::string PGS::makePersistedGuardSummaryLine(const PersistedGuardState &guard, int restartCount, bool groupPaused)
+{
+    GuardInfo info = desiredGuardFromPersisted(guard);
+    info.pid = guard.lastKnownPid;
+    info.handle = nullptr;
+    info.jobHandle = nullptr;
+    return makeGuardSummaryLine(info, restartCount, groupPaused);
 }
 
 bool PGS::stripAuthEnvelope(const std::string &message, std::string &commandLine) const
@@ -1862,7 +2526,57 @@ std::string PGS::handleModuleCommand(const std::string &args)
 
     if (sub == "artifact")
     {
-        return "ERR module artifact store is not enabled; modules should return small JSON results or external artifact IDs";
+        const auto sp = rest.find(' ');
+        std::string action;
+        std::string tail;
+        if (sp == std::string::npos)
+        {
+            const std::string only = trim(rest);
+            if (only == "chunk" || only == "cleanup" || only == "status" || only == "policy")
+            {
+                action = only;
+            }
+            else
+            {
+                action = "get";
+                tail = only;
+            }
+        }
+        else
+        {
+            action = trim(rest.substr(0, sp));
+            tail = trim(rest.substr(sp + 1));
+        }
+        if (action == "chunk")
+        {
+            return handleArtifactChunkCommand(tail);
+        }
+        if (action == "cleanup")
+        {
+            return handleArtifactCleanupCommand(tail);
+        }
+        if (action == "status")
+        {
+            return handleArtifactStatusCommand(tail);
+        }
+        if (action == "policy")
+        {
+            return handleArtifactPolicyCommand(tail);
+        }
+        const std::string artifactId = (action == "get") ? tail : trim(rest);
+        if (!isOpaqueId(artifactId, "art_"))
+        {
+            return "ERR module artifact get requires a valid artifact id";
+        }
+        const std::string rpc = handleCoreJsonRpc(
+            "{\"jsonrpc\":\"2.0\",\"id\":\"artifact-get\",\"method\":\"pgs.artifact.get_meta\",\"params\":{\"artifact_id\":\"" +
+            jsonEscapeLocal(artifactId) + "\"}}");
+        if (rpc.find("\"result\"") == std::string::npos)
+        {
+            return "ERR " + rpc;
+        }
+        const std::string artifactJson = jsonRawValueLocal(rpc, "artifact");
+        return "OK artifact_json_b64=" + base64Encode(artifactJson.empty() ? std::string("{}") : artifactJson);
     }
 
     if (sub == "op-status")
@@ -1871,11 +2585,921 @@ std::string PGS::handleModuleCommand(const std::string &args)
         {
             return "ERR module op-status requires an operation id";
         }
-        return "ERR module operation status store is not enabled; long-running modules should return durable operation IDs handled by their module or a future host";
+        const std::string operationId = trim(rest);
+        if (!isOpaqueId(operationId, "op_"))
+        {
+            return "ERR invalid operation id";
+        }
+        const std::string rpc = handleCoreJsonRpc(
+            "{\"jsonrpc\":\"2.0\",\"id\":\"op-status\",\"method\":\"pgs.operation.get\",\"params\":{\"operation_id\":\"" +
+            jsonEscapeLocal(operationId) + "\"}}");
+        if (rpc.find("\"result\"") == std::string::npos)
+        {
+            return "ERR " + rpc;
+        }
+        const std::string operationJson = jsonRawValueLocal(rpc, "operation");
+        return "OK operation_json_b64=" + base64Encode(operationJson.empty() ? std::string("{}") : operationJson);
     }
 
     return "ERR unknown module subcommand";
 }
+
+std::string PGS::handleCoreJsonRpc(const std::string &requestJson)
+{
+    const std::string id = jsonStringValueLocal(requestJson, "id");
+    const std::string method = jsonStringValueLocal(requestJson, "method");
+    const std::string callerModule = jsonStringValueLocal(requestJson, "__caller_module");
+    const std::string paramsRaw = jsonRawValueLocal(requestJson, "params");
+    const std::string params = paramsRaw.empty() ? std::string("{}") : paramsRaw;
+    const std::int64_t now = epochMs();
+
+    auto cleanupOperationsLocked = [&]() {
+        for (auto it = m_operations.begin(); it != m_operations.end(); )
+        {
+            if (it->second.expiresMs > 0 && it->second.expiresMs <= now)
+            {
+                it = m_operations.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        while (m_operations.size() >= kMaxOperations)
+        {
+            auto oldest = m_operations.begin();
+            for (auto it = m_operations.begin(); it != m_operations.end(); ++it)
+            {
+                if (it->second.updatedMs < oldest->second.updatedMs)
+                {
+                    oldest = it;
+                }
+            }
+            m_operations.erase(oldest);
+        }
+    };
+
+    auto loadArtifactLocked = [&](const std::string &artifactId, ArtifactRecord &out) -> bool {
+        const auto existing = m_artifacts.find(artifactId);
+        if (existing != m_artifacts.end())
+        {
+            out = existing->second;
+            return true;
+        }
+        const std::filesystem::path root = artifactRootForStateFile(m_stateFilePath);
+        std::string meta;
+        if (!readWholeFile(artifactMetaPath(root, artifactId), meta))
+        {
+            return false;
+        }
+        if (!artifactRecordFromJson(meta, out))
+        {
+            return false;
+        }
+        if (out.id != artifactId)
+        {
+            return false;
+        }
+        m_artifacts[out.id] = out;
+        return true;
+    };
+
+    if (method == "pgs.operation.create")
+    {
+        if (callerModule.empty())
+        {
+            return jsonRpcError(id, "CALLER_REQUIRED", "operation.create must be called by a module");
+        }
+        OperationRecord rec;
+        rec.id = makeOpaqueId("op_");
+        rec.module = callerModule;
+        rec.method = jsonStringValueLocal(params, "method");
+        if (rec.method.empty()) rec.method = callerModule + ".operation";
+        rec.status = jsonStringValueLocal(params, "status");
+        if (rec.status.empty()) rec.status = "accepted";
+        if (rec.status != "accepted" && rec.status != "running") rec.status = "accepted";
+        rec.progress = static_cast<int>(std::clamp<std::int64_t>(jsonInt64Local(params, "progress", -1), -1, 100));
+        rec.message = clampMessage(jsonStringValueLocal(params, "message"));
+        rec.createdMs = now;
+        rec.updatedMs = now;
+        const std::int64_t ttl = std::clamp<std::int64_t>(jsonInt64Local(params, "ttl_ms", kDefaultOperationTtlMs), 60000, kDefaultOperationTtlMs * 7);
+        rec.expiresMs = now + ttl;
+        rec.traceId = jsonStringValueLocal(params, "trace_id");
+        rec.caller = jsonStringValueLocal(params, "caller");
+        {
+            std::lock_guard<std::mutex> lock(m_operationMutex);
+            cleanupOperationsLocked();
+            m_operations[rec.id] = rec;
+        }
+        recordEvent("operation.create", "module=" + rec.module + ";operation_id=" + rec.id + ";method=" + rec.method);
+        return jsonRpcResultLocal(id, "{\"operation_id\":\"" + jsonEscapeLocal(rec.id) + "\",\"operation\":" + operationRecordJson(rec) + "}");
+    }
+
+    if (method == "pgs.operation.get")
+    {
+        const std::string operationId = jsonStringValueLocal(params, "operation_id");
+        if (!isOpaqueId(operationId, "op_"))
+        {
+            return jsonRpcError(id, "INVALID_OPERATION_ID", "operation_id is invalid");
+        }
+        std::lock_guard<std::mutex> lock(m_operationMutex);
+        cleanupOperationsLocked();
+        const auto it = m_operations.find(operationId);
+        if (it == m_operations.end())
+        {
+            return jsonRpcError(id, "OPERATION_NOT_FOUND", "operation not found or expired");
+        }
+        if (!callerModule.empty() && callerModule != it->second.module)
+        {
+            return jsonRpcError(id, "OPERATION_FORBIDDEN", "module cannot read another module's operation");
+        }
+        return jsonRpcResultLocal(id, "{\"operation\":" + operationRecordJson(it->second) + "}");
+    }
+
+    if (method == "pgs.operation.update" || method == "pgs.operation.finish" || method == "pgs.operation.fail")
+    {
+        if (callerModule.empty())
+        {
+            return jsonRpcError(id, "CALLER_REQUIRED", "operation mutation must be called by a module");
+        }
+        const std::string operationId = jsonStringValueLocal(params, "operation_id");
+        if (!isOpaqueId(operationId, "op_"))
+        {
+            return jsonRpcError(id, "INVALID_OPERATION_ID", "operation_id is invalid");
+        }
+        OperationRecord snapshot;
+        {
+            std::lock_guard<std::mutex> lock(m_operationMutex);
+            cleanupOperationsLocked();
+            auto it = m_operations.find(operationId);
+            if (it == m_operations.end())
+            {
+                return jsonRpcError(id, "OPERATION_NOT_FOUND", "operation not found or expired");
+            }
+            if (callerModule != it->second.module)
+            {
+                return jsonRpcError(id, "OPERATION_FORBIDDEN", "module cannot mutate another module's operation");
+            }
+            if (isTerminalOperationStatus(it->second.status))
+            {
+                return jsonRpcError(id, "OPERATION_TERMINAL", "operation is already terminal");
+            }
+            if (method == "pgs.operation.update")
+            {
+                const std::string status = jsonStringValueLocal(params, "status");
+                if (status == "accepted" || status == "running") it->second.status = status;
+                const std::int64_t progress = jsonInt64Local(params, "progress", it->second.progress);
+                it->second.progress = static_cast<int>(std::clamp<std::int64_t>(progress, -1, 100));
+                const std::string message = jsonStringValueLocal(params, "message");
+                if (!message.empty()) it->second.message = clampMessage(message);
+            }
+            else if (method == "pgs.operation.finish")
+            {
+                it->second.status = "succeeded";
+                it->second.progress = 100;
+                const std::string message = jsonStringValueLocal(params, "message");
+                if (!message.empty()) it->second.message = clampMessage(message);
+                std::string result = jsonRawValueLocal(params, "result");
+                if (result.empty()) result = "{}";
+                if (result.size() > 8192)
+                {
+                    return jsonRpcError(id, "RESULT_TOO_LARGE", "operation result is too large");
+                }
+                it->second.resultJson = result;
+                it->second.artifactIds = jsonStringArrayLocal(params, "artifact_ids");
+            }
+            else
+            {
+                it->second.status = "failed";
+                it->second.errorCode = jsonStringValueLocal(params, "code");
+                if (it->second.errorCode.empty()) it->second.errorCode = "MODULE_ERROR";
+                it->second.errorMessage = clampMessage(jsonStringValueLocal(params, "message"));
+                it->second.message = it->second.errorMessage;
+            }
+            it->second.updatedMs = now;
+            snapshot = it->second;
+        }
+        recordEvent("operation." + snapshot.status, "module=" + snapshot.module + ";operation_id=" + snapshot.id);
+        return jsonRpcResultLocal(id, "{\"operation\":" + operationRecordJson(snapshot) + "}");
+    }
+
+    if (method == "pgs.artifact.put")
+    {
+        if (callerModule.empty())
+        {
+            return jsonRpcError(id, "CALLER_REQUIRED", "artifact.put must be called by a module");
+        }
+        const std::string content = base64Decode(jsonStringValueLocal(params, "content_b64"));
+        if (content.size() > kMaxArtifactBytes)
+        {
+            return jsonRpcError(id, "ARTIFACT_TOO_LARGE", "artifact exceeds max size");
+        }
+        std::int64_t policyTtlMs = kDefaultOperationTtlMs;
+        bool autoCleanup = true;
+        {
+            std::lock_guard<std::mutex> lock(m_artifactMutex);
+            policyTtlMs = m_artifactRetentionTtlMs;
+            autoCleanup = m_artifactAutoCleanup;
+        }
+        ArtifactRecord rec;
+        rec.id = makeOpaqueId("art_");
+        rec.module = callerModule;
+        rec.method = jsonStringValueLocal(params, "method");
+        if (rec.method.empty()) rec.method = callerModule + ".artifact";
+        rec.contentType = jsonStringValueLocal(params, "content_type");
+        if (rec.contentType.empty()) rec.contentType = "application/octet-stream";
+        rec.filename = safeDisplayFilename(jsonStringValueLocal(params, "filename"));
+        rec.size = static_cast<std::uint64_t>(content.size());
+        rec.sha256 = sha256Hex(content);
+        rec.storageHash = rec.sha256;
+        rec.storageHashVerified = true;
+        rec.createdMs = now;
+        const std::int64_t requestedTtl = jsonInt64Local(params, "ttl_ms", policyTtlMs);
+        const std::int64_t ttl = std::clamp<std::int64_t>(requestedTtl, kMinArtifactRetentionTtlMs, kMaxArtifactRetentionTtlMs);
+        rec.expiresMs = now + ttl;
+        rec.traceId = jsonStringValueLocal(params, "trace_id");
+        rec.operationId = jsonStringValueLocal(params, "operation_id");
+        if (!rec.operationId.empty() && !isOpaqueId(rec.operationId, "op_"))
+        {
+            return jsonRpcError(id, "INVALID_OPERATION_ID", "operation_id is invalid");
+        }
+        if (!rec.operationId.empty())
+        {
+            std::lock_guard<std::mutex> lock(m_operationMutex);
+            cleanupOperationsLocked();
+            const auto opIt = m_operations.find(rec.operationId);
+            if (opIt == m_operations.end())
+            {
+                return jsonRpcError(id, "OPERATION_NOT_FOUND", "operation not found or expired");
+            }
+            if (opIt->second.module != callerModule)
+            {
+                return jsonRpcError(id, "OPERATION_FORBIDDEN", "module cannot attach artifact to another module's operation");
+            }
+        }
+        const std::filesystem::path root = artifactRootForStateFile(m_stateFilePath);
+        if (!secureCreateDirectory(root.string()))
+        {
+            return jsonRpcError(id, "ARTIFACT_STORE_UNAVAILABLE", "failed to secure artifact directory");
+        }
+        if (autoCleanup)
+        {
+            std::string cleanupDetail;
+            std::lock_guard<std::mutex> lock(m_artifactMutex);
+            cleanupArtifactsLocked(true, false, false, cleanupDetail);
+        }
+        std::uint64_t totalBytes = 0;
+        std::error_code ec;
+        for (const auto &entry : std::filesystem::directory_iterator(root, ec))
+        {
+            if (entry.is_regular_file(ec) && entry.path().extension() == L".bin")
+            {
+                totalBytes += static_cast<std::uint64_t>(entry.file_size(ec));
+            }
+        }
+        if (totalBytes + rec.size > kMaxArtifactTotalBytes)
+        {
+            return jsonRpcError(id, "ARTIFACT_STORE_FULL", "artifact store total size limit reached");
+        }
+        const std::filesystem::path contentPath = artifactContentPath(root, rec.id);
+        const std::filesystem::path metaPath = artifactMetaPath(root, rec.id);
+        if (!writeWholeFile(contentPath, content) || !writeWholeFile(metaPath, artifactRecordJson(rec)))
+        {
+            std::filesystem::remove(contentPath, ec);
+            std::filesystem::remove(metaPath, ec);
+            return jsonRpcError(id, "ARTIFACT_WRITE_FAILED", "failed to write artifact");
+        }
+        secureApplyDacl(contentPath.string(), false);
+        secureApplyDacl(metaPath.string(), false);
+        {
+            std::lock_guard<std::mutex> lock(m_artifactMutex);
+            m_artifacts[rec.id] = rec;
+        }
+        if (!rec.operationId.empty())
+        {
+            std::lock_guard<std::mutex> lock(m_operationMutex);
+            auto it = m_operations.find(rec.operationId);
+            if (it != m_operations.end() && it->second.module == callerModule)
+            {
+                it->second.artifactIds.push_back(rec.id);
+                it->second.updatedMs = now;
+            }
+        }
+        recordEvent("artifact.put", "module=" + rec.module + ";artifact_id=" + rec.id + ";size=" + std::to_string(rec.size));
+        return jsonRpcResultLocal(id, "{\"artifact_id\":\"" + jsonEscapeLocal(rec.id) + "\",\"artifact\":" + artifactRecordJson(rec) + "}");
+    }
+
+    if (method == "pgs.artifact.get_meta")
+    {
+        const std::string artifactId = jsonStringValueLocal(params, "artifact_id");
+        if (!isOpaqueId(artifactId, "art_"))
+        {
+            return jsonRpcError(id, "INVALID_ARTIFACT_ID", "artifact_id is invalid");
+        }
+        ArtifactRecord rec;
+        {
+            std::lock_guard<std::mutex> lock(m_artifactMutex);
+            if (!loadArtifactLocked(artifactId, rec))
+            {
+                return jsonRpcError(id, "ARTIFACT_NOT_FOUND", "artifact not found");
+            }
+        }
+        if (rec.expiresMs > 0 && rec.expiresMs <= now)
+        {
+            return jsonRpcError(id, "ARTIFACT_EXPIRED", "artifact expired");
+        }
+        if (!callerModule.empty() && callerModule != rec.module)
+        {
+            return jsonRpcError(id, "ARTIFACT_FORBIDDEN", "module cannot read another module's artifact");
+        }
+        return jsonRpcResultLocal(id, "{\"artifact\":" + artifactRecordJson(rec) + "}");
+    }
+
+    return jsonRpcError(id, "METHOD_NOT_FOUND", "unknown PGS core JSON method");
+}
+
+PGS::ArtifactStoreStatus PGS::artifactStoreStatusLocked(bool verifyContentHash, std::string &detail)
+{
+    ArtifactStoreStatus status;
+    detail.clear();
+    const std::int64_t now = epochMs();
+    const std::filesystem::path root = artifactRootForStateFile(m_stateFilePath);
+    std::error_code ec;
+    status.storeExists = std::filesystem::exists(root, ec);
+    if (!status.storeExists)
+    {
+        return status;
+    }
+    status.rootSecured = secureApplyDacl(root.string(), true);
+
+    std::unordered_set<std::string> metaIds;
+    for (const auto &entry : std::filesystem::directory_iterator(root, ec))
+    {
+        if (ec || !entry.is_regular_file(ec) || entry.path().extension() != L".json")
+        {
+            continue;
+        }
+        std::string meta;
+        ArtifactRecord rec;
+        if (!readWholeFile(entry.path(), meta) || !artifactRecordFromJson(meta, rec))
+        {
+            ++status.corrupt;
+            appendCleanupDetail(detail, wideToUtf8(entry.path().filename().wstring()) + ":bad-meta");
+            continue;
+        }
+        const std::string fileArtifactId = wideToUtf8(entry.path().stem().wstring());
+        if (rec.id != fileArtifactId)
+        {
+            ++status.corrupt;
+            appendCleanupDetail(detail, fileArtifactId + ":id-mismatch");
+            continue;
+        }
+        metaIds.insert(rec.id);
+        m_artifacts[rec.id] = rec;
+        ++status.count;
+        if (rec.expiresMs > 0 && rec.expiresMs <= now)
+        {
+            ++status.expired;
+        }
+        const std::filesystem::path contentPath = artifactContentPath(root, rec.id);
+        const std::uint64_t actualSize = regularFileSize(contentPath);
+        status.totalBytes += actualSize;
+        if (actualSize == 0 && rec.size != 0)
+        {
+            ++status.corrupt;
+            appendCleanupDetail(detail, rec.id + ":missing-content");
+            continue;
+        }
+        if (verifyContentHash)
+        {
+            std::string actualHash;
+            const bool hashOk = sha256FileHex(wideToUtf8(contentPath.wstring()), actualHash);
+            actualHash = toLowerAscii(actualHash);
+            if (actualSize != rec.size || !hashOk || actualHash != toLowerAscii(rec.sha256))
+            {
+                ++status.corrupt;
+                appendCleanupDetail(detail, rec.id + ":hash-mismatch");
+            }
+            else
+            {
+                rec.storageHash = actualHash;
+                rec.storageHashVerified = true;
+                m_artifacts[rec.id] = rec;
+                writeWholeFile(artifactMetaPath(root, rec.id), artifactRecordJson(rec));
+                ++status.verified;
+            }
+        }
+    }
+
+    for (const auto &entry : std::filesystem::directory_iterator(root, ec))
+    {
+        if (ec || !entry.is_regular_file(ec) || entry.path().extension() != L".bin")
+        {
+            continue;
+        }
+        const std::string artifactId = wideToUtf8(entry.path().stem().wstring());
+        if (!isOpaqueId(artifactId, "art_") || metaIds.find(artifactId) == metaIds.end())
+        {
+            ++status.orphaned;
+            status.totalBytes += regularFileSize(entry.path());
+            appendCleanupDetail(detail, artifactId + ":orphan");
+        }
+    }
+    return status;
+}
+
+void PGS::loadArtifactPolicyLocked()
+{
+    m_artifactRetentionTtlMs = kDefaultOperationTtlMs;
+    m_artifactAutoCleanup = true;
+    m_artifactVerifyOnStatus = false;
+    std::string body;
+    if (!readWholeFile(artifactPolicyPathForStateFile(m_stateFilePath), body))
+    {
+        return;
+    }
+    for (const std::string &line : splitByChar(body, '\n'))
+    {
+        const std::string item = trim(line);
+        if (item.empty() || item[0] == '#')
+        {
+            continue;
+        }
+        const std::size_t eq = item.find('=');
+        if (eq == std::string::npos)
+        {
+            continue;
+        }
+        const std::string key = toLowerAscii(trim(item.substr(0, eq)));
+        const std::string value = trim(item.substr(eq + 1));
+        if (key == "ttl_ms")
+        {
+            std::int64_t ttl = 0;
+            if (parseTtlMsText(value, ttl))
+            {
+                m_artifactRetentionTtlMs = ttl;
+            }
+        }
+        else if (key == "auto_cleanup")
+        {
+            bool parsed = false;
+            if (parseArtifactBoolText(value, parsed))
+            {
+                m_artifactAutoCleanup = parsed;
+            }
+        }
+        else if (key == "verify_on_status")
+        {
+            bool parsed = false;
+            if (parseArtifactBoolText(value, parsed))
+            {
+                m_artifactVerifyOnStatus = parsed;
+            }
+        }
+    }
+}
+
+bool PGS::saveArtifactPolicyLocked(std::string &error) const
+{
+    error.clear();
+    const std::filesystem::path policyPath = artifactPolicyPathForStateFile(m_stateFilePath);
+    std::error_code ec;
+    if (!policyPath.parent_path().empty())
+    {
+        std::filesystem::create_directories(policyPath.parent_path(), ec);
+        if (ec)
+        {
+            error = "failed to create artifact policy directory";
+            return false;
+        }
+    }
+    const std::string body = "ttl_ms=" + std::to_string(m_artifactRetentionTtlMs) + "\n" +
+                             "auto_cleanup=" + std::string(m_artifactAutoCleanup ? "1" : "0") + "\n" +
+                             "verify_on_status=" + std::string(m_artifactVerifyOnStatus ? "1" : "0") + "\n";
+    if (!writeWholeFile(policyPath, body))
+    {
+        error = "failed to write artifact policy";
+        return false;
+    }
+    secureApplyDacl(policyPath.string(), false);
+    return true;
+}
+
+std::string PGS::artifactPolicySummaryLocked() const
+{
+    return artifactPolicySummaryValues(m_artifactRetentionTtlMs, m_artifactAutoCleanup, m_artifactVerifyOnStatus);
+}
+
+PGS::ArtifactCleanupResult PGS::cleanupArtifactsLocked(bool removeExpired, bool removeAll, bool verifyContentHash, std::string &detail)
+{
+    ArtifactCleanupResult result;
+    detail.clear();
+    const std::int64_t now = epochMs();
+    const std::filesystem::path root = artifactRootForStateFile(m_stateFilePath);
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec))
+    {
+        return result;
+    }
+
+    for (const auto &entry : std::filesystem::directory_iterator(root, ec))
+    {
+        if (ec || !entry.is_regular_file(ec) || entry.path().extension() != L".json")
+        {
+            continue;
+        }
+        std::string meta;
+        ArtifactRecord rec;
+        const std::string fileArtifactId = wideToUtf8(entry.path().stem().wstring());
+        if (readWholeFile(entry.path(), meta) && artifactRecordFromJson(meta, rec) && rec.id == fileArtifactId)
+        {
+            m_artifacts[rec.id] = rec;
+        }
+        else if (removeAll || verifyContentHash)
+        {
+            std::filesystem::remove(entry.path(), ec);
+            ++result.corruptRemoved;
+            appendCleanupDetail(detail, fileArtifactId + ":bad-meta");
+        }
+    }
+
+    for (auto it = m_artifacts.begin(); it != m_artifacts.end(); )
+    {
+        ArtifactRecord rec = it->second;
+        bool remove = false;
+        bool corrupt = false;
+        std::string reason;
+
+        if (removeAll)
+        {
+            remove = true;
+            reason = "all";
+        }
+        else if (removeExpired && rec.expiresMs > 0 && rec.expiresMs <= now)
+        {
+            remove = true;
+            reason = "expired";
+        }
+        else if (verifyContentHash)
+        {
+            const std::filesystem::path contentPath = artifactContentPath(root, rec.id);
+            const std::uint64_t actualSize = regularFileSize(contentPath);
+            std::string actualHash;
+            const bool hashOk = sha256FileHex(wideToUtf8(contentPath.wstring()), actualHash);
+            actualHash = toLowerAscii(actualHash);
+            if (actualSize != rec.size || !hashOk || actualHash != toLowerAscii(rec.sha256))
+            {
+                remove = true;
+                corrupt = true;
+                reason = "corrupt";
+            }
+            else
+            {
+                rec.storageHash = actualHash;
+                rec.storageHashVerified = true;
+                it->second = rec;
+                writeWholeFile(artifactMetaPath(root, rec.id), artifactRecordJson(rec));
+                ++result.verified;
+            }
+        }
+
+        if (remove)
+        {
+            removeArtifactFiles(root, rec.id, result);
+            if (corrupt)
+            {
+                ++result.corruptRemoved;
+            }
+            appendCleanupDetail(detail, rec.id + ":" + reason);
+            it = m_artifacts.erase(it);
+            continue;
+        }
+        ++it;
+    }
+
+    if (removeExpired || removeAll)
+    {
+        for (const auto &entry : std::filesystem::directory_iterator(root, ec))
+        {
+            if (ec || !entry.is_regular_file(ec) || entry.path().extension() != L".bin")
+            {
+                continue;
+            }
+            const std::string artifactId = wideToUtf8(entry.path().stem().wstring());
+            if (!isOpaqueId(artifactId, "art_") || m_artifacts.find(artifactId) == m_artifacts.end())
+            {
+                removeArtifactFiles(root, artifactId, result);
+                appendCleanupDetail(detail, artifactId + ":orphan");
+            }
+        }
+    }
+
+    return result;
+}
+
+std::string PGS::handleArtifactCleanupCommand(const std::string &args)
+{
+    const std::string trimmed = trim(args);
+    bool removeExpired = true;
+    bool removeAll = false;
+    bool verifyContentHash = false;
+    if (!trimmed.empty())
+    {
+        const std::vector<std::string> parts = splitByChar(trimmed, ' ');
+        for (const auto &part : parts)
+        {
+            const std::string opt = toLowerAscii(trim(part));
+            if (opt == "--all")
+            {
+                removeAll = true;
+                removeExpired = true;
+                continue;
+            }
+            if (opt == "--verify" || opt == "--check-hash")
+            {
+                verifyContentHash = true;
+                continue;
+            }
+            if (opt == "--expired")
+            {
+                removeExpired = true;
+                continue;
+            }
+            if (opt == "--help")
+            {
+                return "OK artifact cleanup options: --expired --all --verify";
+            }
+            return "ERR unknown artifact cleanup option";
+        }
+    }
+    std::string detail;
+    ArtifactCleanupResult result;
+    {
+        std::lock_guard<std::mutex> lock(m_artifactMutex);
+        result = cleanupArtifactsLocked(removeExpired, removeAll, verifyContentHash, detail);
+    }
+    recordEvent("artifact.cleanup", "removed=" + std::to_string(result.removed) + ";verified=" + std::to_string(result.verified) + ";corrupt_removed=" + std::to_string(result.corruptRemoved));
+    std::ostringstream out;
+    out << "OK artifact cleanup removed=" << result.removed
+        << ";verified=" << result.verified
+        << ";corrupt_removed=" << result.corruptRemoved
+        << ";reclaimed_bytes=" << result.reclaimedBytes;
+    if (!detail.empty())
+    {
+        out << ";detail=" << detail;
+    }
+    return out.str();
+}
+
+std::string PGS::handleArtifactStatusCommand(const std::string &args)
+{
+    bool verifyContentHash = false;
+    const std::vector<std::string> parts = splitByChar(trim(args), ' ');
+    for (const auto &part : parts)
+    {
+        const std::string opt = toLowerAscii(trim(part));
+        if (opt.empty())
+        {
+            continue;
+        }
+        if (opt == "--verify" || opt == "--check-hash")
+        {
+            verifyContentHash = true;
+            continue;
+        }
+        if (opt == "--help")
+        {
+            return "OK artifact status options: --verify";
+        }
+        return "ERR unknown artifact status option";
+    }
+    ArtifactStoreStatus status;
+    std::string detail;
+    std::int64_t ttlMs = kDefaultOperationTtlMs;
+    bool autoCleanup = true;
+    bool verifyOnStatus = false;
+    {
+        std::lock_guard<std::mutex> lock(m_artifactMutex);
+        const bool effectiveVerify = verifyContentHash || m_artifactVerifyOnStatus;
+        status = artifactStoreStatusLocked(effectiveVerify, detail);
+        ttlMs = m_artifactRetentionTtlMs;
+        autoCleanup = m_artifactAutoCleanup;
+        verifyOnStatus = m_artifactVerifyOnStatus;
+    }
+    const std::string statusJson = artifactStatusJson(status, ttlMs, autoCleanup, verifyOnStatus);
+    std::ostringstream out;
+    out << "OK artifact status store_exists=" << (status.storeExists ? "1" : "0")
+        << ";root_secured=" << (status.rootSecured ? "1" : "0")
+        << ";count=" << status.count
+        << ";total_bytes=" << status.totalBytes
+        << ";expired=" << status.expired
+        << ";corrupt=" << status.corrupt
+        << ";orphaned=" << status.orphaned
+        << ";verified=" << status.verified
+        << ";ttl_ms=" << ttlMs
+        << ";auto_cleanup=" << (autoCleanup ? "1" : "0")
+        << ";verify_on_status=" << (verifyOnStatus ? "1" : "0")
+        << ";artifact_status_json_b64=" << base64Encode(statusJson);
+    if (!detail.empty())
+    {
+        out << ";detail=" << detail;
+    }
+    return out.str();
+}
+
+std::string PGS::handleArtifactPolicyCommand(const std::string &args)
+{
+    std::int64_t ttlMs = 0;
+    bool hasTtl = false;
+    bool autoCleanup = false;
+    bool hasAutoCleanup = false;
+    bool verifyOnStatus = false;
+    bool hasVerifyOnStatus = false;
+    const std::vector<std::string> parts = splitByChar(trim(args), ' ');
+    for (std::size_t i = 0; i < parts.size(); ++i)
+    {
+        const std::string opt = toLowerAscii(trim(parts[i]));
+        if (opt.empty())
+        {
+            continue;
+        }
+        if (opt == "--ttl-ms")
+        {
+            if (i + 1 >= parts.size() || !parseTtlMsText(parts[++i], ttlMs))
+            {
+                return "ERR artifact policy --ttl-ms must be 60000..604800000";
+            }
+            hasTtl = true;
+            continue;
+        }
+        if (opt == "--auto-cleanup")
+        {
+            autoCleanup = true;
+            hasAutoCleanup = true;
+            continue;
+        }
+        if (opt == "--no-auto-cleanup")
+        {
+            autoCleanup = false;
+            hasAutoCleanup = true;
+            continue;
+        }
+        if (opt == "--verify-on-status")
+        {
+            verifyOnStatus = true;
+            hasVerifyOnStatus = true;
+            continue;
+        }
+        if (opt == "--no-verify-on-status")
+        {
+            verifyOnStatus = false;
+            hasVerifyOnStatus = true;
+            continue;
+        }
+        if (opt == "--help")
+        {
+            return "OK artifact policy options: --ttl-ms N --auto-cleanup --no-auto-cleanup --verify-on-status --no-verify-on-status";
+        }
+        return "ERR unknown artifact policy option";
+    }
+    std::string policySummary;
+    std::string policyJson;
+    {
+        std::lock_guard<std::mutex> lock(m_artifactMutex);
+        if (hasTtl)
+        {
+            m_artifactRetentionTtlMs = ttlMs;
+        }
+        if (hasAutoCleanup)
+        {
+            m_artifactAutoCleanup = autoCleanup;
+        }
+        if (hasVerifyOnStatus)
+        {
+            m_artifactVerifyOnStatus = verifyOnStatus;
+        }
+        if (hasTtl || hasAutoCleanup || hasVerifyOnStatus)
+        {
+            std::string error;
+            if (!saveArtifactPolicyLocked(error))
+            {
+                return "ERR " + error;
+            }
+        }
+        policySummary = artifactPolicySummaryLocked();
+        policyJson = artifactPolicyJson(m_artifactRetentionTtlMs, m_artifactAutoCleanup, m_artifactVerifyOnStatus);
+    }
+    if (hasTtl || hasAutoCleanup || hasVerifyOnStatus)
+    {
+        recordEvent("artifact.policy", policySummary);
+    }
+    return "OK artifact policy " + policySummary + ";artifact_policy_json_b64=" + base64Encode(policyJson);
+}
+
+std::string PGS::handleArtifactChunkCommand(const std::string &args)
+{
+    const std::vector<std::string> parts = splitByChar(trim(args), ' ');
+    if (parts.size() < 3)
+    {
+        return "ERR module artifact chunk requires <artifact-id> <offset> <max-bytes>";
+    }
+    const std::string artifactId = parts[0];
+    if (!isOpaqueId(artifactId, "art_"))
+    {
+        return "ERR invalid artifact id";
+    }
+    std::uint64_t offset = 0;
+    std::uint64_t maxBytes = 0;
+    if (!parseUnsignedLongLong(parts[1], offset) || !parseUnsignedLongLong(parts[2], maxBytes) || maxBytes == 0)
+    {
+        return "ERR invalid artifact chunk range";
+    }
+    maxBytes = std::min<std::uint64_t>(maxBytes, kMaxArtifactChunkBytes);
+    const std::filesystem::path root = artifactRootForStateFile(m_stateFilePath);
+    ArtifactRecord rec;
+    {
+        std::lock_guard<std::mutex> lock(m_artifactMutex);
+        const auto existing = m_artifacts.find(artifactId);
+        if (existing != m_artifacts.end())
+        {
+            rec = existing->second;
+        }
+        else
+        {
+            std::string meta;
+            if (!readWholeFile(artifactMetaPath(root, artifactId), meta) || !artifactRecordFromJson(meta, rec))
+            {
+                return "ERR artifact not found";
+            }
+            m_artifacts[rec.id] = rec;
+        }
+    }
+    const std::int64_t now = epochMs();
+    if (rec.expiresMs > 0 && rec.expiresMs <= now)
+    {
+        return "ERR artifact expired";
+    }
+    if (offset > rec.size)
+    {
+        return "ERR artifact offset beyond end";
+    }
+    const std::filesystem::path contentPath = artifactContentPath(root, artifactId);
+    const std::uint64_t actualSize = regularFileSize(contentPath);
+    std::string actualHash;
+    const bool hashOk = sha256FileHex(wideToUtf8(contentPath.wstring()), actualHash);
+    actualHash = toLowerAscii(actualHash);
+    if (actualSize != rec.size || !hashOk || actualHash != toLowerAscii(rec.sha256))
+    {
+        recordEvent("artifact.integrity-failed", "artifact_id=" + artifactId);
+        return "ERR artifact content hash mismatch";
+    }
+    if (!rec.storageHashVerified || rec.storageHash != actualHash)
+    {
+        rec.storageHash = actualHash;
+        rec.storageHashVerified = true;
+        std::lock_guard<std::mutex> lock(m_artifactMutex);
+        m_artifacts[rec.id] = rec;
+        writeWholeFile(artifactMetaPath(root, rec.id), artifactRecordJson(rec));
+    }
+    const std::uint64_t toRead = std::min<std::uint64_t>(maxBytes, rec.size - offset);
+    std::string data(static_cast<std::size_t>(toRead), '\0');
+    std::ifstream in(contentPath, std::ios::in | std::ios::binary);
+    if (!in.is_open())
+    {
+        return "ERR artifact content missing";
+    }
+    in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (toRead > 0)
+    {
+        in.read(&data[0], static_cast<std::streamsize>(toRead));
+        data.resize(static_cast<std::size_t>(std::max<std::streamsize>(0, in.gcount())));
+    }
+    const std::uint64_t nextOffset = offset + static_cast<std::uint64_t>(data.size());
+    return "OK id=" + artifactId +
+           ";offset=" + std::to_string(offset) +
+           ";size=" + std::to_string(data.size()) +
+           ";total=" + std::to_string(rec.size) +
+           ";eof=" + (nextOffset >= rec.size ? std::string("1") : std::string("0")) +
+           ";data_b64=" + base64Encode(data);
+}
+
+std::string PGS::handleGuardCommand(const std::string &args)
+{
+    const auto spacePos = args.find(' ');
+    const std::string sub = (spacePos == std::string::npos) ? trim(args) : trim(args.substr(0, spacePos));
+    const std::string rest = (spacePos == std::string::npos) ? std::string() : trim(args.substr(spacePos + 1));
+    if (sub == "retry" || sub == "clear-quarantine")
+    {
+        std::uint64_t guardId = 0;
+        if (!util::parseUnsignedLongLong(rest, guardId) || guardId == 0)
+        {
+            return "ERR guard " + sub + " requires <guard-id>";
+        }
+        return sub == "retry" ? retryQuarantinedGuard(guardId) : clearQuarantinedGuard(guardId);
+    }
+    return "ERR unknown guard subcommand";
+}
+
 
 // "ppl" convenience dispatcher. Routes to the ppl module so callers do not
 // need the module-call syntax. If the ppl module is not loaded, returns
@@ -1961,7 +3585,14 @@ std::string PGS::handleHealthCheckCommand(const std::string &args)
         {
             return "ERR pid not found";
         }
-        return "OK health_check_b64=" + base64Encode(it->second.healthCheckJson);
+        return "OK health_check_b64=" + base64Encode(it->second.healthCheckJson) +
+               ";status=" + (it->second.healthStatus.empty() ? "disabled" : it->second.healthStatus) +
+               ";last_message_b64=" + base64Encode(it->second.healthLastMessage) +
+               ";last_check=" + std::to_string(it->second.healthLastCheckMs) +
+               ";last_ok=" + std::to_string(it->second.healthLastOkMs) +
+               ";last_failure=" + std::to_string(it->second.healthLastFailureMs) +
+               ";next_check=" + std::to_string(it->second.healthNextCheckMs) +
+               ";failure_count=" + std::to_string(it->second.healthFailureCount);
     }
 
     bool changed = false;
@@ -1977,6 +3608,11 @@ std::string PGS::handleHealthCheckCommand(const std::string &args)
         {
             return "ERR invalid health-check JSON";
         }
+        std::string validationError;
+        if (!validateHealthCheckConfig(configJson, validationError))
+        {
+            return "ERR invalid health-check config: " + validationError;
+        }
     }
     {
         std::lock_guard<std::mutex> lock(m_guardsMutex);
@@ -1986,6 +3622,7 @@ std::string PGS::handleHealthCheckCommand(const std::string &args)
             return "ERR pid not found";
         }
         it->second.healthCheckJson = (sub == "set") ? configJson : std::string();
+        resetHealthRuntimeState(it->second);
         auto persisted = m_persistedGuards.find(it->second.guardId);
         if (persisted != m_persistedGuards.end())
         {
@@ -1998,6 +3635,7 @@ std::string PGS::handleHealthCheckCommand(const std::string &args)
         persistState();
         recordEvent(sub == "set" ? "guard.health-check-set" : "guard.health-check-clear",
                     "pid=" + std::to_string(pid));
+        m_healthCv.notify_all();
     }
     return sub == "set" ? "OK health-check stored" : "OK health-check cleared";
 }
@@ -2260,11 +3898,23 @@ void PGS::recordEvent(const std::string &type, const std::string &detail)
                        ";TS=" + std::to_string(nowMs) +
                        ";TYPE=" + type +
                        ";DETAIL_B64=" + base64Encode(detail);
-    std::lock_guard<std::mutex> lock(m_eventsMutex);
-    m_events.push_back(std::move(line));
-    while (m_events.size() > kMaxEventHistory)
     {
-        m_events.pop_front();
+        std::lock_guard<std::mutex> lock(m_eventsMutex);
+        m_events.push_back(line);
+        while (m_events.size() > kMaxEventHistory)
+        {
+            m_events.pop_front();
+        }
+    }
+    if (type.rfind("notify.", 0) != 0)
+    {
+        std::lock_guard<std::mutex> lock(m_notifyMutex);
+        if (m_notifyQueue.size() >= kMaxEventHistory)
+        {
+            m_notifyQueue.pop();
+        }
+        m_notifyQueue.emplace(type, detail);
+        m_notifyCv.notify_one();
     }
 }
 

@@ -1,6 +1,7 @@
 #include "Process_Guard/PGS.h"
 
 #include <ws2tcpip.h>
+#include <winhttp.h>
 #include <wtsapi32.h>
 #include <userenv.h>
 #include <shellapi.h>
@@ -25,6 +26,7 @@
 
 #ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "wtsapi32.lib")
 #pragma comment(lib, "userenv.lib")
 #pragma comment(lib, "ole32.lib")
@@ -39,13 +41,30 @@ namespace
 // path/process and string helpers now come from Process_Guard/PGUtil.h.
 
 constexpr const char *kRestartIndexToken = "${PGS_RESTART_INDEX}";
-constexpr int kStateFileVersion = 3;     // v3: advanced guard policy + WindowsApps
+constexpr int kStateFileVersion = 5;     // v5: durable quarantine failure reason codes
+constexpr int kPreviousStateFileVersion = 4; // v4: durable quarantine/failure state
+constexpr int kAdvancedStateFileVersion = 3; // v3: advanced guard policy + WindowsApps
 constexpr int kLegacyStateFileVersion = 2;
+constexpr int kDefaultHealthIntervalMs = 30000;
+constexpr int kMinHealthIntervalMs = 1000;
+constexpr int kMaxHealthIntervalMs = 3600000;
+constexpr int kDefaultHealthTimeoutMs = 2000;
+constexpr int kMinHealthTimeoutMs = 100;
+constexpr int kMaxHealthTimeoutMs = 30000;
+constexpr int kDefaultHealthFailures = 3;
 // Per-guard Job Object naming. The "Global\" kernel namespace requires
 // SeCreateGlobalPrivilege (held by LocalSystem / Administrators), which is why
 // the default service account must stay LocalSystem for full-cascade to work.
 constexpr const char *kJobNamePrefix = "Global\\PGS-Job-";
 constexpr const char *kModulesAllowlistFile = "modules.allow";
+
+bool setRestartFailure(std::string &code, std::string &message,
+                       const std::string &failureCode, const std::string &failureMessage)
+{
+    code = failureCode;
+    message = failureMessage;
+    return false;
+}
 
 bool isSha256Hex(const std::string &value)
 {
@@ -158,6 +177,473 @@ bool looksLikeJsonObjectOrArray(const std::string &text)
 {
     const std::string t = ProcessGuard::util::trim(text);
     return !t.empty() && ((t.front() == '{' && t.back() == '}') || (t.front() == '[' && t.back() == ']'));
+}
+
+std::string jsonStringValue(const std::string &text, const std::string &key)
+{
+    const std::string needle = "\"" + key + "\"";
+    std::size_t pos = text.find(needle);
+    if (pos == std::string::npos)
+    {
+        return std::string();
+    }
+    pos = text.find(':', pos + needle.size());
+    if (pos == std::string::npos)
+    {
+        return std::string();
+    }
+    ++pos;
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+    {
+        ++pos;
+    }
+    if (pos >= text.size() || text[pos] != '"')
+    {
+        return std::string();
+    }
+    ++pos;
+    std::string out;
+    bool escaped = false;
+    for (; pos < text.size(); ++pos)
+    {
+        const char ch = text[pos];
+        if (escaped)
+        {
+            switch (ch)
+            {
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            default: out.push_back(ch); break;
+            }
+            escaped = false;
+            continue;
+        }
+        if (ch == '\\')
+        {
+            escaped = true;
+            continue;
+        }
+        if (ch == '"')
+        {
+            break;
+        }
+        out.push_back(ch);
+    }
+    return out;
+}
+
+std::string jsonScalarValue(const std::string &text, const std::string &key)
+{
+    const std::string quoted = jsonStringValue(text, key);
+    if (!quoted.empty())
+    {
+        return quoted;
+    }
+    const std::string needle = "\"" + key + "\"";
+    std::size_t pos = text.find(needle);
+    if (pos == std::string::npos)
+    {
+        return std::string();
+    }
+    pos = text.find(':', pos + needle.size());
+    if (pos == std::string::npos)
+    {
+        return std::string();
+    }
+    ++pos;
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+    {
+        ++pos;
+    }
+    const std::size_t start = pos;
+    while (pos < text.size())
+    {
+        const char ch = text[pos];
+        if (ch == ',' || ch == '}' || std::isspace(static_cast<unsigned char>(ch)))
+        {
+            break;
+        }
+        ++pos;
+    }
+    return ProcessGuard::util::trim(text.substr(start, pos - start));
+}
+
+bool jsonIntValue(const std::string &text, const std::string &key, int &out)
+{
+    const std::string value = jsonScalarValue(text, key);
+    if (value.empty())
+    {
+        return false;
+    }
+    return parseIntField(value, out);
+}
+
+bool jsonBoolValue(const std::string &text, const std::string &key, bool defaultValue)
+{
+    const std::string value = ProcessGuard::util::toLowerAscii(ProcessGuard::util::trim(jsonScalarValue(text, key)));
+    if (value.empty())
+    {
+        return defaultValue;
+    }
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+struct HealthCheckConfig
+{
+    bool enabled = true;
+    std::string type;
+    std::string action = "event";
+    int intervalMs = kDefaultHealthIntervalMs;
+    int timeoutMs = kDefaultHealthTimeoutMs;
+    int failures = kDefaultHealthFailures;
+    std::string host;
+    int port = 0;
+    std::string url;
+    int expectedStatus = 0;
+    int minStatus = 200;
+    int maxStatus = 399;
+};
+
+int clampHealthInt(int value, int minValue, int maxValue)
+{
+    return std::max(minValue, std::min(maxValue, value));
+}
+
+bool parseHealthCheckConfig(const std::string &json, HealthCheckConfig &out, std::string &err)
+{
+    out = HealthCheckConfig{};
+    if (!looksLikeJsonObjectOrArray(json))
+    {
+        err = "health-check config must be a JSON object";
+        return false;
+    }
+    out.enabled = jsonBoolValue(json, "enabled", true);
+    if (!out.enabled)
+    {
+        out.type = "disabled";
+        return true;
+    }
+    out.type = ProcessGuard::util::toLowerAscii(ProcessGuard::util::trim(jsonStringValue(json, "type")));
+    if (out.type.empty())
+    {
+        out.type = ProcessGuard::util::toLowerAscii(ProcessGuard::util::trim(jsonStringValue(json, "probe")));
+    }
+    if (out.type != "process" && out.type != "tcp" && out.type != "http")
+    {
+        err = "health-check type must be process, tcp, or http";
+        return false;
+    }
+    int value = 0;
+    if (jsonIntValue(json, "interval_ms", value))
+    {
+        out.intervalMs = clampHealthInt(value, kMinHealthIntervalMs, kMaxHealthIntervalMs);
+    }
+    else if (jsonIntValue(json, "interval_sec", value) || jsonIntValue(json, "interval_seconds", value))
+    {
+        const long long scaled = static_cast<long long>(value) * 1000ll;
+        out.intervalMs = static_cast<int>(std::max<long long>(kMinHealthIntervalMs, std::min<long long>(kMaxHealthIntervalMs, scaled)));
+    }
+    if (jsonIntValue(json, "timeout_ms", value))
+    {
+        out.timeoutMs = clampHealthInt(value, kMinHealthTimeoutMs, kMaxHealthTimeoutMs);
+    }
+    if (jsonIntValue(json, "failures", value) || jsonIntValue(json, "failure_threshold", value))
+    {
+        out.failures = clampHealthInt(value, 1, 100);
+    }
+    out.action = ProcessGuard::util::toLowerAscii(ProcessGuard::util::trim(jsonStringValue(json, "action")));
+    if (out.action.empty())
+    {
+        out.action = "event";
+    }
+    if (out.action == "alert" || out.action == "notify")
+    {
+        out.action = "event";
+    }
+    if (out.action == "ignore")
+    {
+        out.action = "none";
+    }
+    if (out.action != "event" && out.action != "none" && out.action != "restart" && out.action != "quarantine")
+    {
+        err = "health-check action must be event, restart, quarantine, or none";
+        return false;
+    }
+    if (out.type == "tcp")
+    {
+        out.host = ProcessGuard::util::trim(jsonStringValue(json, "host"));
+        if (out.host.empty())
+        {
+            out.host = ProcessGuard::util::trim(jsonStringValue(json, "address"));
+        }
+        if (out.host.empty() || !jsonIntValue(json, "port", out.port) || out.port <= 0 || out.port > 65535)
+        {
+            err = "tcp health-check requires host and 1-65535 port";
+            return false;
+        }
+    }
+    if (out.type == "http")
+    {
+        out.url = ProcessGuard::util::trim(jsonStringValue(json, "url"));
+        if (out.url.empty())
+        {
+            err = "http health-check requires url";
+            return false;
+        }
+        if (jsonIntValue(json, "expected_status", value) || jsonIntValue(json, "status", value))
+        {
+            out.expectedStatus = value;
+        }
+        if (jsonIntValue(json, "min_status", value))
+        {
+            out.minStatus = clampHealthInt(value, 100, 599);
+        }
+        if (jsonIntValue(json, "max_status", value))
+        {
+            out.maxStatus = clampHealthInt(value, 100, 599);
+        }
+        if (out.expectedStatus > 0 && (out.expectedStatus < 100 || out.expectedStatus > 599))
+        {
+            err = "http expected_status must be 100-599";
+            return false;
+        }
+        if (out.minStatus > out.maxStatus)
+        {
+            err = "http min_status must be <= max_status";
+            return false;
+        }
+    }
+    return true;
+}
+
+struct HealthTask
+{
+    DWORD pid = 0;
+    std::uint64_t guardId = 0;
+    HANDLE processHandle = nullptr;
+    std::string path;
+    std::string configJson;
+    HealthCheckConfig config;
+};
+
+bool duplicateProcessHandle(HANDLE source, HANDLE &out)
+{
+    out = nullptr;
+    if (!source)
+    {
+        return false;
+    }
+    return DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &out, 0, FALSE, DUPLICATE_SAME_ACCESS) == TRUE;
+}
+
+bool probeProcessHealth(const HealthTask &task, std::string &message)
+{
+    if (!task.processHandle)
+    {
+        message = "process handle unavailable";
+        return false;
+    }
+    const DWORD wait = WaitForSingleObject(task.processHandle, 0);
+    if (wait == WAIT_TIMEOUT)
+    {
+        message = "process alive";
+        return true;
+    }
+    DWORD exitCode = 0;
+    GetExitCodeProcess(task.processHandle, &exitCode);
+    message = "process exited code=" + std::to_string(exitCode);
+    return false;
+}
+
+bool probeTcpHealth(const HealthCheckConfig &cfg, std::string &message)
+{
+    addrinfo hints{};
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    addrinfo *result = nullptr;
+    const std::string portText = std::to_string(cfg.port);
+    const int gai = getaddrinfo(cfg.host.c_str(), portText.c_str(), &hints, &result);
+    if (gai != 0 || !result)
+    {
+        message = "tcp resolve failed host=" + cfg.host;
+        return false;
+    }
+    bool ok = false;
+    int lastErr = 0;
+    for (addrinfo *ai = result; ai && !ok; ai = ai->ai_next)
+    {
+        SOCKET s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == INVALID_SOCKET)
+        {
+            lastErr = WSAGetLastError();
+            continue;
+        }
+        u_long nonBlocking = 1;
+        ioctlsocket(s, FIONBIO, &nonBlocking);
+        const int c = connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen));
+        if (c == 0)
+        {
+            ok = true;
+        }
+        else
+        {
+            lastErr = WSAGetLastError();
+            if (lastErr == WSAEWOULDBLOCK || lastErr == WSAEINPROGRESS || lastErr == WSAEINVAL)
+            {
+                fd_set writeSet;
+                FD_ZERO(&writeSet);
+                FD_SET(s, &writeSet);
+                fd_set errorSet;
+                FD_ZERO(&errorSet);
+                FD_SET(s, &errorSet);
+                timeval tv{};
+                tv.tv_sec = cfg.timeoutMs / 1000;
+                tv.tv_usec = (cfg.timeoutMs % 1000) * 1000;
+                const int sel = select(0, nullptr, &writeSet, &errorSet, &tv);
+                if (sel > 0 && FD_ISSET(s, &writeSet))
+                {
+                    int soError = 0;
+                    int soLen = sizeof(soError);
+                    getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&soError), &soLen);
+                    if (soError == 0)
+                    {
+                        ok = true;
+                    }
+                    else
+                    {
+                        lastErr = soError;
+                    }
+                }
+                else if (sel == 0)
+                {
+                    lastErr = WSAETIMEDOUT;
+                }
+            }
+        }
+        closesocket(s);
+    }
+    freeaddrinfo(result);
+    if (ok)
+    {
+        message = "tcp connected " + cfg.host + ":" + std::to_string(cfg.port);
+        return true;
+    }
+    message = "tcp connect failed host=" + cfg.host + ":" + std::to_string(cfg.port) + " error=" + std::to_string(lastErr);
+    return false;
+}
+
+bool probeHttpHealth(const HealthCheckConfig &cfg, std::string &message)
+{
+    const std::wstring urlW = ProcessGuard::util::utf8ToWide(cfg.url);
+    if (urlW.empty())
+    {
+        message = "http url conversion failed";
+        return false;
+    }
+    URL_COMPONENTS components{};
+    components.dwStructSize = sizeof(components);
+    components.dwSchemeLength = static_cast<DWORD>(-1);
+    components.dwHostNameLength = static_cast<DWORD>(-1);
+    components.dwUrlPathLength = static_cast<DWORD>(-1);
+    components.dwExtraInfoLength = static_cast<DWORD>(-1);
+    if (!WinHttpCrackUrl(urlW.c_str(), 0, 0, &components))
+    {
+        message = "http url parse failed error=" + std::to_string(GetLastError());
+        return false;
+    }
+    if (components.nScheme != INTERNET_SCHEME_HTTP && components.nScheme != INTERNET_SCHEME_HTTPS)
+    {
+        message = "http scheme must be http or https";
+        return false;
+    }
+    const std::wstring host(components.lpszHostName, components.dwHostNameLength);
+    std::wstring target(components.lpszUrlPath, components.dwUrlPathLength);
+    if (target.empty())
+    {
+        target = L"/";
+    }
+    if (components.dwExtraInfoLength > 0)
+    {
+        target.append(components.lpszExtraInfo, components.dwExtraInfoLength);
+    }
+    HINTERNET session = WinHttpOpen(L"PGSHealth/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session)
+    {
+        message = "http open failed error=" + std::to_string(GetLastError());
+        return false;
+    }
+    WinHttpSetTimeouts(session, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);
+    HINTERNET connect = WinHttpConnect(session, host.c_str(), components.nPort, 0);
+    if (!connect)
+    {
+        const DWORD err = GetLastError();
+        WinHttpCloseHandle(session);
+        message = "http connect failed error=" + std::to_string(err);
+        return false;
+    }
+    const DWORD flags = (components.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET request = WinHttpOpenRequest(connect, L"GET", target.c_str(), nullptr,
+                                           WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!request)
+    {
+        const DWORD err = GetLastError();
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        message = "http request open failed error=" + std::to_string(err);
+        return false;
+    }
+    bool ok = false;
+    DWORD status = 0;
+    if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(request, nullptr))
+    {
+        DWORD len = sizeof(status);
+        if (WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX))
+        {
+            ok = cfg.expectedStatus > 0 ? (static_cast<int>(status) == cfg.expectedStatus)
+                                        : (static_cast<int>(status) >= cfg.minStatus && static_cast<int>(status) <= cfg.maxStatus);
+        }
+    }
+    const DWORD err = ok ? 0 : GetLastError();
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connect);
+    WinHttpCloseHandle(session);
+    if (ok)
+    {
+        message = "http status=" + std::to_string(status);
+        return true;
+    }
+    message = status > 0 ? ("http unexpected status=" + std::to_string(status))
+                         : ("http request failed error=" + std::to_string(err));
+    return false;
+}
+
+bool runHealthProbe(const HealthTask &task, const HealthCheckConfig &cfg, std::string &message)
+{
+    if (!cfg.enabled)
+    {
+        message = "health-check disabled";
+        return true;
+    }
+    if (cfg.type == "process")
+    {
+        return probeProcessHealth(task, message);
+    }
+    if (cfg.type == "tcp")
+    {
+        return probeTcpHealth(cfg, message);
+    }
+    if (cfg.type == "http")
+    {
+        return probeHttpHealth(cfg, message);
+    }
+    message = "unknown health-check type";
+    return false;
 }
 
 bool secureModulesTree(const std::string &modulesDir)
@@ -326,6 +812,23 @@ std::int64_t PGS::currentEpochMs()
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+bool PGS::validateHealthCheckConfig(const std::string &configJson, std::string &error)
+{
+    HealthCheckConfig parsed;
+    return parseHealthCheckConfig(configJson, parsed, error);
+}
+
+void PGS::resetHealthRuntimeState(GuardInfo &guard)
+{
+    guard.healthStatus = guard.healthCheckJson.empty() ? "disabled" : "pending";
+    guard.healthLastMessage.clear();
+    guard.healthLastCheckMs = 0;
+    guard.healthLastOkMs = 0;
+    guard.healthLastFailureMs = 0;
+    guard.healthNextCheckMs = guard.healthCheckJson.empty() ? 0 : currentEpochMs();
+    guard.healthFailureCount = 0;
+}
+
 GuardInfo PGS::desiredGuardFromPersisted(const PersistedGuardState &persisted)
 {
     GuardInfo guard{};
@@ -346,6 +849,7 @@ GuardInfo PGS::desiredGuardFromPersisted(const PersistedGuardState &persisted)
     guard.hangTimeoutMs = persisted.hangTimeoutMs;
     guard.killOnExit = persisted.killOnExit;
     guard.healthCheckJson = persisted.healthCheckJson;
+    resetHealthRuntimeState(guard);
     guard.groupName = persisted.groupName;
     guard.paused = persisted.paused;
     guard.createdAtMs = persisted.createdAtMs;
@@ -357,6 +861,11 @@ GuardInfo PGS::desiredGuardFromPersisted(const PersistedGuardState &persisted)
     guard.restartIntervalCount = persisted.restartIntervalCount;
     guard.crashLoop = persisted.crashLoop;
     guard.restartHookJson = persisted.restartHookJson;
+    guard.quarantined = persisted.quarantined;
+    guard.lastFailureCode = persisted.lastFailureCode;
+    guard.lastFailure = persisted.lastFailure;
+    guard.nextRetryMs = persisted.nextRetryMs;
+    guard.failureCount = persisted.failureCount;
     return guard;
 }
 
@@ -390,12 +899,18 @@ void PGS::copyGuardToPersisted(const GuardInfo &guard, PersistedGuardState &pers
     persisted.restartIntervalCount = guard.restartIntervalCount;
     persisted.crashLoop = guard.crashLoop;
     persisted.restartHookJson = guard.restartHookJson;
+    persisted.quarantined = guard.quarantined;
+    persisted.lastFailureCode = guard.lastFailureCode;
+    persisted.lastFailure = guard.lastFailure;
+    persisted.nextRetryMs = guard.nextRetryMs;
+    persisted.failureCount = guard.failureCount;
 }
 
 void PGS::inheritRestartProfile(GuardInfo &newGuard, const GuardInfo &oldGuard)
 {
     const std::int64_t nowMs = currentEpochMs();
     newGuard.healthCheckJson = oldGuard.healthCheckJson;
+    resetHealthRuntimeState(newGuard);
     newGuard.groupName = oldGuard.groupName;
     newGuard.paused = oldGuard.paused;
     newGuard.createdAtMs = oldGuard.createdAtMs > 0 ? oldGuard.createdAtMs : nowMs;
@@ -404,6 +919,7 @@ void PGS::inheritRestartProfile(GuardInfo &newGuard, const GuardInfo &oldGuard)
     newGuard.lastExitCode = oldGuard.lastExitCode;
     newGuard.cumulativeRunMs = oldGuard.cumulativeRunMs;
     newGuard.restartHookJson = oldGuard.restartHookJson;
+    clearFailureState(newGuard);
     if (oldGuard.lastStartMs > 0)
     {
         newGuard.restartIntervalSumMs = oldGuard.restartIntervalSumMs + std::max<std::int64_t>(0, nowMs - oldGuard.lastStartMs);
@@ -493,6 +1009,10 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     if (!loadPersistedState())
     {
         Logger::warning("PGS: failed to load persisted state, continuing with empty archive");
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_artifactMutex);
+        loadArtifactPolicyLocked();
     }
 
     m_requireAuth = true;
@@ -643,6 +1163,8 @@ bool PGS::start()
     }
     m_listenerThread = std::thread(&PGS::listenerLoop, this);
     m_monitorThread = std::thread(&PGS::monitorLoop, this);
+    m_healthThread = std::thread(&PGS::healthLoop, this);
+    m_notifyThread = std::thread(&PGS::notifyLoop, this);
 
     Logger::warning("PGS: started");
     return true;
@@ -657,6 +1179,8 @@ void PGS::stop()
 
     closeListenSocket();
     m_clientQueueCv.notify_all();
+    m_healthCv.notify_all();
+    m_notifyCv.notify_all();
 
     if (m_listenerThread.joinable())
     {
@@ -665,6 +1189,14 @@ void PGS::stop()
     if (m_monitorThread.joinable())
     {
         m_monitorThread.join();
+    }
+    if (m_healthThread.joinable())
+    {
+        m_healthThread.join();
+    }
+    if (m_notifyThread.joinable())
+    {
+        m_notifyThread.join();
     }
     for (auto &worker : m_clientWorkers)
     {
@@ -998,6 +1530,25 @@ bool PGS::loadPersistedState()
                     persisted.restartHookJson.clear();
                 }
             }
+            if (fields.size() > 29)
+            {
+                bool b = false;
+                if (parseBoolFlag(fields[29], b))
+                {
+                    persisted.quarantined = b;
+                }
+            }
+            if (fields.size() > 30 && fields[30] != "-")
+            {
+                persisted.lastFailure = base64Decode(fields[30]);
+            }
+            if (fields.size() > 31) parseInt64Field(fields[31], persisted.nextRetryMs);
+            if (fields.size() > 32) parseIntField(fields[32], persisted.failureCount);
+            if (persisted.failureCount < 0) persisted.failureCount = 0;
+            if (fields.size() > 33 && fields[33] != "-")
+            {
+                persisted.lastFailureCode = trim(fields[33]);
+            }
             if (persisted.createdAtMs <= 0)
             {
                 persisted.createdAtMs = currentEpochMs();
@@ -1033,9 +1584,9 @@ bool PGS::loadPersistedState()
             Logger::warning("PGS: migrating state file v1 -> v3 (guard records kept, auth token reset)");
             persistedAuthHash.clear();
         }
-        else if (version == kLegacyStateFileVersion)
+        else if (version == kLegacyStateFileVersion || version == kAdvancedStateFileVersion || version == kPreviousStateFileVersion)
         {
-            Logger::warning("PGS: migrating state file v2 -> v3 (guard records kept, advanced policy defaulted)");
+            Logger::warning("PGS: migrating state file v" + std::to_string(version) + " -> v5 (guard records kept)");
         }
         else
         {
@@ -1212,7 +1763,12 @@ void PGS::persistState()
             << guard.restartIntervalSumMs << "\t"
             << guard.restartIntervalCount << "\t"
             << (guard.crashLoop ? "1" : "0") << "\t"
-            << (guard.restartHookJson.empty() ? "-" : base64Encode(guard.restartHookJson)) << "\n";
+            << (guard.restartHookJson.empty() ? "-" : base64Encode(guard.restartHookJson)) << "\t"
+            << (guard.quarantined ? "1" : "0") << "\t"
+            << (guard.lastFailure.empty() ? "-" : base64Encode(guard.lastFailure)) << "\t"
+            << guard.nextRetryMs << "\t"
+            << guard.failureCount << "\t"
+            << (guard.lastFailureCode.empty() ? "-" : guard.lastFailureCode) << "\n";
         const auto pit = policySnapshot.find(guard.guardId);
         if (pit != policySnapshot.end())
         {
@@ -1329,10 +1885,21 @@ bool PGS::restorePersistedGuards()
     for (const auto &persisted : snapshot)
     {
         GuardInfo restored;
+        if (persisted.quarantined)
+        {
+            Logger::warning("PGS: persisted guard remains quarantined during restore, guard-id=" +
+                            std::to_string(persisted.guardId));
+            recordEvent("guard.restore-quarantine",
+                        "guard_id=" + std::to_string(persisted.guardId) +
+                        ";path=" + persisted.path +
+                        ";reason_b64=" + base64Encode(persisted.lastFailure));
+            continue;
+        }
         if (tryAttachPersistedGuard(persisted, restored))
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             m_guards[restored.pid] = restored;
+            clearFailureState(m_guards[restored.pid]);
             auto &policy = m_policyByGuardId[restored.guardId];
             policy.maxRestarts = persisted.maxRestarts;
             auto it = m_persistedGuards.find(restored.guardId);
@@ -1437,8 +2004,12 @@ bool PGS::restorePersistedGuards()
         if (!shouldRestart)
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
-            m_policyByGuardId.erase(persisted.guardId);
-            m_persistedGuards.erase(persisted.guardId);
+            auto it = m_persistedGuards.find(persisted.guardId);
+            if (it != m_persistedGuards.end())
+            {
+                markGuardQuarantined(it->second, "restart.limit", "restart limit reached during restore", currentEpochMs());
+                it->second.lastKnownPid = 0;
+            }
             Logger::warning("PGS: persisted guard restart limit reached during restore, guard-id=" +
                             std::to_string(persisted.guardId) +
                             ", max=" + maxRestartsLabel(persisted.maxRestarts) +
@@ -1452,7 +2023,9 @@ bool PGS::restorePersistedGuards()
         }
 
         GuardInfo restarted;
-        if (restartGuard(desired, restartIndex, restarted))
+        std::string failureCode;
+        std::string failureMessage;
+        if (restartGuard(desired, restartIndex, restarted, failureCode, failureMessage))
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             m_guards[restarted.pid] = restarted;
@@ -1475,11 +2048,16 @@ bool PGS::restorePersistedGuards()
 
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
-            m_policyByGuardId.erase(persisted.guardId);
-            m_persistedGuards.erase(persisted.guardId);
+            auto it = m_persistedGuards.find(persisted.guardId);
+            if (it != m_persistedGuards.end())
+            {
+                markGuardQuarantined(it->second, failureCode.empty() ? "restart.restore_failed" : failureCode,
+                                     failureMessage.empty() ? "restore restart failed" : failureMessage, currentEpochMs());
+                it->second.lastKnownPid = 0;
+            }
         }
         Logger::error("PGS: failed to restore persisted guard guard-id=" + std::to_string(persisted.guardId) +
-                      ", guard removed path=" + persisted.path);
+                      ", guard quarantined path=" + persisted.path);
         recordEvent("guard.restore-failed",
                     "guard_id=" + std::to_string(persisted.guardId) +
                     ";path=" + persisted.path);
@@ -1642,7 +2220,9 @@ void PGS::monitorLoop()
                 continue;
             }
             GuardInfo restarted;
-            if (restartGuard(pit->guard, pit->restartIndex, restarted))
+            std::string failureCode;
+            std::string failureMessage;
+            if (restartGuard(pit->guard, pit->restartIndex, restarted, failureCode, failureMessage))
             {
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
@@ -1652,6 +2232,7 @@ void PGS::monitorLoop()
                         CloseHandle(existingNew->second.handle);
                     }
                     m_guards[restarted.pid] = restarted;
+                    clearFailureState(m_guards[restarted.pid]);
                     assignGuardToJob(m_guards[restarted.pid]);
                     auto &persisted = m_persistedGuards[restarted.guardId];
                     copyGuardToPersisted(restarted, persisted);
@@ -1668,12 +2249,12 @@ void PGS::monitorLoop()
             {
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
-                    m_policyByGuardId.erase(pit->guard.guardId);
-                    m_persistedGuards.erase(pit->guard.guardId);
+                    quarantineGuardLocked(pit->guard, failureCode.empty() ? "restart.deferred_failed" : failureCode,
+                                          failureMessage.empty() ? "deferred restart failed" : failureMessage);
                 }
                 persistState();
-                closeGuardJob(pit->guard.guardId);
-                Logger::error("PGS: restart failed permanently, guard removed path=" + pit->guard.path);
+                closeGuardJob(pit->guard.guardId, true);
+                Logger::error("PGS: restart failed permanently, guard quarantined path=" + pit->guard.path);
                 recordEvent("guard.restart-failed",
                             "guard_id=" + std::to_string(pit->guard.guardId) +
                             ";path=" + pit->guard.path);
@@ -1849,10 +2430,9 @@ void PGS::monitorLoop()
                 }
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
-                    m_policyByGuardId.erase(guard.guardId);
-                    m_persistedGuards.erase(guard.guardId);
+                    quarantineGuardLocked(guard, "restart.limit", "restart limit reached");
                 }
-                closeGuardJob(guard.guardId);
+                closeGuardJob(guard.guardId, true);
                 persistState();
                 recordEvent("guard.restart-limit",
                             "pid=" + std::to_string(guard.pid) +
@@ -1930,7 +2510,9 @@ void PGS::monitorLoop()
             }
 
             GuardInfo newGuard;
-            if (restartGuard(guard, restartIndex, newGuard))
+            std::string failureCode;
+            std::string failureMessage;
+            if (restartGuard(guard, restartIndex, newGuard, failureCode, failureMessage))
             {
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
@@ -1940,6 +2522,7 @@ void PGS::monitorLoop()
                         CloseHandle(existingNew->second.handle);
                     }
                     m_guards[newGuard.pid] = newGuard;
+                    clearFailureState(m_guards[newGuard.pid]);
                     assignGuardToJob(m_guards[newGuard.pid]);
                     auto &persisted = m_persistedGuards[newGuard.guardId];
                     copyGuardToPersisted(newGuard, persisted);
@@ -1956,12 +2539,12 @@ void PGS::monitorLoop()
             {
                 {
                     std::lock_guard<std::mutex> lock(m_guardsMutex);
-                    m_policyByGuardId.erase(guard.guardId);
-                    m_persistedGuards.erase(guard.guardId);
+                    quarantineGuardLocked(guard, failureCode.empty() ? "restart.failed" : failureCode,
+                                          failureMessage.empty() ? "restart failed" : failureMessage);
                 }
                 persistState();
-                closeGuardJob(guard.guardId);
-                Logger::error("PGS: restart failed permanently, guard removed pid=" + std::to_string(guard.pid));
+                closeGuardJob(guard.guardId, true);
+                Logger::error("PGS: restart failed permanently, guard quarantined pid=" + std::to_string(guard.pid));
                 recordEvent("guard.restart-failed",
                             "pid=" + std::to_string(guard.pid) +
                             ";guard_id=" + std::to_string(guard.guardId) +
@@ -1984,6 +2567,255 @@ void PGS::monitorLoop()
     }
 }
 
+void PGS::healthLoop()
+{
+    while (m_running.load())
+    {
+        std::vector<HealthTask> tasks;
+        std::vector<std::pair<std::string, std::string>> events;
+        const std::int64_t nowMs = currentEpochMs();
+        {
+            std::lock_guard<std::mutex> lock(m_guardsMutex);
+            for (auto &entry : m_guards)
+            {
+                GuardInfo &guard = entry.second;
+                if (guard.healthCheckJson.empty())
+                {
+                    if (guard.healthStatus != "disabled")
+                    {
+                        resetHealthRuntimeState(guard);
+                    }
+                    continue;
+                }
+
+                HealthCheckConfig config;
+                std::string configError;
+                if (!parseHealthCheckConfig(guard.healthCheckJson, config, configError))
+                {
+                    const bool firstError = guard.healthStatus != "config-error";
+                    guard.healthStatus = "config-error";
+                    guard.healthLastMessage = configError;
+                    guard.healthLastFailureMs = nowMs;
+                    guard.healthNextCheckMs = nowMs + kDefaultHealthIntervalMs;
+                    if (firstError)
+                    {
+                        events.emplace_back("guard.health-config-error",
+                                            "pid=" + std::to_string(guard.pid) +
+                                            ";guard_id=" + std::to_string(guard.guardId) +
+                                            ";error_b64=" + base64Encode(configError));
+                    }
+                    continue;
+                }
+                if (!config.enabled)
+                {
+                    if (guard.healthStatus != "disabled")
+                    {
+                        resetHealthRuntimeState(guard);
+                    }
+                    continue;
+                }
+
+                const auto groupIt = guard.groupName.empty() ? m_guardGroups.end() : m_guardGroups.find(guard.groupName);
+                const bool paused = guard.paused || (groupIt != m_guardGroups.end() && groupIt->second.paused);
+                if (paused || guard.quarantined || guard.intentional)
+                {
+                    guard.healthStatus = paused ? "paused" : (guard.quarantined ? "quarantined" : "disabled");
+                    guard.healthNextCheckMs = nowMs + config.intervalMs;
+                    continue;
+                }
+                if (guard.healthNextCheckMs > nowMs)
+                {
+                    continue;
+                }
+
+                HANDLE dup = nullptr;
+                if (!duplicateProcessHandle(guard.handle, dup))
+                {
+                    guard.healthStatus = "degraded";
+                    guard.healthLastMessage = "process handle unavailable";
+                    guard.healthLastFailureMs = nowMs;
+                    ++guard.healthFailureCount;
+                    guard.healthNextCheckMs = nowMs + config.intervalMs;
+                    continue;
+                }
+                guard.healthStatus = "checking";
+                guard.healthLastCheckMs = nowMs;
+                guard.healthNextCheckMs = nowMs + config.intervalMs;
+                HealthTask task;
+                task.pid = guard.pid;
+                task.guardId = guard.guardId;
+                task.processHandle = dup;
+                task.path = guard.path;
+                task.configJson = guard.healthCheckJson;
+                task.config = config;
+                tasks.push_back(std::move(task));
+            }
+        }
+
+        for (HealthTask &task : tasks)
+        {
+            std::string message;
+            const bool ok = runHealthProbe(task, task.config, message);
+            const std::int64_t checkedMs = currentEpochMs();
+            bool restartGuardNow = false;
+            bool terminateQuarantinedProcess = false;
+            bool persistAfterAction = false;
+            HANDLE staleGuardHandle = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_guardsMutex);
+                auto it = m_guards.find(task.pid);
+                if (it == m_guards.end() || it->second.guardId != task.guardId || it->second.healthCheckJson != task.configJson)
+                {
+                    CloseHandle(task.processHandle);
+                    task.processHandle = nullptr;
+                    continue;
+                }
+                GuardInfo &guard = it->second;
+                guard.healthLastCheckMs = checkedMs;
+                guard.healthNextCheckMs = checkedMs + task.config.intervalMs;
+                guard.healthLastMessage = message;
+                if (ok)
+                {
+                    const bool recovered = guard.healthStatus == "unhealthy" || guard.healthStatus == "degraded" || guard.healthFailureCount > 0;
+                    guard.healthStatus = "healthy";
+                    guard.healthLastOkMs = checkedMs;
+                    guard.healthFailureCount = 0;
+                    if (recovered)
+                    {
+                        events.emplace_back("guard.health-ok",
+                                            "pid=" + std::to_string(task.pid) +
+                                            ";guard_id=" + std::to_string(task.guardId) +
+                                            ";type=" + task.config.type +
+                                            ";message_b64=" + base64Encode(message));
+                    }
+                }
+                else
+                {
+                    const int previousFailures = guard.healthFailureCount;
+                    guard.healthLastFailureMs = checkedMs;
+                    if (guard.healthFailureCount < std::numeric_limits<int>::max())
+                    {
+                        ++guard.healthFailureCount;
+                    }
+                    const bool thresholdReached = guard.healthFailureCount >= task.config.failures;
+                    guard.healthStatus = thresholdReached ? "unhealthy" : "degraded";
+                    if (thresholdReached && previousFailures < task.config.failures)
+                    {
+                        events.emplace_back("guard.health-unhealthy",
+                                            "pid=" + std::to_string(task.pid) +
+                                            ";guard_id=" + std::to_string(task.guardId) +
+                                            ";type=" + task.config.type +
+                                            ";failures=" + std::to_string(guard.healthFailureCount) +
+                                            ";message_b64=" + base64Encode(message));
+                    }
+                    if (thresholdReached && task.config.action == "restart")
+                    {
+                        guard.healthStatus = "restarting";
+                        restartGuardNow = true;
+                        events.emplace_back("guard.health-restart",
+                                            "pid=" + std::to_string(task.pid) +
+                                            ";guard_id=" + std::to_string(task.guardId) +
+                                            ";type=" + task.config.type +
+                                            ";message_b64=" + base64Encode(message));
+                    }
+                    else if (thresholdReached && task.config.action == "quarantine")
+                    {
+                        GuardInfo archived = guard;
+                        staleGuardHandle = guard.handle;
+                        quarantineGuardLocked(archived, "health.failed", "health-check failed: " + message);
+                        terminateQuarantinedProcess = true;
+                        persistAfterAction = true;
+                    }
+                }
+            }
+
+            if (restartGuardNow)
+            {
+                terminateGuardFamily(task.guardId);
+                TerminateProcess(task.processHandle, 1);
+            }
+            if (terminateQuarantinedProcess)
+            {
+                terminateGuardFamily(task.guardId);
+                TerminateProcess(task.processHandle, 1);
+                closeGuardJob(task.guardId, true);
+                if (staleGuardHandle)
+                {
+                    CloseHandle(staleGuardHandle);
+                }
+            }
+            if (persistAfterAction)
+            {
+                persistState();
+            }
+            if (task.processHandle)
+            {
+                CloseHandle(task.processHandle);
+                task.processHandle = nullptr;
+            }
+        }
+
+        for (const auto &event : events)
+        {
+            recordEvent(event.first, event.second);
+        }
+
+        std::unique_lock<std::mutex> lock(m_healthMutex);
+        m_healthCv.wait_for(lock, std::chrono::milliseconds(500), [this]() {
+            return !m_running.load();
+        });
+    }
+}
+
+void PGS::notifyLoop()
+{
+    while (true)
+    {
+        std::pair<std::string, std::string> event;
+        {
+            std::unique_lock<std::mutex> lock(m_notifyMutex);
+            m_notifyCv.wait(lock, [this]() {
+                return !m_running.load() || !m_notifyQueue.empty();
+            });
+            if (m_notifyQueue.empty())
+            {
+                if (!m_running.load())
+                {
+                    return;
+                }
+                continue;
+            }
+            event = std::move(m_notifyQueue.front());
+            m_notifyQueue.pop();
+        }
+
+        bool notifyLoaded = false;
+        for (const auto &module : m_modules.list())
+        {
+            if (module.name == "notify" && !module.disabled)
+            {
+                notifyLoaded = true;
+                break;
+            }
+        }
+        if (!notifyLoaded)
+        {
+            continue;
+        }
+
+        std::string response;
+        std::string err;
+        const std::string request = "op=event;type=" + event.first + ";detail_b64=" + base64Encode(event.second);
+        const bool called = m_modules.invoke("notify", request, response, err);
+        if (!called || response.rfind("OK", 0) != 0)
+        {
+            recordEvent("notify.delivery-failed",
+                        "type=" + event.first +
+                        ";error_b64=" + base64Encode(called ? response : err));
+        }
+    }
+}
+
 bool PGS::isGuardAlive(const GuardInfo &info) const
 {
     if (!info.handle)
@@ -1993,8 +2825,10 @@ bool PGS::isGuardAlive(const GuardInfo &info) const
     return WaitForSingleObject(info.handle, 0) == WAIT_TIMEOUT;
 }
 
-bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard)
+bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage)
 {
+    failureCode.clear();
+    failureMessage.clear();
     // TOCTOU defense: if a file hash was recorded at registration time,
     // recompute it now and refuse to relaunch if the image on disk has
     // changed. Without this, a binary swapped between crash and restart
@@ -2005,12 +2839,12 @@ bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGu
         if (!computeFileHash(info.path, currentHash))
         {
             Logger::error("PGS: restart refused, failed to recompute file hash for path=" + info.path);
-            return false;
+            return setRestartFailure(failureCode, failureMessage, "restart.hash_unreadable", "failed to recompute file hash for path=" + info.path);
         }
         if (!constantTimeEquals(toLowerAscii(currentHash), toLowerAscii(info.fileHash)))
         {
             Logger::error("PGS: restart refused, file hash mismatch (image changed since registration) path=" + info.path);
-            return false;
+            return setRestartFailure(failureCode, failureMessage, "restart.hash_mismatch", "file hash mismatch for path=" + info.path);
         }
     }
     // v3: WindowsApps (UWP/Store) cannot be (re)launched with CreateProcessW*
@@ -2019,14 +2853,14 @@ bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGu
     // app, returning the new pid/handle).
     if (info.appKind == AppKind::WinApp && !info.aumid.empty())
     {
-        return restartAppGuard(info, restartIndex, newGuard);
+        return restartAppGuard(info, restartIndex, newGuard, failureCode, failureMessage);
     }
 
     // Restart tries to preserve user experience first. We prefer re-launching
     // inside the original session so GUI apps come back on the right desktop.
     // If that fails, we still fall back to a normal CreateProcessW restart so
     // service-side recovery remains possible for console/background workers.
-    if (restartGuardInSession(info, restartIndex, newGuard))
+    if (restartGuardInSession(info, restartIndex, newGuard, failureCode, failureMessage))
     {
         return true;
     }
@@ -2039,7 +2873,7 @@ bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGu
     if (exeW.empty())
     {
         Logger::error("PGS: restart failed, utf8ToWide path conversion failed for path=" + info.path);
-        return false;
+        return setRestartFailure(failureCode, failureMessage, "restart.path_encoding", "path conversion failed for path=" + info.path);
     }
     std::wstring commandLine = quoteArgW(exeW);
     if (!info.restartArgs.empty())
@@ -2070,8 +2904,9 @@ bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGu
 
     if (!ok)
     {
-        Logger::error("PGS: restart failed for path=" + info.path + ", error=" + std::to_string(GetLastError()));
-        return false;
+        const DWORD err = GetLastError();
+        Logger::error("PGS: restart failed for path=" + info.path + ", error=" + std::to_string(err));
+        return setRestartFailure(failureCode, failureMessage, "restart.create_process", "CreateProcessW failed for path=" + info.path + ", error=" + std::to_string(err));
     }
 
     DWORD targetSession = 0xFFFFFFFF;
@@ -2090,7 +2925,7 @@ bool PGS::restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGu
     return true;
 }
 
-bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardInfo &newGuard)
+bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage)
 {
     // Session-aware restart path:
     // - obtain a user token for the original session when possible
@@ -2107,7 +2942,7 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
         const DWORD activeSession = WTSGetActiveConsoleSessionId();
         if (!queryUserTokenForSession(activeSession, userToken))
         {
-            return false;
+            return setRestartFailure(failureCode, failureMessage, "restart.session_token", "failed to query user token for session=" + std::to_string(targetSessionId) + " or active session=" + std::to_string(activeSession));
         }
         targetSessionId = activeSession;
     }
@@ -2123,29 +2958,32 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
     CloseHandle(userToken);
     if (!dupOk)
     {
+        const DWORD err = GetLastError();
         Logger::warning("PGS: DuplicateTokenEx failed for restart session=" +
                         std::to_string(targetSessionId) +
-                        ", error=" + std::to_string(GetLastError()));
-        return false;
+                        ", error=" + std::to_string(err));
+        return setRestartFailure(failureCode, failureMessage, "restart.duplicate_token", "DuplicateTokenEx failed for restart session=" + std::to_string(targetSessionId) + ", error=" + std::to_string(err));
     }
 
     if (!SetTokenInformation(primaryToken, TokenSessionId, &targetSessionId, sizeof(targetSessionId)))
     {
+        const DWORD err = GetLastError();
         Logger::warning("PGS: SetTokenInformation(TokenSessionId) failed for restart session=" +
                         std::to_string(targetSessionId) +
-                        ", error=" + std::to_string(GetLastError()));
+                        ", error=" + std::to_string(err));
         CloseHandle(primaryToken);
-        return false;
+        return setRestartFailure(failureCode, failureMessage, "restart.session_token", "SetTokenInformation(TokenSessionId) failed for restart session=" + std::to_string(targetSessionId) + ", error=" + std::to_string(err));
     }
 
     LPVOID envBlock = nullptr;
     if (!CreateEnvironmentBlock(&envBlock, primaryToken, FALSE))
     {
+        const DWORD err = GetLastError();
         Logger::warning("PGS: CreateEnvironmentBlock failed for restart session=" +
                         std::to_string(targetSessionId) +
-                        ", error=" + std::to_string(GetLastError()));
+                        ", error=" + std::to_string(err));
         CloseHandle(primaryToken);
-        return false;
+        return setRestartFailure(failureCode, failureMessage, "restart.environment", "CreateEnvironmentBlock failed for restart session=" + std::to_string(targetSessionId) + ", error=" + std::to_string(err));
     }
 
     STARTUPINFOW si{};
@@ -2161,7 +2999,7 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
             DestroyEnvironmentBlock(envBlock);
         }
         CloseHandle(primaryToken);
-        return false;
+        return setRestartFailure(failureCode, failureMessage, "restart.path_encoding", "path conversion failed for path=" + info.path);
     }
     std::wstring commandLine = quoteArgW(exeW);
     if (!info.restartArgs.empty())
@@ -2190,6 +3028,7 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
         workDirW.empty() ? nullptr : workDirW.c_str(),
         &si,
         &pi);
+    const DWORD createErr = ok ? ERROR_SUCCESS : GetLastError();
 
     if (envBlock)
     {
@@ -2201,8 +3040,8 @@ bool PGS::restartGuardInSession(const GuardInfo &info, int restartIndex, GuardIn
     {
         Logger::warning("PGS: CreateProcessAsUserW failed for restart path=" + info.path +
                         ", session=" + std::to_string(targetSessionId) +
-                        ", error=" + std::to_string(GetLastError()));
-        return false;
+                        ", error=" + std::to_string(createErr));
+        return setRestartFailure(failureCode, failureMessage, "restart.create_process_as_user", "CreateProcessAsUserW failed for restart path=" + info.path + ", session=" + std::to_string(targetSessionId) + ", error=" + std::to_string(createErr));
     }
 
     newGuard = info;
@@ -2445,7 +3284,11 @@ int PGS::callJsonThunk(void *context, const char *requestJson, char *responseJso
     {
         return 1;
     }
-    std::string response = self->handleModuleCommand(std::string("invoke-json ") + (requestJson ? requestJson : ""));
+    const std::string request = requestJson ? requestJson : "";
+    const std::string method = jsonStringValue(request, "method");
+    const std::string response = (method.rfind("pgs.", 0) == 0)
+        ? self->handleCoreJsonRpc(request)
+        : self->handleModuleCommand(std::string("invoke-json ") + request);
     size_t n = response.size();
     if (n >= responseSize)
     {
@@ -2859,7 +3702,7 @@ bool PGS::isGuardHung(const GuardInfo &info) const
     return ctx.hung;
 }
 
-bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard)
+bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage)
 {
     // Activate a WindowsApps (UWP/Store) guard via its AUMID. The primary path is
     // IApplicationActivationManager::ActivateApplication (the documented Start-menu
@@ -2871,7 +3714,7 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
     if (info.aumid.empty())
     {
         Logger::error("PGS: winapp restart refused, missing AUMID, path=" + info.path);
-        return false;
+        return setRestartFailure(failureCode, failureMessage, "winapp.missing_aumid", "WindowsApps restart requires AUMID for path=" + info.path);
     }
 
     HANDLE userToken = nullptr;
@@ -2903,19 +3746,20 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
                                 std::to_string(GetLastError()));
             }
         }
-        if (!userToken && !queryUserTokenForSession(activeSession, userToken))
+    if (!userToken && !queryUserTokenForSession(activeSession, userToken))
         {
             Logger::error("PGS: winapp restart failed, no user token for any session, aumid=" + info.aumid);
-            return false;
+            return setRestartFailure(failureCode, failureMessage, "winapp.no_user_token", "no user token for WindowsApps restart, aumid=" + info.aumid);
         }
         targetSessionId = activeSession;
     }
     HANDLE primaryToken = nullptr;
     if (!DuplicateTokenEx(userToken, TOKEN_ALL_ACCESS, nullptr, SecurityImpersonation, TokenImpersonation, &primaryToken))
     {
+        const DWORD err = GetLastError();
         CloseHandle(userToken);
-        Logger::error("PGS: winapp restart failed, DuplicateTokenEx error=" + std::to_string(GetLastError()));
-        return false;
+        Logger::error("PGS: winapp restart failed, DuplicateTokenEx error=" + std::to_string(err));
+        return setRestartFailure(failureCode, failureMessage, "winapp.duplicate_token", "DuplicateTokenEx failed for WindowsApps restart, error=" + std::to_string(err));
     }
     CloseHandle(userToken);
     // Impersonation-token form: ActivateApplication runs under the thread token;
@@ -2936,9 +3780,10 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
 
     if (!SetThreadToken(nullptr, primaryToken))
     {
+        const DWORD err = GetLastError();
         CloseHandle(primaryToken);
-        Logger::error("PGS: winapp restart failed, SetThreadToken error=" + std::to_string(GetLastError()));
-        return false;
+        Logger::error("PGS: winapp restart failed, SetThreadToken error=" + std::to_string(err));
+        return setRestartFailure(failureCode, failureMessage, "winapp.set_thread_token", "SetThreadToken failed for WindowsApps restart, error=" + std::to_string(err));
     }
 
     HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -3014,13 +3859,14 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
 
     if (!ok || !procHandle || activatedPid == 0)
     {
+        const DWORD err = GetLastError();
         Logger::error("PGS: winapp restart failed, aumid=" + info.aumid +
-                      ", error=" + std::to_string(GetLastError()));
+                      ", error=" + std::to_string(err));
         if (procHandle)
         {
             CloseHandle(procHandle);
         }
-        return false;
+        return setRestartFailure(failureCode, failureMessage, "winapp.activate_failed", "WindowsApps activation failed, aumid=" + info.aumid + ", error=" + std::to_string(err));
     }
 
     DWORD sessionId = 0xFFFFFFFF;

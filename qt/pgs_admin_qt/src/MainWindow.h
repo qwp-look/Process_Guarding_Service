@@ -7,6 +7,7 @@
 class QCheckBox;
 class QComboBox;
 class QLabel;
+class QGroupBox;
 class QLineEdit;
 class QProcess;
 class QPushButton;
@@ -29,14 +30,21 @@ public:
 private:
     void runBlessCommand(const QStringList &args);
     void runServiceCommand(const QStringList &args);
+    void runDoctorCommand(const QStringList &args, bool parseJson);
+    void runGuardTableAction(const QString &action);
+    void runHealthCheckAction(const QString &action);
     void startServiceResetSequence();
     void runNextServiceSequenceStep();
     QString blessToolPath() const;
     QString serviceToolPath() const;
     void appendBlessOutput(const QString &text);
     void appendServiceOutput(const QString &text);
+    void appendDoctorOutput(const QString &text);
     void runTableRefresh(bool silentIfBusy = false);
     void populateGuardTableFromJson(const QString &jsonText, const QString &stderrText);
+    void populateDoctorTableFromJson(const QString &jsonText, const QString &stderrText);
+    QString selectedGuardId() const;
+    QString selectedGuardPid() const;
     void setupUi();
     QString pidArg() const;
     void appendAdvancedGuardArgs(QStringList &args) const;
@@ -85,9 +93,12 @@ private:
     QTextEdit *m_blessOutput = nullptr;
     QTextEdit *m_serviceOutput = nullptr;
     QTableWidget *m_guardTable = nullptr;
+    QTableWidget *m_doctorTable = nullptr;
     QProcess *m_blessProcess = nullptr;
     QProcess *m_serviceProcess = nullptr;
     QProcess *m_tableProcess = nullptr;
+    QProcess *m_doctorProcess = nullptr;
+    QProcess *m_guardActionProcess = nullptr;
 
     QStringList m_serviceSequenceCommands;
     bool m_serviceSequenceRunning = false;
@@ -136,6 +147,25 @@ private:
     QPushButton *m_btnServiceClear = nullptr;
     QPushButton *m_btnTableRefresh = nullptr;
     QPushButton *m_btnTableClear = nullptr;
+    QLineEdit *m_guardActionIdEdit = nullptr;
+    QLabel *m_labelGuardActionId = nullptr;
+    QPushButton *m_btnGuardRetry = nullptr;
+    QPushButton *m_btnGuardClearQuarantine = nullptr;
+    QGroupBox *m_healthPolicyBox = nullptr;
+    QLabel *m_labelHealthPid = nullptr;
+    QLineEdit *m_healthPidEdit = nullptr;
+    QCheckBox *m_healthEnabledCheck = nullptr;
+    QComboBox *m_healthTypeCombo = nullptr;
+    QLineEdit *m_healthHostEdit = nullptr;
+    QLineEdit *m_healthPortEdit = nullptr;
+    QLineEdit *m_healthUrlEdit = nullptr;
+    QLineEdit *m_healthIntervalEdit = nullptr;
+    QLineEdit *m_healthTimeoutEdit = nullptr;
+    QLineEdit *m_healthFailuresEdit = nullptr;
+    QComboBox *m_healthActionCombo = nullptr;
+    QPushButton *m_btnHealthSet = nullptr;
+    QPushButton *m_btnHealthGet = nullptr;
+    QPushButton *m_btnHealthClear = nullptr;
 
     bool m_blessBusyNoticeShown = false;
     bool m_serviceBusyNoticeShown = false;
@@ -145,7 +175,15 @@ private:
     bool m_lastTableRefreshWasAuto = false;
     QString m_tableStdoutBuffer;
     QString m_tableStderrBuffer;
+    QString m_doctorStdoutBuffer;
+    QString m_doctorStderrBuffer;
+    QString m_guardActionStdoutBuffer;
+    QString m_guardActionStderrBuffer;
+    bool m_doctorParseJson = false;
+    bool m_doctorBusyNoticeShown = false;
+    bool m_guardActionBusyNoticeShown = false;
     QTimer *m_tableRefreshTimer = nullptr;
+
     // module management tab
     QTabWidget *m_moduleSubTabs = nullptr;
     QLineEdit *m_moduleToolPathEdit = nullptr;
@@ -156,6 +194,21 @@ private:
     QLabel *m_labelModuleToolPath = nullptr;
     QLabel *m_labelModuleToken = nullptr;
     QLabel *m_labelModuleDir = nullptr;
+
+    // doctor tab
+    QLineEdit *m_doctorToolPathEdit = nullptr;
+    QLineEdit *m_doctorTokenEdit = nullptr;
+    QLineEdit *m_doctorModulesDirEdit = nullptr;
+    QLabel *m_titleDoctor = nullptr;
+    QLabel *m_labelDoctorToolPath = nullptr;
+    QLabel *m_labelDoctorToken = nullptr;
+    QLabel *m_labelDoctorModulesDir = nullptr;
+    QPushButton *m_btnDoctorRun = nullptr;
+    QPushButton *m_btnDoctorRepairState = nullptr;
+    QPushButton *m_btnDoctorRepairModulesAcl = nullptr;
+    QPushButton *m_btnDoctorRepairModulesLock = nullptr;
+    QPushButton *m_btnDoctorClear = nullptr;
+    QTextEdit *m_doctorOutput = nullptr;
 };
 
 #endif // MAINWINDOW_H

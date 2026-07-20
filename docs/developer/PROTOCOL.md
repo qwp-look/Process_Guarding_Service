@@ -33,6 +33,24 @@ CLI 用户通常通过 `pgs_bless.exe` 间接调用协议：
 - `health ...`
 - `profile ...`
 - `report ...`
+- `guard retry --id <guard-id>`
+- `guard clear-quarantine --id <guard-id>`
+- `notify status|config`
+- `metrics summary|json|prometheus`
+- `backup status|snapshot [--artifact] [--max-bytes N]`
+- `eventlog status|recent [--limit N] [--source <name>]`
+- `dump status|collect --pid <pid> [--type normal|with-data] [--confirm]`
+- `service-guard status|query|start|stop|ensure --name <service> [--state running|stopped] [--confirm]`
+- `file-watch status|add|list|check|remove --path <file> [--id <id>] [--action event|none]`
+- `policy-template status|set|list|remove|apply --name <template> [--pid <pid>]`
+- `remote-agent status|heartbeat|guards`
+- `update status|verify --path <release-manifest.json>`
+- `script-runner status|config|add|list|run [--enable|--disable] [--confirm]`
+- `module op-status <operation-id>`
+- `module artifact get <artifact-id> [--json|--out <path>]`
+- `module artifact cleanup [--expired|--all] [--verify]`
+- `module artifact status [--verify] [--json]`
+- `module artifact policy [--ttl-ms N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]`
 
 `bless` / `unbless` 是协议层别名，兼容旧 `register` / `unregister` 语义。
 
@@ -45,10 +63,12 @@ intentional <pid>
 set-policy <pid>|<max>|<restartArgsB64>|<restartWindow>|<restartDelay>|<backoff>|<hangTimeout>|<killOnExit>|<appKind>|<aumidB64>
 set-token <oldTokenB64>|<newTokenB64>
 module call <name> <request>
+guard retry <guard-id>
+guard clear-quarantine <guard-id>
 events list [limit]
 ```
 
-CLI 的 `bless`、`bless-start`、`policy` 会负责生成这些 wire payload。`bless-start` 还会先创建本地进程，待服务注册成功后再恢复主线程。
+CLI 的 `bless`、`bless-start`、`policy` 会负责生成这些 wire payload。普通 Win32 的 `bless-start` 会先创建本地进程，待服务注册成功后再恢复主线程；WindowsApps 的 `bless-start --winapp` 不走 `CreateProcessW`，而是通过 AUMID activation 拿到 PID 后注册。
 
 ## 高级策略字段
 
@@ -73,6 +93,18 @@ CLI 的 `bless`、`bless-start`、`policy` 会负责生成这些 wire payload。
 - `kill-on-exit=0`：PGS 退出时不连杀进程族。
 - `appKind=win32`：普通 Win32 程序。
 
+## Health Check
+
+`health-check set|get|clear --pid <pid> [--config-json <json>]` 现在由核心执行，不只是存储。支持的最小 schema 示例：
+
+```json
+{"type":"process","interval_ms":30000,"timeout_ms":2000,"failures":3,"action":"event"}
+{"type":"tcp","host":"127.0.0.1","port":8080,"interval_sec":10,"timeout_ms":1000,"failures":2,"action":"restart"}
+{"type":"http","url":"http://127.0.0.1:8080/health","min_status":200,"max_status":399,"action":"quarantine"}
+```
+
+`action` 可为 `event`、`none`、`restart`、`quarantine`。`alert`/`notify` 会归一为 `event`，由 Windows 本机通知模块消费事件，不在 health-check 内直接接远程通知渠道。探针在独立 health worker 线程执行，超时上限由配置裁剪到安全范围内。
+
 ## JSON 输出
 
 `list --json` 和 `get --json` 面向 UI/脚本，包含 v3 字段：
@@ -84,12 +116,39 @@ CLI 的 `bless`、`bless-start`、`policy` 会负责生成这些 wire payload。
 - `backoff`
 - `hang_timeout`
 - `kill_on_exit`
+- `health_status`
+- `health_last_message`
+- `health_last_check`
+- `health_last_ok`
+- `health_last_failure`
+- `health_next_check`
+- `health_failure_count`
+- `guard_id`
+- `status` (`active` / `paused` / `missing` / `quarantined`)
+- `quarantined`
+- `last_failure`
+- `last_failure_code`
+- `next_retry_ms`
+- `failure_count`
 
-新增字段时要同步 `tools/protocol_contract.ps1` 和 UI 解析。
+新增字段时要同步 `tools/protocol_contract.ps1`、`tools/smoke_test_pgs.sh` 和 UI 解析。
+
+## Guard 隔离态
+
+当自动重启失败、延迟重启失败、restore 重启失败或重启窗口耗尽时，服务会把持久 guard 标为 `quarantined`，而不是直接从归档删除。`list` 会继续返回这类记录，通常 `PID=0`、`STATUS=quarantined`、`QUARANTINED=1`，并带失败原因和失败次数。
+
+人工处理入口：
+
+```text
+guard retry <guard-id>
+guard clear-quarantine <guard-id>
+```
+
+CLI 对应：`pgs_bless.exe guard retry --id <guard-id>` 和 `pgs_bless.exe guard clear-quarantine --id <guard-id>`。`retry` 成功后清除失败状态并恢复 active guard；失败会更新隔离失败次数。`clear-quarantine` 表示管理员确认退休该归档。主动 `intentional` 退出仍然清理 guard，不进入隔离。
 
 ## WindowsApps 当前协议边界
 
-`--winapp` 必须携带显式 AUMID。`bless-start --winapp` 当前由 CLI 拒绝。自动 AUMID 推导是未完成项。
+`--winapp` 必须最终得到 AUMID。CLI 支持显式 `--aumid`，也会在给出 WindowsApps exe 路径时尝试从上层 `AppxManifest.xml` 推导 AUMID。`bless-start --winapp --aumid <id>` 会通过 Windows AUMID activation 启动应用并注册返回的 PID；若 activation 失败、无法查询进程路径，或激活出的进程与请求 AUMID 不匹配，会拒绝注册。真实 Store/UWP 环境仍需 `tools/verify_winapp.ps1` 做 E2E 验证。
 
 ## 模块 action
 
@@ -99,6 +158,10 @@ CLI 的 `bless`、`bless-start`、`policy` 会负责生成这些 wire payload。
 module call <name> <request>
 ```
 
+OperationStore / ArtifactStore 已由服务端提供：模块可通过 ABI v3 `call_json` 调 `pgs.operation.create/get/update/finish/fail` 和 `pgs.artifact.put/get_meta`；CLI 可用 `module op-status <op_id> --json` 查询操作，用 `module artifact get <art_id> --json` 查元数据，用 `module artifact get <art_id> --out <path>` 分块下载。下载完成后 CLI 会按元数据核对 size 和 SHA-256；服务端 chunk 返回前也会重新计算落盘 size/SHA-256，不匹配时返回 `ERR artifact content hash mismatch`。`module artifact cleanup [--expired|--all] [--verify]` 可清理过期/全部 artifact，并可校验后移除损坏内容；`module artifact status [--verify] --json` 返回 store health 和有效策略；`module artifact policy --ttl-ms N --auto-cleanup --verify-on-status --json` 读取或写入保留策略。`pgs_bless doctor --json` 也包含 `artifact_store` 检查。
+
 高层 CLI 会提供便利命令，如 `sched`、`health`、`profile`、`report`。模块 capability 目前主要用于展示和后续策略规划，尚未作为完整运行时授权边界。
+
+当前 bundled 模块便利命令还包括 `notify`、`metrics`、`backup`、`eventlog`、`dump`、`service-guard`、`file-watch`、`policy-template`、`remote-agent`、`update`、`script-runner`。其中 `notify` 只使用 Windows 本机 Event Log/可选弹窗；`metrics json/prometheus` 和 `backup snapshot` 会在 CLI 端解码 base64 文本，便于脚本直接消费；`eventlog --source` 会拒绝分号、控制字符和超长值。`dump collect`、服务 mutation、`script-runner run` 需要 `--confirm`；`script-runner` 默认禁用；`update` 只校验本地 release manifest，不下载或安装。
 
 Scheduler 的 action 是服务端 wire command，不是 CLI 命令。允许的首词当前包括 `bless`/`register`、`unbless`/`unregister`、`policy`/`set-policy`、`intentional`、`list`、`get`、`ping`；`token-set`、服务安装卸载、模块 load/unload、模块 call、PPL 等不会被 Scheduler 执行。

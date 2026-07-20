@@ -12,7 +12,7 @@ REM  PATH). Do not publish an existing release/ tree without rerunning this
 REM  script; it is rebuilt from current build outputs each time:
 REM    - pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe + examples
 REM    - pgs_admin_web.exe + pgs_cluster_web.exe (browser consoles)
-REM    - modules/{ppl,sched,health,profile,report}/ per-folder module payloads
+REM    - modules/{ppl,sched,health,profile,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy,remote_agent,update,script_runner}/ payloads
 REM    - Qt6 DLLs + plugins via windeployqt6
 REM    - MinGW third-party runtime DLLs that Qt6Core/Qt6Gui transitively depend
 REM      on (windeployqt does NOT deploy these MSYS2 libs; without them the Qt
@@ -76,7 +76,7 @@ if exist "%RELEASE%" (
         exit /b 1
     )
 )
-mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
+mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\modules\notify" "%RELEASE%\modules\metrics" "%RELEASE%\modules\backup" "%RELEASE%\modules\eventlog" "%RELEASE%\modules\dump" "%RELEASE%\modules\service_guard" "%RELEASE%\modules\file_watch" "%RELEASE%\modules\policy" "%RELEASE%\modules\remote_agent" "%RELEASE%\modules\update" "%RELEASE%\modules\script_runner" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_bless.exe"       "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_admin_qt\pgs_admin_qt.exe" "%RELEASE%\" >nul
@@ -110,6 +110,28 @@ copy /Y "%BUILD%\modules\report\pgs_report_module.dll" "%RELEASE%\modules\report
 copy /Y "%BUILD%\modules\report\module.html"           "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\report\module.manifest"       "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\report\module.manifest.json" "%RELEASE%\modules\report\" >nul
+copy /Y "%BUILD%\modules\notify\pgs_notify_module.dll" "%RELEASE%\modules\notify\" >nul
+copy /Y "%BUILD%\modules\notify\module.html"           "%RELEASE%\modules\notify\" >nul
+copy /Y "%BUILD%\modules\notify\module.manifest"       "%RELEASE%\modules\notify\" >nul
+copy /Y "%BUILD%\modules\notify\module.manifest.json" "%RELEASE%\modules\notify\" >nul
+copy /Y "%BUILD%\modules\metrics\pgs_metrics_module.dll" "%RELEASE%\modules\metrics\" >nul
+copy /Y "%BUILD%\modules\metrics\module.html"           "%RELEASE%\modules\metrics\" >nul
+copy /Y "%BUILD%\modules\metrics\module.manifest"       "%RELEASE%\modules\metrics\" >nul
+copy /Y "%BUILD%\modules\metrics\module.manifest.json" "%RELEASE%\modules\metrics\" >nul
+copy /Y "%BUILD%\modules\backup\pgs_backup_module.dll" "%RELEASE%\modules\backup\" >nul
+copy /Y "%BUILD%\modules\backup\module.html"           "%RELEASE%\modules\backup\" >nul
+copy /Y "%BUILD%\modules\backup\module.manifest"       "%RELEASE%\modules\backup\" >nul
+copy /Y "%BUILD%\modules\backup\module.manifest.json" "%RELEASE%\modules\backup\" >nul
+copy /Y "%BUILD%\modules\eventlog\pgs_eventlog_module.dll" "%RELEASE%\modules\eventlog\" >nul
+copy /Y "%BUILD%\modules\eventlog\module.html"           "%RELEASE%\modules\eventlog\" >nul
+copy /Y "%BUILD%\modules\eventlog\module.manifest"       "%RELEASE%\modules\eventlog\" >nul
+copy /Y "%BUILD%\modules\eventlog\module.manifest.json" "%RELEASE%\modules\eventlog\" >nul
+for %%M in (dump service_guard file_watch policy remote_agent update script_runner) do (
+  copy /Y "%BUILD%\modules\%%M\pgs_%%M_module.dll" "%RELEASE%\modules\%%M\" >nul
+  copy /Y "%BUILD%\modules\%%M\module.html" "%RELEASE%\modules\%%M\" >nul
+  copy /Y "%BUILD%\modules\%%M\module.manifest" "%RELEASE%\modules\%%M\" >nul
+  copy /Y "%BUILD%\modules\%%M\module.manifest.json" "%RELEASE%\modules\%%M\" >nul
+)
 copy /Y "%BUILD%\modules\modules.allow"        "%RELEASE%\modules\" >nul
 copy /Y "%BUILD%\modules\modules.lock"         "%RELEASE%\modules\" >nul
 copy /Y "module_managers\official\manager.manifest.json" "%RELEASE%\module_managers\official\" >nul
@@ -188,6 +210,50 @@ for %%F in (
   modules\report\module.html
   modules\report\module.manifest
   modules\report\module.manifest.json
+  modules\notify\pgs_notify_module.dll
+  modules\notify\module.html
+  modules\notify\module.manifest
+  modules\notify\module.manifest.json
+  modules\metrics\pgs_metrics_module.dll
+  modules\metrics\module.html
+  modules\metrics\module.manifest
+  modules\metrics\module.manifest.json
+  modules\backup\pgs_backup_module.dll
+  modules\backup\module.html
+  modules\backup\module.manifest
+  modules\backup\module.manifest.json
+  modules\eventlog\pgs_eventlog_module.dll
+  modules\eventlog\module.html
+  modules\eventlog\module.manifest
+  modules\eventlog\module.manifest.json
+  modules\dump\pgs_dump_module.dll
+  modules\dump\module.html
+  modules\dump\module.manifest
+  modules\dump\module.manifest.json
+  modules\service_guard\pgs_service_guard_module.dll
+  modules\service_guard\module.html
+  modules\service_guard\module.manifest
+  modules\service_guard\module.manifest.json
+  modules\file_watch\pgs_file_watch_module.dll
+  modules\file_watch\module.html
+  modules\file_watch\module.manifest
+  modules\file_watch\module.manifest.json
+  modules\policy\pgs_policy_module.dll
+  modules\policy\module.html
+  modules\policy\module.manifest
+  modules\policy\module.manifest.json
+  modules\remote_agent\pgs_remote_agent_module.dll
+  modules\remote_agent\module.html
+  modules\remote_agent\module.manifest
+  modules\remote_agent\module.manifest.json
+  modules\update\pgs_update_module.dll
+  modules\update\module.html
+  modules\update\module.manifest
+  modules\update\module.manifest.json
+  modules\script_runner\pgs_script_runner_module.dll
+  modules\script_runner\module.html
+  modules\script_runner\module.manifest
+  modules\script_runner\module.manifest.json
   module_managers\official\manager.manifest.json
   modules_staging\README.md
   examples\smoke_worker.exe
@@ -235,7 +301,7 @@ echo [7/7] Done. Release layout:
 echo   %RELEASE%\pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe / pgs_admin_web.exe / pgs_cluster_web.exe
 echo   %RELEASE%\modules\ppl\{pgs_ppl_module.dll, Sirius.sys, module.html, module.manifest}
 echo   %RELEASE%\modules\sched\{pgs_sched_module.dll, module.html, module.manifest}
-echo   %RELEASE%\modules\{health,profile,report}\{module dll, module.html, module.manifest}
+echo   %RELEASE%\modules\{health,profile,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy,remote_agent,update,script_runner}\{module dll, module.html, module.manifest}
 echo   Qt6 + MinGW runtime DLLs (self-contained)
 
 popd

@@ -4,7 +4,7 @@
 
 ## 使用安装包
 
-1. 从 GitHub Releases 下载最新 beta，管理员身份运行 `pgs_setup_0.1.0-beta.1.exe`。
+1. 从 GitHub Releases 下载最新 beta，管理员身份运行 `pgs_setup_<version>.exe`（实际版本以 release 页面为准）。
 2. 按向导安装，推荐勾选“安装并启动 PGS 服务”。
 3. 安装完成后启动 **PGS 管理端（Qt）**。
 4. 如果是首次安装，打开 `C:\ProgramData\ProcessGuard\state\pgs_initial_token.txt`，复制里面的 token。
@@ -15,7 +15,7 @@
 
 ## 使用便携包
 
-解压 `pgs_release_0.1.0-beta.1.zip` 后，在管理员终端进入解压目录：
+解压 `pgs_release_<version>.zip` 后，在管理员终端进入解压目录：
 
 ```bat
 pgs_service.exe install

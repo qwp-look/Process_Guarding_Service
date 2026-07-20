@@ -1,13 +1,13 @@
 {
   "schema": "https://pgs.local/schemas/module.manifest.schema.json",
   "name": "report",
-  "version": "1.0.0",
-  "abi": 2,
-  "summary": "Base64 service snapshots and backup reports.",
+  "version": "1.1.0",
+  "abi": 3,
+  "summary": "Base64 service snapshots, backups, and artifact-backed reports.",
   "risk": "low",
-  "capabilities": ["report.snapshot", "report.backup", "event.read", "guard.list", "health.stats"],
+  "capabilities": ["report.snapshot", "report.backup", "event.read", "guard.list", "health.stats", "pgs.operation.create", "pgs.operation.update", "pgs.operation.finish", "pgs.operation.fail", "pgs.artifact.put", "pgs.artifact.get_meta"],
   "methods": [
     {"name": "report.snapshot", "risk": "low", "sync": true, "required_capabilities": ["report.snapshot", "health.stats", "guard.list", "event.read"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
-    {"name": "report.backup", "risk": "low", "sync": true, "required_capabilities": ["report.backup", "health.stats", "guard.list", "event.read"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+    {"name": "report.backup", "risk": "low", "sync": true, "required_capabilities": ["report.backup", "health.stats", "guard.list", "event.read", "pgs.operation.create", "pgs.operation.finish", "pgs.artifact.put"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
   ]
 }

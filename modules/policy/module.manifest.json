@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "policy",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Named guard policy templates.",
+  "risk": "medium",
+  "capabilities": ["policy.template", "guard.policy"],
+  "methods": [
+    {"name": "policy.set", "risk": "medium", "sync": true, "required_capabilities": ["policy.template"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "policy.apply", "risk": "medium", "sync": true, "required_capabilities": ["policy.template", "guard.policy"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "dump",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Explicit local minidump collection.",
+  "risk": "high",
+  "capabilities": ["dump.collect", "pgs.operation.create", "pgs.operation.finish", "pgs.operation.fail", "pgs.artifact.put"],
+  "methods": [
+    {"name": "dump.status", "risk": "low", "sync": true, "required_capabilities": ["dump.collect"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "dump.collect", "risk": "high", "sync": true, "required_capabilities": ["dump.collect", "pgs.operation.create", "pgs.operation.finish", "pgs.artifact.put"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

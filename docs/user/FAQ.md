@@ -24,9 +24,9 @@ PGS 需要作为 Windows 服务运行，并跨会话重启用户程序。管理�
 
 默认不要开。PPL 模块会涉及内核驱动，只有明确需要并理解风险时才启用。普通守护进程不需要 PPL。
 
-## WindowsApps 为什么不能直接启动并守护？
+## WindowsApps 怎么守护？
 
-Store/UWP 应用的启动方式和普通 exe 不一样。当前版本支持先启动后按 PID + AUMID 注册，自动 AUMID 推导和直接 `bless-start --winapp` 还没完成。
+Store/UWP 应用需要 AUMID。可以先启动应用后用 `--pid --winapp --aumid` 注册，也可以用 `bless-start --winapp --aumid <id>` 直接激活并注册。给出 WindowsApps exe 路径时，CLI 会尽量从 `AppxManifest.xml` 推导 AUMID；真实 Store/UWP 环境建议跑 `tools/verify_winapp.ps1` 验证。
 
 ## Web 可以直接开到公网吗？
 

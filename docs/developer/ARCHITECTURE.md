@@ -24,7 +24,7 @@ PGS 把守护对象当成“逻辑 guard”，而不是单个 PID。进程重启
 - 高级策略字段。
 - 模块 permissive 状态。
 
-状态文件版本当前为 v3。旧版本加载时会补默认字段。
+状态文件版本当前为 v4。旧版本加载时会补默认字段；v4 在 v3 高级策略/WindowsApps 字段基础上增加持久隔离字段。
 
 默认持久化文件位于：
 
@@ -32,7 +32,7 @@ PGS 把守护对象当成“逻辑 guard”，而不是单个 PID。进程重启
 C:\ProgramData\ProcessGuard\state\pgs_guard_state.db
 ```
 
-文件是 tab 分隔文本，主要记录 `VERSION`、`NEXT_GUARD_ID`、`AUTH_TOKEN_HASH`、`MODULES_PERMISSIVE`、`GUARD`、`RESTART_COUNT`、`RESTART`。路径、restart args 和 AUMID 使用 base64，便于保留空格和非 ASCII 内容。
+文件是 tab 分隔文本，主要记录 `VERSION`、`NEXT_GUARD_ID`、`AUTH_TOKEN_HASH`、`MODULES_PERMISSIVE`、`GUARD`、`RESTART_COUNT`、`RESTART`。路径、restart args、AUMID、health/restart-hook JSON 和 failure reason 使用 base64，便于保留空格和非 ASCII 内容。
 
 ## 监控和重启
 
@@ -40,7 +40,7 @@ PGS 使用 Job Object 管理进程族，并通过 IOCP 接收退出通知。IOCP
 
 `kill-on-exit` 默认关闭，保证 PGS 自身崩溃或被 SCM 重启时，守护进程可以继续存活并被复接管。用户显式开启时，PGS 退出会连同守护进程族一起结束。
 
-重启流程按 guardId 维护窗口计数。`restart-delay` 会延迟拉起；`restart-backoff` 基于该延迟做指数退避；超过 `restart-window` 内的上限后，guard 会退休并从持久状态移除。
+重启流程按 guardId 维护窗口计数。`restart-delay` 会延迟拉起；`restart-backoff` 基于该延迟做指数退避；超过 `restart-window` 内的上限、restore 重启失败或重启异常失败时，guard 会进入持久 `quarantined` 状态并保留失败原因，等待 `guard retry` 或 `guard clear-quarantine`。
 
 ## 启动路径
 
@@ -51,9 +51,9 @@ PGS 使用 Job Object 管理进程族，并通过 IOCP 接收退出通知。IOCP
 
 WindowsApps：
 
-- 当前只支持显式 AUMID attach。
-- 重启走 AUMID activation。
-- 自动 manifest 推导和 `bless-start --winapp` 尚未完成。
+- 支持显式 AUMID attach，也支持从 WindowsApps exe 上层 `AppxManifest.xml` 推导 AUMID。
+- `bless-start --winapp --aumid ...` 走 Windows AUMID activation 并注册返回 PID。
+- 服务端异常恢复/重启同样走 AUMID activation；真实 Store/UWP 环境仍需要 `tools/verify_winapp.ps1` 验证。
 
 ## UI 边界
 

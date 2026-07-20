@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "eventlog",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Local Windows Event Log reader for PGS.",
+  "risk": "low",
+  "capabilities": ["eventlog.read", "event.read"],
+  "methods": [
+    {"name": "eventlog.status", "risk": "low", "sync": true, "required_capabilities": ["eventlog.read"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "eventlog.recent", "risk": "low", "sync": true, "required_capabilities": ["eventlog.read", "event.read"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

@@ -27,6 +27,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -160,9 +161,9 @@ namespace
     };
 
     // ---- Module state ----
-    PGS_Services g_svc{};
+    PGS_ServicesV3 g_svc{};
     bool g_svcReady = false;
-    std::string g_moduleDir;        // directory of this DLL (for pgs_sched.db)
+    std::string g_moduleDir;        // directory of this DLL (legacy DB location)
     std::mutex g_mtx;
     std::map<long long, Schedule> g_schedules;
     std::atomic<long long> g_nextId{1};
@@ -287,14 +288,54 @@ namespace
 
     std::string dbPathFor()
     {
-        if (!g_moduleDir.empty())
-            return g_moduleDir + "\\pgs_sched.db";
-        return "pgs_sched.db";
+        if (g_svc.size >= sizeof(PGS_ServicesV3) && g_svc.get_data_dir)
+        {
+            const char *root = g_svc.get_data_dir(g_svc.context);
+            if (root && root[0])
+            {
+                std::filesystem::path p(root);
+                p /= "modules";
+                p /= "sched";
+                p /= "pgs_sched.db";
+                return p.string();
+            }
+        }
+        return g_moduleDir.empty() ? "pgs_sched.db" : (g_moduleDir + "\\pgs_sched.db");
+    }
+
+    std::string legacyDbPathFor()
+    {
+        return g_moduleDir.empty() ? "pgs_sched.db" : (g_moduleDir + "\\pgs_sched.db");
+    }
+
+    bool ensureParentDir(const std::string &path)
+    {
+        std::error_code ec;
+        const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+        if (parent.empty())
+            return true;
+        std::filesystem::create_directories(parent, ec);
+        return !ec;
+    }
+
+    void migrateLegacyDbIfNeeded()
+    {
+        const std::string legacy = legacyDbPathFor();
+        if (legacy.empty() || g_dbPath.empty() || legacy == g_dbPath)
+            return;
+        std::error_code ec;
+        if (!std::filesystem::exists(g_dbPath, ec) && std::filesystem::exists(legacy, ec))
+        {
+            ensureParentDir(g_dbPath);
+            std::filesystem::copy_file(legacy, g_dbPath, std::filesystem::copy_options::skip_existing, ec);
+        }
     }
 
     void persistSchedulesLocked()
     {
         std::string path = g_dbPath;
+        if (!ensureParentDir(path))
+            return;
         std::string tmp = path + ".tmp";
         std::ofstream out(tmp, std::ios::out | std::ios::binary | std::ios::trunc);
         if (!out.is_open())
@@ -589,7 +630,6 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD reason, LPVOID /*reserv
     {
         DisableThreadLibraryCalls(hInstDLL);
         g_moduleDir = moduleDirOf(hInstDLL);
-        g_dbPath = dbPathFor();
     }
     return TRUE;
 }
@@ -609,12 +649,28 @@ PG_MODULE_API int PG_Init(void *reserved)
     // ABI v2: receive the services struct.
     if (reserved != nullptr)
     {
-        PGS_Services *svc = static_cast<PGS_Services *>(reserved);
-        g_svc = *svc;
-        g_svcReady = (g_svc.call != nullptr);
+        const PGS_Services *base = static_cast<const PGS_Services *>(reserved);
+        if (base->size >= sizeof(PGS_Services))
+        {
+            g_svc.size = base->size;
+            g_svc.context = base->context;
+            g_svc.call = base->call;
+            g_svc.now_ms = base->now_ms;
+            if (base->size >= sizeof(PGS_ServicesV3))
+            {
+                const PGS_ServicesV3 *v3 = static_cast<const PGS_ServicesV3 *>(reserved);
+                g_svc.call_json = v3->call_json;
+                g_svc.emit_event = v3->emit_event;
+                g_svc.get_data_dir = v3->get_data_dir;
+                g_svc.log = v3->log;
+            }
+            g_svcReady = (g_svc.call != nullptr);
+        }
     }
     // Load persisted schedules, then (re)compute next-run times for the
     // current clock. Missed-run policy is applied in loadSchedules().
+    g_dbPath = dbPathFor();
+    migrateLegacyDbIfNeeded();
     loadSchedules();
     startThread();
     return 0;
@@ -624,6 +680,8 @@ PG_MODULE_API void PG_Shutdown(void)
 {
     stopThread();
     persistSchedules();
+    g_svc = PGS_ServicesV3{};
+    g_svcReady = false;
 }
 
 // op=add;type=<cron|once|interval>;expr=<...>;action=<...>[;count=<N>]

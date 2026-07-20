@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "script_runner",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Restricted local script runner.",
+  "risk": "high",
+  "capabilities": ["script.run"],
+  "methods": [
+    {"name": "script_runner.status", "risk": "low", "sync": true, "required_capabilities": ["script.run"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "script_runner.run", "risk": "high", "sync": true, "required_capabilities": ["script.run"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

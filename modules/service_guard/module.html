@@ -1,0 +1,5 @@
+<h3>Service Guard</h3>
+<p>Queries and explicitly starts/stops local Windows services through SCM. Mutations require confirm=1.</p>
+<pre>op=status
+op=query;name=Spooler
+op=ensure;name=Spooler;state=running;confirm=1</pre>

@@ -1,0 +1,1 @@
+name=policy;version=1.0.0;abi=3;summary=Named guard policy templates;capabilities=policy.template,guard.policy

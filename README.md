@@ -17,7 +17,7 @@ Process_Guarding_Service (PGS) 是一个 Windows 进程守护工具，用来把�
 
 推荐使用安装包：
 
-1. 从 GitHub Releases 下载最新 beta，管理员身份运行 `pgs_setup_0.1.0-beta.1.exe`。
+1. 从 GitHub Releases 下载最新 beta，管理员身份运行 `pgs_setup_<version>.exe`（实际版本以仓库 `VERSION` 和 release 页面为准）。
 2. 在向导里安装并启动 PGS 服务。
 3. 打开 **PGS 管理端（Qt）**，按提示填入首次 token，然后添加要守护的程序。
 
@@ -49,7 +49,7 @@ pgs_admin_qt.exe
 
 ## 当前边界
 
-- WindowsApps / Store 应用当前支持“先启动，再按 PID 使用 `--winapp --aumid` attach”；自动 AUMID 推导和 `bless-start --winapp` 尚未完成。
+- WindowsApps / Store 应用支持显式 `--aumid`，也支持在给出 WindowsApps exe 路径时从 `AppxManifest.xml` 推导 AUMID；`bless-start --winapp --aumid ...` 可通过 Windows AUMID activation 启动并注册，真实 Store/UWP 环境仍需按 [WindowsApps 验证脚本](tools/verify_winapp.ps1) 做 E2E 验证。
 - PPL 模块默认不启用；只有显式 opt-in 才会加载相关模块和驱动。
 - 完整安全收口仍是后续专项，详见 [安全收口交接](docs/SECURITY_HARDENING_BACKLOG.md)。
 - 未完成或未验证的功能集中记录在 [未完成功能交接](docs/UNFINISHED_FEATURES_BACKLOG.md)。

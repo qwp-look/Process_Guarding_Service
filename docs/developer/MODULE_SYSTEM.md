@@ -20,10 +20,21 @@ ABI v2 的 `PG_Init` 会收到 `PGS_Services`，模块可通过 callback 调回 
 
 ## Bundled modules
 
-- `sched`：定时任务。
-- `health`：状态摘要。
-- `profile`：命名重启策略 profile。
-- `report`：snapshot/backup 文本报告。
+- `sched`：定时任务，现有 Qt/Web 还提供专用便捷控件。
+- `health`：状态摘要与健康探针配置/执行。
+- `profile`：命名重启策略 profile，运行态 DB 已迁到服务数据目录。
+- `report`：snapshot/backup 文本报告与 artifact 输出。
+- `notify`：Windows 本机通知模块，默认 Event Log，弹窗为显式 opt-in。
+- `metrics`：guard/service/event 指标摘要、JSON 和 Prometheus 文本输出。
+- `backup`：服务数据目录本地状态快照，可输出到 ArtifactStore；不会导出明文 token、artifact payload 或临时文件。
+- `eventlog`：读取本机 Windows Application Event Log，支持 source 过滤。
+- `dump`：显式确认后采集本机 minidump 到 ArtifactStore，不暴露临时路径。
+- `service_guard`：本机 Windows SCM 查询/start/stop/ensure，mutation 需要 confirm。
+- `file_watch`：按需检测本地文件变化并发本机 PGS event。
+- `policy`：命名 guard policy 模板，可应用到已有 guard。
+- `remote_agent`：本机节点 heartbeat/guard metadata，不开 listener。
+- `update`：本地 release manifest hash verifier，不联网不安装。
+- `script_runner`：默认禁用的受限本机脚本 runner，run 需要 confirm。
 - `ppl`：PPL opt-in 模块，复用 Sirius 驱动。
 
 常用调用示例：
@@ -33,6 +44,18 @@ pgs_bless.exe health summary --token your-token
 pgs_bless.exe profile set --name conservative --max-restarts 3 --token your-token
 pgs_bless.exe profile apply --name conservative --pid 1234 --token your-token
 pgs_bless.exe report snapshot --limit 20 --token your-token
+pgs_bless.exe metrics prometheus --token your-token
+pgs_bless.exe backup snapshot --artifact --token your-token
+pgs_bless.exe module artifact status --json --token your-token
+pgs_bless.exe module artifact policy --ttl-ms 86400000 --auto-cleanup --token your-token
+pgs_bless.exe eventlog recent --limit 20 --source ProcessGuardService --token your-token
+pgs_bless.exe dump status --token your-token
+pgs_bless.exe service-guard query --name EventLog --token your-token
+pgs_bless.exe file-watch status --token your-token
+pgs_bless.exe policy-template list --token your-token
+pgs_bless.exe remote-agent status --token your-token
+pgs_bless.exe update verify --path release-manifest.json --token your-token
+pgs_bless.exe script-runner status --token your-token
 pgs_bless.exe schedule list --token your-token
 ```
 
@@ -63,7 +86,7 @@ name|sha256
 name|sha256|signed
 ```
 
-功能完成版 bundled allowlist 仍以名称为主。发布哈希钉扎、签名和 SBOM 属于后续安全专项。
+功能完成版 bundled `modules.lock` 已写入 hash 锁定；当 release 树随包携带 `modules.lock` 时，加载会按 hash-pinned 条目 fail-closed。legacy `modules.allow` 只保留给没有 lock 的兼容/开发树；发布哈希增强、签名强制和代码签名仍属于后续安全专项。
 
 非 permissive 模式下，空 allowlist 会 fail-closed。`module trust` 可离线生成带 hash 或签名要求的条目，但本轮 release 未自动把 bundled module 哈希钉进 allowlist。
 
@@ -78,7 +101,9 @@ pgs_bless.exe module trust --path modules\ppl\pgs_ppl_module.dll --hash auto
 
 ## 运行态状态
 
-当前 `profile` / `sched` 仍按模块目录设计运行态 DB。release smoke 和 installer 已防止运行态 DB 泄漏进发布包；长期应迁移到 ProgramData，详见交接文档。
+ArtifactStore 写入服务 state 目录下的 `artifacts` 子目录，默认 TTL 为 24 小时，可通过 `module artifact policy` 在 60 秒到 7 天之间调整。`auto_cleanup=1` 时新 artifact 写入前会清理过期项，`verify_on_status=1` 时 status 查询会做 hash 校验。metadata id 与文件名不一致会按损坏处理。
+
+`profile` / `sched` 现在按服务数据目录写运行态 DB，默认落到 `C:\ProgramData\ProcessGuard\state\modules\<name>\` 或等价受保护目录；旧 DB 会做一次兼容复制。release smoke 和 installer 继续检查产物中不应泄漏旧模块 DB。
 
 ## ABI 调用顺序
 

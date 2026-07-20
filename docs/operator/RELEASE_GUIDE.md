@@ -27,17 +27,21 @@ tools\build_installer.bat
 
 脚本会先调用 `tools\package_release.bat`，再运行 release smoke，最后生成：
 
-- `installer\Output\pgs_release_0.1.0-beta.1.zip`
-- `installer\Output\pgs_setup_0.1.0-beta.1.exe`
+- `installer\Output\pgs_release_<version>.zip`
+- `installer\Output\pgs_setup_<version>.exe`
 - `installer\Output\SHA256SUMS.txt`
+- `installer\Output\release-manifest.json`
+- `installer\Output\sbom.spdx.json`
 
-`installer\Output\` 也是本地生成目录，不能提交到仓库。
+`installer\Output\` 也是本地生成目录，不能提交到仓库。文件名和发布版本现在都从仓库根层 `VERSION` 单源读取。
+
+`SHA256SUMS.txt` 覆盖 installer 和 portable zip；`release-manifest.json` 记录 release tree 文件、hash、source commit、toolchain 版本和 `modules.lock`；`sbom.spdx.json` 是由当前 release tree 生成的首版 SPDX 元数据。publish workflow 会把这三个文件和 installer/zip 一起上传到 GitHub Release，并对这些产物请求 GitHub artifact attestation。
 
 release smoke 会验证：
 
 - PGS 便携运行可启动。
 - `ping` 可用。
-- sched/health/profile/report 模块可加载和调用。
+- sched/health/profile/report/notify/metrics/backup/eventlog/dump/service_guard/file_watch/policy/remote_agent/update/script_runner 模块可加载和基础调用。
 - PPL 默认 gate 生效。
 - 基础 guard 生命周期可用。
 
@@ -48,14 +52,15 @@ release smoke 会验证：
 - `pgs_profiles.db`
 - `pgs_sched.db`
 
-`release_smoke.ps1` 和 `build_installer.bat` 已做清理/检查。模块状态迁移到 ProgramData 是后续项，见未完成功能交接文档。
+`release_smoke.ps1` 和 `build_installer.bat` 会继续检查这些运行态 DB 不泄漏进发布包；模块运行态现在已迁移到服务数据目录，仍需在真实安装态做一次只读目录验证。
 
 ## 当前还没做的发布安全项
 
 以下内容未在功能完成版中实现：
 
-- 代码签名。
-- SBOM。
-- release allowlist 自动写入模块哈希。
+- 代码签名证书和签名验证。
+- live GitHub Release 上的 metadata/provenance 资产确认。
+- release allowlist fail-closed 和签名策略强制。
+- 新增高风险模块的生产化安全策略：dump artifact 留存/审计、script_runner 签名/ACL/远程 RBAC、service_guard mutation 审计、update 自动安装前的签名和回滚。
 
 这些属于安全专项，见 [安全收口交接](../SECURITY_HARDENING_BACKLOG.md)。

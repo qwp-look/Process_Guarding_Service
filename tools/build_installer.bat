@@ -18,13 +18,21 @@ REM Use the 8.3 short path here. Expanding "Program Files (x86)" inside a
 REM parenthesized batch block can confuse cmd.exe because of the literal ")".
 if not defined ISCC set "ISCC=C:\Progra~2\Inno Setup 6\ISCC.exe"
 
-if not defined PGS_VERSION set "PGS_VERSION=0.1.0-beta.1"
+if not defined PGS_VERSION (
+    if exist VERSION (
+        set /p PGS_VERSION=<VERSION
+    ) else (
+        set "PGS_VERSION=0.1.0-beta.1"
+    )
+)
+for /f "tokens=* delims= " %%V in ("%PGS_VERSION%") do set "PGS_VERSION=%%V"
+if "%PGS_VERSION%"=="" set "PGS_VERSION=0.1.0-beta.1"
 
-echo [1/5] Building + assembling release tree (tools\package_release.bat)...
+echo [1/6] Building + assembling release tree (tools\package_release.bat)...
 call tools\package_release.bat
 if errorlevel 1 ( echo ERROR: package_release.bat failed & popd & exit /b 1 )
 
-echo [2/5] Running release smoke...
+echo [2/6] Running release smoke...
 if not defined PGS_SKIP_RELEASE_SMOKE (
     powershell -NoProfile -ExecutionPolicy Bypass -File tools\release_smoke.ps1 -Release "%CD%\release" -ProgramDataRoot "%CD%\build_release\pd-release-smoke-installer" -Fresh
     if errorlevel 1 ( echo ERROR: release smoke failed & popd & exit /b 1 )
@@ -39,7 +47,7 @@ if exist "release\modules\profile\pgs_profiles.db" (
 )
 
 if not exist installer\Output mkdir installer\Output >nul 2>&1
-echo [3/5] Creating portable release zip...
+echo [3/6] Creating portable release zip...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = Join-Path (Resolve-Path 'installer\Output').Path 'pgs_release_%PGS_VERSION%.zip'; if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }; [System.IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path 'release').Path, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)"
 if errorlevel 1 ( echo ERROR: portable zip failed & popd & exit /b 1 )
 
@@ -49,13 +57,14 @@ if not exist "%ISCC%" (
     popd & exit /b 1
 )
 
-echo [4/5] Compiling installer (installer\pgs_installer.iss)...
-"%ISCC%" installer\pgs_installer.iss
+echo [4/6] Compiling installer (installer\pgs_installer.iss)...
+"%ISCC%" /DPGSAppVersion="%PGS_VERSION%" installer\pgs_installer.iss
 if errorlevel 1 ( echo ERROR: ISCC failed & popd & exit /b 1 )
 
-echo [5/6] Writing SHA256SUMS.txt...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $out=(Resolve-Path 'installer\Output').Path; $sha=[System.Security.Cryptography.SHA256]::Create(); try { $files=@('pgs_release_%PGS_VERSION%.zip','pgs_setup_%PGS_VERSION%.exe'); $lines=foreach($name in $files){$path=Join-Path $out $name; if(-not (Test-Path -LiteralPath $path)){throw ('missing artifact: ' + $path)}; $bytes=[System.IO.File]::ReadAllBytes($path); $hash=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant(); ($hash + '  ' + $name)}; Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Value $lines -Encoding ASCII } finally { $sha.Dispose() }"
-if errorlevel 1 ( echo ERROR: SHA256SUMS generation failed & popd & exit /b 1 )
+echo [5/6] Writing release manifest, SBOM, and SHA256SUMS.txt...
+set "PGS_RELEASE_ARTIFACTS=%CD%\installer\Output\pgs_release_%PGS_VERSION%.zip;%CD%\installer\Output\pgs_setup_%PGS_VERSION%.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\write_release_manifest.ps1 -Release "%CD%\release" -OutputDir "%CD%\installer\Output" -Version "%PGS_VERSION%" -ArtifactsList "%PGS_RELEASE_ARTIFACTS%" -WriteSbom -WriteChecksums
+if errorlevel 1 ( echo ERROR: release metadata generation failed & popd & exit /b 1 )
 
 echo [6/6] Done. Artifacts:
 dir /b installer\Output\pgs_setup_*.exe 2>nul

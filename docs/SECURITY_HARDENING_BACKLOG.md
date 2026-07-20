@@ -4,24 +4,40 @@
 
 优先级定义：P0 = 应尽快修，可能造成本机提权或远程未授权操作；P1 = release 后安全专项第一批；P2 = 加固/审计完善。
 
+2026-07-18 审查补充：`tools\verify.bat`、顶层 CMake 构建和 CTest 均通过；下面新增/修正的是安全边界、发布链路和文档状态漂移问题，不代表当前功能不可用。
+
+2026-07-19 功能收口补充：WindowsApps AUMID 推导和 `bless-start --winapp` 已实现但仍需真实 Store/UWP E2E；OperationStore/ArtifactStore 已实现，CLI artifact 下载会核对 size/SHA-256，服务端 artifact chunk 会重新计算 size/SHA-256 后再返回；`metrics`、`backup`、`eventlog`、`notify` 已 bundled；Web/Qt 已补主要功能入口。下面安全项只更新剩余风险，不把功能未验证等同于代码未实现。
+
+2026-07-19 模块扩展补充：`dump`、`service_guard`、`file_watch`、`policy`、`remote_agent`、`update`、`script_runner` 已完成 bundled 首版并通过 build/smoke/release/installer 验证。安全文档按“首版可用但生产需加固”处理：dump 和 script_runner 为高风险，service_guard/file_watch/policy/remote_agent/update 为中风险；通知模块仍只使用 Windows 本机 Event Log/可选弹窗，不接聊天软件、webhook、邮件或远程 messenger。
+
+2026-07-19 Web/模块锁安全收口补充：本地 Web 控制台已改为 HttpOnly `pgs_local_session` cookie + `X-PGS-CSRF`，页面不再嵌入可读 bearer token；`modules.lock` 现在在存在但损坏时会 fail-closed，不再退回 name-only allowlist。
+
+2026-07-20 Artifact/Doctor 安全补充：ArtifactStore 已补 operator-facing `status/policy`、Web/Qt 基础控件和 doctor `artifact_store` 检查；metadata id 与请求 id 不一致、metadata 文件名 stem 与 metadata `id` 不一致会按 corrupt/fail-closed 处理；`cleanup --all` 或 `cleanup --verify` 可移除坏 metadata。Guard 状态已到 v5，`last_failure_code` 已进入 `list/get --json`；Qt 守护表格已补隔离/失败码/健康字段和 retry/clear-quarantine 操作。剩余是失败码分类、failure history、处理建议和专项负例。
+
+2026-07-20 Qt 可见性补充：Qt 已新增 Doctor / Repair 页，直接渲染 CLI doctor JSON，并暴露 state ACL、modules ACL、modules.lock 修复按钮；Qt 守护表格已显示隔离、失败码、健康状态并可对选中 guard 执行 retry / clear-quarantine。安全剩余项调整为 failure taxonomy、failure history、专项负例和 repair schema 完整性，而不是 Qt 完全缺入口。
+
+2026-07-20 Qt Health / Cluster/Web 交互补充：Qt 守护表格页已补 Health policy 表单，可配置 process/tcp/http 探针并执行 health-check set/get/clear；Web 已补 Structured Result 区域，结构化渲染 module/scheduler/report/artifact 等响应且首页 smoke 确认不含 `window.PGS_API_TOKEN`；Cluster Dashboard 已补节点 edit/test、凭据替换/清空和 guard 隔离/健康/失败码详情。TCP closed 和 HTTP unexpected status 已进入 smoke 负例；Cluster add/list/edit/test/clear/remove 已进入本地 HTTP API smoke 和 VM acceptance 扩展，且覆盖凭据不回显/不明文落盘断言。安全剩余项调整为真实 remote gateway 验收、Cluster mutation 审计策略、浏览器 DOM/UI 自动化覆盖、health timeout/DNS 负例以及 health restart/quarantine 动作 E2E。
+
 ## P0-01 Web 本地页面嵌入 API token
 
+> 2026-07-19 更新：实现已完成。本地 Web 控制台已切换为 HttpOnly `pgs_local_session` cookie + 页面可读 CSRF nonce，页面不再嵌入 `window.PGS_API_TOKEN`；`tools/vm_acceptance.ps1` 已改为验证无 token 泄露、HttpOnly cookie 和无 cookie 401。下面旧条目的风险描述作为历史背景保留，剩余工作是 VM/真实浏览器验收。
 - 影响组件：`pgs_admin_web`
-- 当前行为：loopback 模式下首页将每进程 API token 嵌入 `window.PGS_API_TOKEN`，浏览器 JS 用它调用 `/api/*`。
-- 风险/攻击面：本机同用户浏览器扩展、调试工具、恶意本地页面利用浏览器状态或读取页面内容后，可复用 token 调本地管理 API。当前已有 Host/Origin/CSRF 检查，但 token 仍在页面内。
+- 当前行为：loopback 模式下首页将每进程 Web API token 嵌入 `window.PGS_API_TOKEN`，浏览器 JS 用它调用 `/api/*`。该值不是 PGS 后端管理 token，但 Web 后端持有 PGS token 并代为执行管理命令，所以它仍等价于本地 Web 控制台能力凭据。
+- 风险/攻击面：本机同用户浏览器扩展、调试工具、恶意本地页面利用浏览器状态或读取页面内容后，可复用该 token 调本地 Web 管理 API。当前已有 Host/Origin/CSRF 检查，但 bearer 能力仍在页面 JS 内。
 - 建议修复：改为 HttpOnly SameSite cookie + per-request CSRF；或把 loopback 也切到一次性 session cookie，不再把 bearer token 暴露给 JS。保留 remote 模式 Basic/RBAC/TLS，不混用 PGS 管理 token。
 - 涉及入口：`qt/pgs_admin_web/src/WebServer.cpp` 的 `handleIndexHtml()`、`isRequestAuthorized()`、前端 `api()`。
 - 验证方式：浏览器页面源码不包含 token；无 cookie/无 CSRF 请求失败；跨 Origin POST 失败；loopback 正常 UI 仍可操作。
 - 是否阻塞功能版 release：否。阻塞安全版 release。
 
-## P0-02 模块 allowlist 仍可只按名称放行
+## P0-02 模块 allowlist 仍可退回名称放行
 
-- 影响组件：`ModuleManager`、`modules.allow`
-- 当前行为：`modules.allow` 支持 `name`、`name|sha256`、`name|sha256|signed`。默认 bundled allowlist 只有名称，功能版 release 为方便 bundled 模块加载没有强制哈希。
-- 风险/攻击面：若攻击者能写入 modules 目录并替换同名 DLL，名称 allowlist 不足以阻止加载。当前模块目录 ACL 已有加固，但仍属于“防御纵深不完整”。
-- 建议修复：发布包生成时写入 bundled DLL 的 SHA-256；生产默认要求哈希匹配；签名可用后增加 `|signed`；为 `pgs_bless module trust` 增加批量生成 release allowlist 的命令。
-- 涉及入口：`tools/build_pgs.*`、`tools/package_release.bat`、`src/modules/ModuleManager.cpp`、`docs/MODULE_SYSTEM.md`。
-- 验证方式：篡改 bundled DLL 后 `module load` 失败并记录 hash mismatch；未篡改 release 模块可加载；`module info --json` 显示 allow entry satisfied。
+> 2026-07-19 更新：核心实现已收口。`ModuleManager` 现在检测到 `modules.lock` 存在但为空、损坏、缺少 `modules` 字段或包含无效/缺失 SHA-256 条目时，会保持空 allowlist 并 fail-closed，不再回退到 name-only `modules.allow`；`modules.allow` 只保留给没有 lock 的 legacy/dev 树。剩余工作是发布/VM 负例验证和后续签名强制。
+- 影响组件：`ModuleManager`、`modules.allow`、`modules.lock`
+- 当前行为：构建脚本和 CMake 会生成带 SHA-256 的 `modules.lock`，`ModuleManager` 优先读取它；但仓库仍保留 name-only `modules.allow` 兼容回退，且生产模式没有强制“缺失/损坏 modules.lock 即拒绝加载 bundled 模块”。
+- 风险/攻击面：如果 release 目录丢失或损坏 `modules.lock`，loader 会退回 `modules.allow` 的名称放行；若攻击者还能写入 modules 目录并替换同名 DLL，名称 allowlist 不足以阻止加载。当前模块目录 ACL 已有加固，但安全版不应依赖单一 ACL 边界。
+- 建议修复：生产/安全模式强制使用 `modules.lock` 的 hash；缺失、解析失败、少于 bundled 模块数、hash 非 64 hex 时 fail-closed；签名可用后增加 `require_signed=true`；为 `pgs_bless module trust` 增加批量生成/校验 release allowlist 的命令。
+- 涉及入口：`tools/build_pgs.*`、`cmake/WriteBundledModulesLock.cmake`、`tools/package_release.bat`、`src/modules/ModuleManager.cpp`、`docs/MODULE_SYSTEM.md`。
+- 验证方式：删除/篡改 `modules.lock` 后生产模式模块加载失败；篡改 bundled DLL 后 `module load` 失败并记录 hash mismatch；未篡改 release 模块可加载；`module verify` / `module info --json` 显示 lock/hash satisfied。
 - 是否阻塞功能版 release：否。阻塞生产安全版 release。
 
 ## P0-03 模块目录 ACL 需要 fail-closed 递归验证
@@ -67,12 +83,13 @@
 ## P1-07 restart 失败导致持久 guard 退休的策略需审计
 
 - 影响组件：重启策略、持久归档
-- 当前行为：重启失败后会移除 policy 和 persisted guard，避免无限失败循环。
-- 风险/攻击面：若失败由瞬时环境导致，守护目标会永久退出保护；若攻击者制造临时文件/权限失败，可能让持久守护失效。
-- 建议修复：区分永久失败和临时失败；增加 retry-after / quarantine 状态；持久化失败原因；UI 显示“需要人工处理”而非直接消失。
-- 涉及入口：`src/service/PGS.cpp` 的 restore/restart failure 分支、`docs/GUARD_POLICIES.md`。
-- 验证方式：模拟缺文件、临时拒绝访问、hash mismatch；确认策略符合预期且可见。
-- 是否阻塞功能版 release：否，但建议 P1。
+- 当前行为：2026-07-20 已完成第二阶段可见性修复。自动重启失败、延迟重启失败、restore 重启失败、重启次数用尽都会保留持久 guard 并进入 `quarantined` 状态；状态版本已到 v5；`list/get --json` 输出 `guard_id`、`status`、`quarantined`、`last_failure`、`last_failure_code`、`next_retry_ms`、`failure_count`；CLI 增加 `guard retry --id <guard-id>` 和 `guard clear-quarantine --id <guard-id>`。intentional exit 仍按主动退保护处理，不进入隔离。
+- 剩余风险/攻击面：已有 `restart.hash_mismatch`、`restart.create_process`、`restart.session_token`、`winapp.activate_failed` 等初步稳定 reason code，Web/Qt/CLI 也都有隔离态操作入口；但 taxonomy 仍不完整，failure history 还没有持久化时间线，Web/Qt 还缺按 failure code 分组的处理建议。
+- 建议修复：继续补全 failure code taxonomy / failure history；UI 增加“需要人工处理”视图；对可恢复与不可恢复失败给出不同 retry-after 策略；专项负例固定 hash mismatch / file missing / access denied / Session token / WinApp activation 失败。
+- 涉及入口：`src/service/PGS.cpp` 的 restore/restart failure 分支、`src/service/PGSProtocol.cpp` 的 guard summary/guard retry、`tools/pgs_bless.cpp`。
+- 验证方式：已用显式 MSYS2/MinGW 环境变量运行 `tools\build_pgs.bat`、`tools\test_core_units.bat` 和 `tools\smoke_test_pgs.sh`，smoke 覆盖重启窗口耗尽后 quarantine 可见与 clear-quarantine。后续还需 hash mismatch / access denied / Session 失败专项负例。
+- 2026-07-20 追加验证：`tools\smoke_test_pgs.sh` 已补 TCP closed / HTTP 500 unexpected status 的 health negative smoke；后续仍需 health action `restart` / `quarantine` 显式 E2E、timeout/DNS 负例和 failure action 审计。
+- 是否阻塞功能版 release：否。隔离保留和初步 failure code 已缓解主风险，剩余是安全可观测性增强。
 
 ## P1-08 Job Object 权限/竞态的完整安全审计
 
@@ -87,21 +104,21 @@
 ## P1-09 WindowsApps AUMID 校验和 manifest 自动推导
 
 - 影响组件：WinApp guard、CLI/Qt/Web
-- 当前行为：服务端和 CLI 已强制 `--winapp` 必须有 AUMID；尚未实现 WindowsApps 路径解析 `AppxManifest.xml` 自动推导；`bless-start --winapp` 明确拒绝。
-- 风险/攻击面：错误 AUMID 会导致重启失败；未校验 AUMID 是否对应目标包/路径。
-- 建议修复：解析 package manifest，推导 PackageFamilyName/AUMID；注册时校验 AUMID 与路径 package 匹配；实现 AUMID activation start path 或保持 attach-only 并在 UI 中禁用 start。
+- 当前行为：CLI 已实现 WindowsApps 路径解析 `AppxManifest.xml` 自动推导 AUMID，显式 AUMID 与 manifest 不一致会拒绝；`bless-start --winapp --aumid` 已通过 Windows AUMID activation 启动并注册返回 PID；Web 入口也允许 WinApp AUMID-only bless-start。
+- 风险/攻击面：真实 Store/UWP 环境差异尚未完整验证；publisher hash、manifest 不可读、错误 AUMID、ShellExecute fallback、激活后路径查询失败等场景需要更多负例；服务端仍主要信任 CLI 做 path/AUMID 关联校验。
+- 建议修复：把 `tools/verify_winapp.ps1` 纳入 VM acceptance/release notes；补错误 AUMID/manifest/path 负例；评估服务端是否需要对 WinApp path/AUMID 再做一次 package 归属校验。
 - 涉及入口：`include/Process_Guard/PGUtil.h` PFN helpers、`tools/pgs_bless.cpp`、`src/service/PGS.cpp` `restartAppGuard()`。
-- 验证方式：`tools/verify_winapp.ps1` 覆盖显式 AUMID；新增 manifest fixture 单元测试；错误 AUMID 拒绝注册或重启失败可见。
-- 是否阻塞功能版 release：否，写入未完成功能文档。
+- 验证方式：manifest fixture 单元测试已存在；仍需 `tools/verify_winapp.ps1` 真实环境、错误 AUMID/manifest/path 负例和 Web bless-start WinApp 手工验证。
+- 是否阻塞功能版 release：否。阻塞安全版/生产版 WindowsApps 声明。
 
 ## P1-10 发布签名、哈希和供应链完整性
 
-- 影响组件：installer、portable zip、modules、driver
-- 当前行为：release smoke 检查产物存在和可运行；beta 发布会附带 `SHA256SUMS.txt`；尚未签名 installer/exe/dll/sys，也未发布 SBOM 或自动化 provenance。
-- 风险/攻击面：用户无法验证下载物来源；驱动和模块替换难以及时发现。
-- 建议修复：接入代码签名；生成 SHA-256SUMS；发布 SBOM；installer 校验 bundled 文件；模块 allowlist 与 release 哈希同源生成。
-- 涉及入口：`tools/build_installer.bat`、`tools/package_release.bat`、`.github/workflows/publish-release.yml`。
-- 验证方式：签名验证通过；篡改 zip/installer 后校验失败；release 页面包含 checksums。
+- 影响组件：installer、portable zip、modules、driver、GitHub Actions release workflow
+- 当前行为：release smoke 检查产物存在和可运行；根层 `VERSION` 已作为本地 build_installer 和 publish workflow 的版本源；`build_installer.bat` 已实际通过，生成 installer、portable zip、`SHA256SUMS.txt`、`release-manifest.json`、`sbom.spdx.json`。本轮生成的 manifest 记录 167 个 release tree 文件和 16 个 bundled module lock entries。publish workflow 会上传这些元数据并请求 GitHub artifact attestation。尚未签名 installer/exe/dll/sys，且 attestation/资产上传仍需 live GitHub Release 验证。
+- 风险/攻击面：用户无法验证下载物来源；驱动和模块替换难以及时发现；README/用户文档示例版本若不随 `VERSION` 更新，仍可能制造追溯混乱。
+- 建议修复：接入代码签名；跑一次 live publish workflow 验证 metadata/provenance；installer 校验 bundled 文件；模块 allowlist 与 release 哈希同源生成并 fail-closed；发布前检查文档下载文件名与 `VERSION` 一致。
+- 涉及入口：`tools/build_installer.bat`、`tools/package_release.bat`、`installer/pgs_installer.iss`、`.github/workflows/publish-release.yml`。
+- 验证方式：workflow 生成的文件名与 `PGS_VERSION` 一致；签名验证通过；篡改 zip/installer 后校验失败；release 页面包含 installer、portable zip、checksums、manifest、SBOM，并可在 GitHub UI/CLI 中看到 artifact attestation。
 - 是否阻塞功能版 release：否。阻塞公开生产发行。
 
 ## P2-11 审计日志完整性和留存
@@ -114,22 +131,82 @@
 - 验证方式：重启后事件仍可查询；篡改 audit chain 可检测；日志轮转不丢最近事件。
 - 是否阻塞功能版 release：否。
 
-## P2-12 capability policy 尚未强制
+## P2-12 capability policy 尚未端到端强制
 
-- 影响组件：模块 manifest/capabilities、ModuleManager
-- 当前行为：manifest capabilities 可展示/审计，但宿主没有按 capability 做运行时授权。
-- 风险/攻击面：受信任模块一旦加载就可执行其全部 `PG_Invoke` 内部能力；缺少最小权限。
-- 建议修复：定义 capability allow policy；模块 load 时校验 manifest capability；`module call` 前按 policy/role 检查。
+- 影响组件：模块 manifest/capabilities、ModuleManager、Web RBAC
+- 当前行为：manifest capabilities 已用于模块回调 PGS 核心命令时的能力检查；但外部管理员直接 `module call` / `module invoke`、Web RBAC 与模块 method/capability 之间还没有完整统一的最小权限策略。
+- 风险/攻击面：受信任模块一旦加载，管理员入口可以调用其公开方法；远程 Web 若授权过粗，会把模块能力整体暴露给有登录权限的用户。
+- 建议修复：定义统一 capability allow policy；模块 load 时校验 manifest capability；`module call`/`module invoke` 前按调用来源、角色、method risk 和 capability 检查。
 - 涉及入口：`include/Process_Guard/PGModule.h`、`src/modules/ModuleManager.cpp`、Web RBAC。
-- 验证方式：未授权 capability 的模块加载或调用失败；授权后成功。
+- 验证方式：未授权 capability 的模块加载或调用失败；授权后成功；remote viewer/operator/admin 角色对模块 method 的权限不同且可测试。
 - 是否阻塞功能版 release：否。
 
-## P2-13 模块运行态状态不应写入模块目录
+## P2-12a Cluster 节点凭据编辑与审计
+
+- 影响组件：`pgs_cluster_web`、节点注册文件、remote Web gateway 凭据。
+- 当前行为：2026-07-20 已新增节点 edit/test；详情页可替换或清空凭据，列表/summary/API 不回显保存的凭据，落盘仍复用现有 DPAPI 保护路径。测试连接可使用已保存凭据或临时输入凭据调用 `/api/cluster/health`。`tools/cluster_api_smoke.ps1` 和 VM acceptance 已覆盖无 token 401、add/list/edit/test/clear/remove、凭据不回显和注册文件不明文保存。
+- 风险/攻击面：Cluster 本身是集中化节点视图，管理员误配置或恶意本地管理员仍可修改节点目标；edit/test 这类 mutation 目前只受 Cluster API token/本地页面限制，HTTP API 自动化已补，但仍缺单独审计事件、真实 remote gateway 双节点验收和浏览器 DOM/UI 自动化验证。
+- 建议修复：为 add/edit/test/remove 写本地审计日志或 Windows Event Log；补 remote gateway 双节点联调；浏览器/DOM smoke 覆盖凭据不回显、保留原凭据、清空凭据、错误 URL、TLS 失败、401 等路径。
+- 涉及入口：`qt/pgs_cluster_web/src/ClusterServer.cpp`。
+- 验证方式：`cmake --build build\pgs_cluster_web --config Release` 已通过；本地 `tools/cluster_api_smoke.ps1` 已通过；后续用真实 remote Web node 跑 add/edit/test/remove，并补浏览器 DOM/UI smoke。
+- 是否阻塞功能版 release：否。阻塞 Cluster 生产化安全声明。
+
+## P2-13 模块运行态状态迁移后的安装态验证
 
 - 影响组件：`profile` / `sched` 模块、release smoke、安装目录 ACL
-- 当前行为：`profile` 模块会在模块 DLL 同目录写 `pgs_profiles.db`；`sched` 模块也按模块目录设计 `pgs_sched.db`。本轮已在 release smoke / installer 打包前清理并阻断 profile DB 泄漏，但运行态位置尚未迁移。
-- 风险/攻击面：生产安装目录应尽量只读和 ACL 加固；模块运行态写在同目录会迫使放宽写权限，削弱模块替换防护。
-- 建议修复：扩展 ABI v2 services 或新增 ABI v3，向模块提供受保护的 ProgramData state dir；模块状态迁移到 `%ProgramData%\ProcessGuard\modules\<name>\`；保留旧 DB 单次迁移。
+- 当前行为：`profile` / `sched` 已在 `PG_Init` 中读取 ABI v3 `get_data_dir()`，默认写入服务 state 根下 `modules\profile\pgs_profiles.db` 和 `modules\sched\pgs_sched.db`；旧模块目录 DB 会 copy-only 迁移。release smoke / installer 继续阻断 DB 泄漏进发布包。
+- 风险/攻击面：旧 DB copy-only 不会自动删除，管理员仍需确认是否清理；低权限/只读安装目录真实安装态尚未验证；如果服务数据目录 ACL 异常，模块运行态仍可能落入不理想权限边界。
+- 建议修复：release smoke 增加只读安装目录场景；doctor 增加模块数据目录 ACL/迁移状态检查；文档说明旧 DB 由管理员确认后清理。
 - 涉及入口：`include/Process_Guard/PGModule.h`、`modules/profile/pgs_profile_module.cpp`、`modules/sched/pgs_sched_module.cpp`、`tools/release_smoke.ps1`。
 - 验证方式：安装目录对普通用户只读时 profile/sched 仍可 set/list；release tree 和 zip/installer 不包含 `pgs_profiles.db` / `pgs_sched.db`；ProgramData 状态目录 ACL 为 SYSTEM + Administrators。
 - 是否阻塞功能版 release：否。阻塞安全版 release 的模块目录只读策略。
+
+## P2-14 ArtifactStore 留存策略与审计
+
+- 影响组件：`PGSProtocol` ArtifactStore、report 模块、CLI/Web/Qt artifact 下载。
+- 当前行为：ArtifactStore 已限制单 artifact 16MB、总量 256MB；metadata 记录 size/SHA-256；CLI `module artifact get --out` 下载后会核对 size、chunk total 和 SHA-256；服务端 `module artifact chunk` 返回前会重新计算落盘 size/SHA-256，不匹配则拒绝并记录 `artifact.integrity-failed`；`module artifact cleanup [--expired|--all] [--verify]`、`module artifact status [--verify]`、`module artifact policy` 已有 operator-facing 命令；Web/Qt 有基础 status/policy 控件；doctor JSON 已包含 `artifact_store` 检查。策略持久化到 state 目录下 `artifact_policy.cfg`，包含 `ttl_ms`、`auto_cleanup`、`verify_on_status`。metadata id 与请求 id 或 metadata 文件名 stem 不一致会按 corrupt/fail-closed 处理。
+- 风险/攻击面：本地管理员或磁盘损坏篡改 artifact 内容时，服务端和 CLI 均可发现，status/doctor 也能暴露基础健康状态；剩余风险是没有后台周期性清理线程、下载审计不完整、敏感 artifact 分类和更短 TTL 未做、配额仍为编译期常量、远程下载场景缺更严格访问审计。
+- 建议修复：增加周期性/background cleanup；Web/Qt 下载前显示 size/sha256 和敏感类型提示；下载、过期删除、校验失败、人工清理都写审计事件并可查询；dump/report 等模块按 artifact 类型设置默认 TTL；把 max artifact bytes/max total bytes 做成受限可配置策略并纳入 doctor。
+- 涉及入口：`src/service/PGSProtocol.cpp`、`tools/pgs_bless.cpp`、`qt/pgs_admin_web/src/WebServer.cpp`、`qt/pgs_admin_qt/src/ModulePage.cpp`。
+- 验证方式：篡改 artifact content 后 CLI 下载失败；过期 artifact 不可读；cleanup 后 metadata/content 同时移除；总量上限触发 deterministic error。
+- 是否阻塞功能版 release：否。建议在公开远程 artifact 下载前完成。
+
+## P2-15 JSON/manifest/lockfile 解析需要结构化收口
+
+- 影响组件：`ModuleManager`、`PGSProtocol`、模块 manifest、`modules.lock`、JSON-RPC envelope。
+- 当前行为：多处 JSON 字段读取使用轻量字符串查找，例如 `jsonStringValue()` / `jsonArrayCsv()`；当前 bundled manifest 简单且测试通过，但并非完整 JSON parser。
+- 风险/攻击面：社区模块和 manager 扩展增多后，转义、嵌套对象、字段顺序、重复字段或恶意构造 JSON 可能导致解析歧义；安全策略依赖的 `risk`、`capabilities`、`sha256`、`require_signed` 不应建立在脆弱解析上。
+- 建议修复：引入小型 JSON 库或集中实现受限 JSON parser；对 manifest/lockfile 使用 schema 校验；拒绝重复关键字段和未知高风险格式；把当前“受限 JSON 子集”写入开发文档直到 parser 替换完成。
+- 涉及入口：`src/modules/ModuleManager.cpp`、`src/service/PGSProtocol.cpp`、`docs/schemas/*.json`、`tests/test_module_manager.cpp`。
+- 验证方式：增加转义字符串、嵌套字段、重复字段、缺失 hash、非法 bool、超大 JSON 的正负例；确保安全字段解析确定且 fail-closed。
+- 是否阻塞功能版 release：否。建议在开放社区模块前完成。
+
+## P1-16 Dump 模块的敏感内存与留存风险
+
+- 影响组件：`modules/dump`、ArtifactStore、CLI/Web/Qt artifact 下载。
+- 当前行为：`dump collect --pid <pid> --confirm` 可对本机进程采集 minidump，写入 ArtifactStore，单 artifact 限制 16MB，不向协议暴露临时文件路径。默认状态命令只报告能力，不采集。
+- 风险/攻击面：minidump 可能包含目标进程内存、路径、命令行、环境片段或业务敏感数据；若 ArtifactStore 留存、下载审计或 ACL 有缺口，可能形成敏感数据泄露。
+- 建议修复：为 dump artifact 增加更短默认 TTL、下载审计、UI 高风险提示、doctor 中的敏感 artifact 统计；对受保护/系统进程失败给稳定 reason code；必要时增加 `--type normal` 以外模式的额外确认。
+- 涉及入口：`modules/dump/pgs_dump_module.cpp`、`src/service/PGSProtocol.cpp` ArtifactStore、`tools/pgs_bless.cpp`。
+- 验证方式：无 `--confirm` 必须失败；权限不足/进程不存在/超限 dump 有 deterministic error；artifact metadata 不暴露临时路径；cleanup 后内容不可下载。
+- 是否阻塞功能版 release：否。阻塞生产环境默认推荐 dump collection。
+
+## P1-17 Script runner 必须继续默认禁用并强化执行边界
+
+- 影响组件：`modules/script_runner`、module capability policy、服务数据目录 ACL。
+- 当前行为：`script_runner` 默认禁用；必须 `script-runner config --enable`，登记服务数据目录 `modules\script_runner\scripts` 下的脚本，且 `script-runner run --id <id> --confirm` 才会执行。模块不提供远程 shell，不接 webhook/chat，不联网。
+- 风险/攻击面：一旦启用，本质上是本机命令执行能力；如果脚本目录 ACL、path confinement、参数校验或远程 Web RBAC 不够严格，可能被滥用为提权/横向入口。
+- 建议修复：生产版保持禁用并在 UI 高风险标红；脚本登记加入 hash/signature；执行前记录审计事件、caller、args hash；Web/remote RBAC 默认禁止 script run；doctor 检查脚本目录 ACL。
+- 涉及入口：`modules/script_runner/pgs_script_runner_module.cpp`、`tools/pgs_bless.cpp`、Web RBAC。
+- 验证方式：默认 run 失败；无 `--confirm` 失败；目录外脚本 add 失败；脚本目录宽 ACL 被 doctor 报告；remote viewer/operator 无权运行。
+- 是否阻塞功能版 release：否。阻塞任何“远程脚本执行”生产承诺。
+
+## P1-18 Service guard / file watch / update 模块的生产化边界
+
+- 影响组件：`modules/service_guard`、`modules/file_watch`、`modules/update`、notify/event pipeline。
+- 当前行为：`service_guard` 本机 SCM mutation 需要 `confirm=1`；`file_watch` 是 demand-driven check，不开后台 watcher；`update` 只验证本地 release manifest 的 `files` hash，不下载、不安装，并已修正为读取 manifest `release_root` 且忽略 artifacts 绝对路径。
+- 风险/攻击面：服务 start/stop 是高影响操作；file_watch 可能被配置到敏感文件并产生事件噪音；update 验证若未来扩展到下载/安装，必须先完成签名、回滚和 fail-closed。
+- 建议修复：service mutation 增加 allow policy 和审计；file_watch 增加规则上限、路径 allow/deny、doctor 展示；update 在代码签名和 release manifest 强制验证前不要实现网络更新或安装。
+- 涉及入口：`modules/service_guard/pgs_service_guard_module.cpp`、`modules/file_watch/pgs_file_watch_module.cpp`、`modules/update/pgs_update_module.cpp`。
+- 验证方式：服务 mutation 无 confirm 必须失败；file_watch unreadable/remove/check 负例稳定；篡改 manifest 文件 hash 后 `update verify` 失败；`artifacts` 数组中的绝对路径不会影响 release tree verify。
+- 是否阻塞功能版 release：否。阻塞自动更新和远程服务控制生产化。

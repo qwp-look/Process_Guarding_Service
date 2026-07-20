@@ -23,6 +23,7 @@
 #include <unordered_map>
 
 #include "Process_Guard/PGModule.h"
+#include "Process_Guard/PGUtil.h"
 #include "SiriusDriverClient.h"
 
 namespace
@@ -293,6 +294,20 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
     std::string req = request ? request : "";
     std::string op = kvValue(req, "op");
     std::string pidText = kvValue(req, "pid");
+    std::string signerText = kvValue(req, "signer");
+    const std::string paramsJsonB64 = kvValue(req, "params_json_b64");
+    if (!paramsJsonB64.empty())
+    {
+        const std::string requestJson = ProcessGuard::util::base64Decode(paramsJsonB64);
+        if (pidText.empty())
+        {
+            pidText = jsonNumberValue(requestJson, "pid");
+        }
+        if (signerText.empty())
+        {
+            signerText = jsonStringValue(requestJson, "signer");
+        }
+    }
 
     ULONG pid = 0;
     if (!parsePid(pidText, pid))
@@ -303,7 +318,6 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
 
     if (op == "set")
     {
-        std::string signerText = kvValue(req, "signer");
         UCHAR signer = 0;
         if (!parseSigner(signerText, signer))
         {

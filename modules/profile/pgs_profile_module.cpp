@@ -22,6 +22,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -32,9 +33,10 @@
 namespace
 {
     HMODULE g_self = nullptr;
-    PGS_Services g_services{};
+    PGS_ServicesV3 g_services{};
     bool g_servicesReady = false;
     std::string g_moduleDir;
+    std::string g_dbPath;
     std::mutex g_mutex;
 
     struct Profile
@@ -154,14 +156,69 @@ namespace
         return out;
     }
 
+    std::string joinPath(const std::string &a, const std::string &b)
+    {
+        if (a.empty())
+            return b;
+        std::filesystem::path p(a);
+        p /= b;
+        return p.string();
+    }
+
+    bool ensureParentDir(const std::string &path)
+    {
+        std::error_code ec;
+        const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+        if (parent.empty())
+            return true;
+        std::filesystem::create_directories(parent, ec);
+        return !ec;
+    }
+
+    std::string dataDirFromServices(const PGS_ServicesV3 &services)
+    {
+        if (services.size >= sizeof(PGS_ServicesV3) && services.get_data_dir)
+        {
+            const char *dir = services.get_data_dir(services.context);
+            if (dir && dir[0])
+                return dir;
+        }
+        return std::string();
+    }
+
+    std::string resolveDbPath()
+    {
+        const std::string dataRoot = dataDirFromServices(g_services);
+        if (!dataRoot.empty())
+        {
+            return joinPath(joinPath(joinPath(dataRoot, "modules"), "profile"), "pgs_profiles.db");
+        }
+        return g_moduleDir.empty() ? "pgs_profiles.db" : joinPath(g_moduleDir, "pgs_profiles.db");
+    }
+
+    void migrateLegacyDbIfNeeded()
+    {
+        const std::string legacy = g_moduleDir.empty() ? "pgs_profiles.db" : joinPath(g_moduleDir, "pgs_profiles.db");
+        if (legacy.empty() || g_dbPath.empty() || legacy == g_dbPath)
+            return;
+        std::error_code ec;
+        if (!std::filesystem::exists(g_dbPath, ec) && std::filesystem::exists(legacy, ec))
+        {
+            ensureParentDir(g_dbPath);
+            std::filesystem::copy_file(legacy, g_dbPath, std::filesystem::copy_options::skip_existing, ec);
+        }
+    }
+
     std::string dbPath()
     {
-        return g_moduleDir.empty() ? "pgs_profiles.db" : (g_moduleDir + "\\pgs_profiles.db");
+        return g_dbPath.empty() ? resolveDbPath() : g_dbPath;
     }
 
     bool saveProfiles()
     {
         const std::string path = dbPath();
+        if (!ensureParentDir(path))
+            return false;
         const std::string tmp = path + ".tmp";
         {
             std::ofstream out(tmp, std::ios::out | std::ios::binary | std::ios::trunc);
@@ -248,14 +305,27 @@ PG_MODULE_API int PG_Init(void *reserved)
     g_moduleDir = moduleDirOf(g_self);
     if (reserved)
     {
-        const PGS_Services *services = static_cast<const PGS_Services *>(reserved);
-        if (services->size >= sizeof(PGS_Services) && services->call)
+        const PGS_Services *base = static_cast<const PGS_Services *>(reserved);
+        if (base->size >= sizeof(PGS_Services))
         {
-            g_services = *services;
-            g_servicesReady = true;
+            g_services.size = base->size;
+            g_services.context = base->context;
+            g_services.call = base->call;
+            g_services.now_ms = base->now_ms;
+            if (base->size >= sizeof(PGS_ServicesV3))
+            {
+                const PGS_ServicesV3 *v3 = static_cast<const PGS_ServicesV3 *>(reserved);
+                g_services.call_json = v3->call_json;
+                g_services.emit_event = v3->emit_event;
+                g_services.get_data_dir = v3->get_data_dir;
+                g_services.log = v3->log;
+            }
+            g_servicesReady = (g_services.call != nullptr);
         }
     }
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_dbPath = resolveDbPath();
+    migrateLegacyDbIfNeeded();
     loadProfiles();
     return 0;
 }
@@ -265,7 +335,7 @@ PG_MODULE_API void PG_Shutdown(void)
     std::lock_guard<std::mutex> lock(g_mutex);
     saveProfiles();
     g_profiles.clear();
-    g_services = PGS_Services{};
+    g_services = PGS_ServicesV3{};
     g_servicesReady = false;
 }
 

@@ -17,6 +17,39 @@
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
+namespace
+{
+    class WinsockRuntime
+    {
+    public:
+        WinsockRuntime()
+        {
+            WSADATA data{};
+            m_result = WSAStartup(MAKEWORD(2, 2), &data);
+        }
+
+        ~WinsockRuntime()
+        {
+            if (ok())
+            {
+                WSACleanup();
+            }
+        }
+
+        bool ok() const { return m_result == 0; }
+        int result() const { return m_result; }
+
+    private:
+        int m_result = 0;
+    };
+
+    const WinsockRuntime &winsockRuntime()
+    {
+        static WinsockRuntime runtime;
+        return runtime;
+    }
+}
+
 namespace ProcessGuard::client
 {
 
@@ -92,6 +125,13 @@ namespace ProcessGuard::client
     ClientResponse sendCommand(const ClientOptions &options, const std::string &command, std::uint32_t timeoutMs)
     {
         ClientResponse response;
+
+        const WinsockRuntime &winsock = winsockRuntime();
+        if (!winsock.ok())
+        {
+            response.error = "WSAStartup failed, error=" + std::to_string(winsock.result());
+            return response;
+        }
 
         SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (sock == INVALID_SOCKET)

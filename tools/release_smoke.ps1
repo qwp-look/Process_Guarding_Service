@@ -88,8 +88,18 @@ $healthPath = Join-Path $Release 'modules\health\pgs_health_module.dll'
 $profilePath = Join-Path $Release 'modules\profile\pgs_profile_module.dll'
 $profileDb = Join-Path $Release 'modules\profile\pgs_profiles.db'
 $reportPath = Join-Path $Release 'modules\report\pgs_report_module.dll'
+$metricsPath = Join-Path $Release 'modules\metrics\pgs_metrics_module.dll'
+$backupPath = Join-Path $Release 'modules\backup\pgs_backup_module.dll'
+$eventlogPath = Join-Path $Release 'modules\eventlog\pgs_eventlog_module.dll'
+$dumpPath = Join-Path $Release 'modules\dump\pgs_dump_module.dll'
+$serviceGuardPath = Join-Path $Release 'modules\service_guard\pgs_service_guard_module.dll'
+$fileWatchPath = Join-Path $Release 'modules\file_watch\pgs_file_watch_module.dll'
+$policyPath = Join-Path $Release 'modules\policy\pgs_policy_module.dll'
+$remoteAgentPath = Join-Path $Release 'modules\remote_agent\pgs_remote_agent_module.dll'
+$updatePath = Join-Path $Release 'modules\update\pgs_update_module.dll'
+$scriptRunnerPath = Join-Path $Release 'modules\script_runner\pgs_script_runner_module.dll'
 
-foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $pplPath, $healthPath, $profilePath, $reportPath)) {
+foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $pplPath, $healthPath, $profilePath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath, $remoteAgentPath, $updatePath, $scriptRunnerPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "required release artifact missing: $required"
     }
@@ -169,13 +179,13 @@ try {
     }
     Write-Host '[release-smoke] sched call ok'
 
-    foreach ($modulePath in @($healthPath, $profilePath, $reportPath)) {
+    foreach ($modulePath in @($healthPath, $profilePath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath, $remoteAgentPath, $updatePath, $scriptRunnerPath)) {
         $load = Invoke-PgsOk @('module', 'load', '--path', $modulePath)
         if ($load -notmatch '^OK loaded') {
             throw "unexpected module load response for ${modulePath}: $load"
         }
     }
-    Write-Host '[release-smoke] health/profile/report load ok'
+    Write-Host '[release-smoke] bundled userland modules load ok'
 
     $health = Invoke-PgsOk @('health', 'summary')
     if ($health -notmatch '^OK status=') {
@@ -193,7 +203,33 @@ try {
     if ($report -notmatch '^OK mode=snapshot') {
         throw "report snapshot failed: $report"
     }
-    Write-Host '[release-smoke] health/profile/report call ok'
+    $metrics = Invoke-PgsOk @('metrics', 'summary')
+    if ($metrics -notmatch '^OK guards=') {
+        throw "metrics summary failed: $metrics"
+    }
+    $backup = Invoke-PgsOk @('backup', 'status')
+    if ($backup -notmatch '^OK data_dir_b64=') {
+        throw "backup status failed: $backup"
+    }
+    $eventlog = Invoke-PgsOk @('eventlog', 'status')
+    if ($eventlog -notmatch '^OK source=Application') {
+        throw "eventlog status failed: $eventlog"
+    }
+    foreach ($statusCheck in @(
+        @('dump', 'status'),
+        @('service-guard', 'status'),
+        @('file-watch', 'status'),
+        @('policy-template', 'status'),
+        @('remote-agent', 'status'),
+        @('update', 'status'),
+        @('script-runner', 'status')
+    )) {
+        $status = Invoke-PgsOk $statusCheck
+        if ($status -notmatch '^OK') {
+            throw "status check failed ($($statusCheck -join ' ')): $status"
+        }
+    }
+    Write-Host '[release-smoke] bundled module calls ok'
 
     $blessStart = Invoke-PgsOk @(
         'bless-start',

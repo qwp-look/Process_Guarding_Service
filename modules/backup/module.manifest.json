@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "backup",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Local PGS state backup snapshots.",
+  "risk": "low",
+  "capabilities": ["backup.snapshot", "pgs.operation.create", "pgs.operation.finish", "pgs.operation.fail", "pgs.artifact.put"],
+  "methods": [
+    {"name": "backup.snapshot", "risk": "low", "sync": true, "required_capabilities": ["backup.snapshot", "pgs.operation.create", "pgs.operation.finish", "pgs.artifact.put"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "backup.status", "risk": "low", "sync": true, "required_capabilities": ["backup.snapshot"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

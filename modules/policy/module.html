@@ -1,0 +1,5 @@
+<h3>Policy</h3>
+<p>Stores named restart-policy templates under the service data directory and applies them to existing guards.</p>
+<pre>op=set;name=steady;max=3;window=60;delay=1000
+op=list
+op=apply;name=steady;pid=1234</pre>

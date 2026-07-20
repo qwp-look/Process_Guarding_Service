@@ -1,0 +1,1 @@
+name=remote_agent;version=1.0.0;abi=3;summary=Local cluster-agent metadata surface;capabilities=remote_agent.status,guard.list,health.stats

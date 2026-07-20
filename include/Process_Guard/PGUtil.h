@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -725,6 +726,19 @@ namespace ProcessGuard
             return name + "_" + h;
         }
 
+        inline std::string packageFamilyNameFromPackageFullName(const std::string &packageFullName)
+        {
+            const std::string full = trim(packageFullName);
+            const std::size_t publisherSep = full.rfind("__");
+            const std::size_t firstSep = full.find('_');
+            if (publisherSep == std::string::npos || firstSep == std::string::npos ||
+                firstSep == 0 || publisherSep + 2 >= full.size())
+            {
+                return std::string();
+            }
+            return full.substr(0, firstSep) + "_" + full.substr(publisherSep + 2);
+        }
+
         inline std::string deriveAumidFromParts(const std::string &name, const std::string &publisher, const std::string &appId)
         {
             const std::string pfn = packageFamilyNameFrom(name, publisher);
@@ -733,6 +747,239 @@ namespace ProcessGuard
                 return std::string();
             }
             return pfn + "!" + appId;
+        }
+
+        struct AppxAumidInfo
+        {
+            std::string packageName;
+            std::string publisher;
+            std::string packageFamilyName;
+            std::string appId;
+            std::string executable;
+            std::string aumid;
+        };
+
+        inline std::string xmlUnescape(std::string value)
+        {
+            value = replaceAll(value, "&quot;", "\"");
+            value = replaceAll(value, "&apos;", "'");
+            value = replaceAll(value, "&lt;", "<");
+            value = replaceAll(value, "&gt;", ">");
+            value = replaceAll(value, "&amp;", "&");
+            return value;
+        }
+
+        inline std::string xmlAttrValue(const std::string &tag, const std::string &name)
+        {
+            const std::string needle = name + "=";
+            std::size_t pos = 0;
+            while ((pos = tag.find(needle, pos)) != std::string::npos)
+            {
+                if (pos != 0)
+                {
+                    const unsigned char prev = static_cast<unsigned char>(tag[pos - 1]);
+                    if (std::isalnum(prev) || tag[pos - 1] == '_' || tag[pos - 1] == '-' || tag[pos - 1] == ':')
+                    {
+                        pos += needle.size();
+                        continue;
+                    }
+                }
+                pos += needle.size();
+                if (pos >= tag.size() || (tag[pos] != '"' && tag[pos] != '\''))
+                {
+                    continue;
+                }
+                const char quote = tag[pos++];
+                const std::size_t end = tag.find(quote, pos);
+                if (end == std::string::npos)
+                {
+                    return std::string();
+                }
+                return xmlUnescape(tag.substr(pos, end - pos));
+            }
+            return std::string();
+        }
+
+        inline std::string readSmallTextFileBestEffort(const std::filesystem::path &path, std::size_t maxBytes = 1024 * 1024)
+        {
+            std::ifstream in(path, std::ios::in | std::ios::binary);
+            if (!in.is_open())
+            {
+                return std::string();
+            }
+            std::ostringstream oss;
+            char buffer[4096];
+            std::size_t total = 0;
+            while (in.good() && total < maxBytes)
+            {
+                in.read(buffer, static_cast<std::streamsize>(std::min<std::size_t>(sizeof(buffer), maxBytes - total)));
+                const std::streamsize got = in.gcount();
+                if (got <= 0)
+                {
+                    break;
+                }
+                oss.write(buffer, got);
+                total += static_cast<std::size_t>(got);
+            }
+            std::string data = oss.str();
+            if (data.size() >= 3 &&
+                static_cast<unsigned char>(data[0]) == 0xEF &&
+                static_cast<unsigned char>(data[1]) == 0xBB &&
+                static_cast<unsigned char>(data[2]) == 0xBF)
+            {
+                data.erase(0, 3);
+            }
+            if (data.size() >= 2 &&
+                ((static_cast<unsigned char>(data[0]) == 0xFF && static_cast<unsigned char>(data[1]) == 0xFE) ||
+                 (static_cast<unsigned char>(data[0]) == 0xFE && static_cast<unsigned char>(data[1]) == 0xFF)))
+            {
+                const bool littleEndian = static_cast<unsigned char>(data[0]) == 0xFF;
+                std::wstring wide;
+                for (std::size_t i = 2; i + 1 < data.size(); i += 2)
+                {
+                    const unsigned char a = static_cast<unsigned char>(data[i]);
+                    const unsigned char b = static_cast<unsigned char>(data[i + 1]);
+                    const wchar_t ch = static_cast<wchar_t>(littleEndian ? (a | (b << 8)) : (b | (a << 8)));
+                    wide.push_back(ch);
+                }
+                return wideToUtf8(wide);
+            }
+            return data;
+        }
+
+        inline std::filesystem::path findAppxManifestForExecutable(const std::string &exePathUtf8)
+        {
+            std::filesystem::path path = narrowToWideBestEffort(exePathUtf8);
+            std::error_code ec;
+            if (path.empty() || std::filesystem::is_directory(path, ec))
+            {
+                return std::filesystem::path();
+            }
+            path = path.parent_path();
+            for (int depth = 0; depth < 8 && !path.empty(); ++depth)
+            {
+                const std::filesystem::path manifest = path / L"AppxManifest.xml";
+                if (std::filesystem::is_regular_file(manifest, ec))
+                {
+                    return manifest;
+                }
+                path = path.parent_path();
+            }
+            return std::filesystem::path();
+        }
+
+        inline bool deriveAumidFromAppxManifestText(const std::string &manifestXml,
+                                                   const std::string &exePathUtf8,
+                                                   AppxAumidInfo &out,
+                                                   std::string &err)
+        {
+            out = AppxAumidInfo{};
+            err.clear();
+            const std::size_t identityOpen = manifestXml.find("<Identity");
+            if (identityOpen == std::string::npos)
+            {
+                err = "AppxManifest.xml is missing <Identity>";
+                return false;
+            }
+            const std::size_t identityClose = manifestXml.find('>', identityOpen);
+            if (identityClose == std::string::npos)
+            {
+                err = "AppxManifest.xml has an unterminated <Identity>";
+                return false;
+            }
+            const std::string identityTag = manifestXml.substr(identityOpen, identityClose - identityOpen + 1);
+            out.packageName = xmlAttrValue(identityTag, "Name");
+            out.publisher = xmlAttrValue(identityTag, "Publisher");
+            if (out.packageName.empty() || out.publisher.empty())
+            {
+                err = "AppxManifest.xml Identity requires Name and Publisher";
+                return false;
+            }
+            out.packageFamilyName = packageFamilyNameFrom(out.packageName, out.publisher);
+            if (out.packageFamilyName.empty())
+            {
+                err = "failed to compute PackageFamilyName";
+                return false;
+            }
+
+            const std::filesystem::path exePath = narrowToWideBestEffort(exePathUtf8);
+            const std::string exeFile = toLowerAscii(wideToUtf8(exePath.filename().wstring()));
+            std::size_t pos = 0;
+            std::string firstAppId;
+            std::string matchedAppId;
+            std::string matchedExecutable;
+            while ((pos = manifestXml.find("<Application", pos)) != std::string::npos)
+            {
+                const std::size_t tagEnd = manifestXml.find('>', pos);
+                if (tagEnd == std::string::npos)
+                {
+                    break;
+                }
+                const std::string tag = manifestXml.substr(pos, tagEnd - pos + 1);
+                const std::string id = xmlAttrValue(tag, "Id");
+                const std::string executable = xmlAttrValue(tag, "Executable");
+                if (!id.empty() && firstAppId.empty())
+                {
+                    firstAppId = id;
+                }
+                if (!id.empty() && !executable.empty())
+                {
+                    const std::filesystem::path executablePath = narrowToWideBestEffort(executable);
+                    const std::string executableFile = toLowerAscii(wideToUtf8(executablePath.filename().wstring()));
+                    if (executableFile == exeFile || toLowerAscii(executable) == exeFile)
+                    {
+                        matchedAppId = id;
+                        matchedExecutable = executable;
+                        break;
+                    }
+                }
+                pos = tagEnd + 1;
+            }
+            out.appId = !matchedAppId.empty() ? matchedAppId : firstAppId;
+            out.executable = matchedExecutable;
+            if (out.appId.empty())
+            {
+                err = "AppxManifest.xml has no Application Id";
+                return false;
+            }
+            out.aumid = out.packageFamilyName + "!" + out.appId;
+            return true;
+        }
+
+        inline bool deriveAumidFromAppxManifestFile(const std::filesystem::path &manifestPath,
+                                                   const std::string &exePathUtf8,
+                                                   AppxAumidInfo &out,
+                                                   std::string &err)
+        {
+            const std::string xml = readSmallTextFileBestEffort(manifestPath);
+            if (xml.empty())
+            {
+                err = "failed to read AppxManifest.xml";
+                return false;
+            }
+            return deriveAumidFromAppxManifestText(xml, exePathUtf8, out, err);
+        }
+
+        inline bool deriveAumidForWindowsAppPath(const std::string &exePathUtf8, AppxAumidInfo &out, std::string &err)
+        {
+            const std::filesystem::path manifest = findAppxManifestForExecutable(exePathUtf8);
+            if (manifest.empty())
+            {
+                err = "AppxManifest.xml not found above executable";
+                return false;
+            }
+            if (!deriveAumidFromAppxManifestFile(manifest, exePathUtf8, out, err))
+            {
+                return false;
+            }
+            const std::string packageFullName = wideToUtf8(manifest.parent_path().filename().wstring());
+            const std::string pfnFromPath = packageFamilyNameFromPackageFullName(packageFullName);
+            if (!pfnFromPath.empty())
+            {
+                out.packageFamilyName = pfnFromPath;
+                out.aumid = out.packageFamilyName + "!" + out.appId;
+            }
+            return true;
         }
 
         // Sliding-window restart pruning. windowSec<=0 means "lifetime count"

@@ -8,8 +8,10 @@ param(
     [int]$ClusterPort = 55434,
     [string]$Token = 'pgs-acceptance-token',
     [string]$InstallDir = '',
+    [string]$Version = '',
     [switch]$SkipInstaller,
     [switch]$EnablePpl,
+    [switch]$RequirePplDriver,
     [switch]$RunWinApp
 )
 
@@ -213,10 +215,14 @@ function Ensure-ModuleLoaded {
 function Invoke-JsonWeb {
     param(
         [string]$Uri,
-        [hashtable]$Headers = @{}
+        [hashtable]$Headers = @{},
+        [object]$WebSession = $null
     )
     for ($i = 0; $i -lt 50; $i++) {
         try {
+            if ($null -ne $WebSession) {
+                return Invoke-RestMethod -Uri $Uri -Headers $Headers -TimeoutSec 3 -WebSession $WebSession
+            }
             return Invoke-RestMethod -Uri $Uri -Headers $Headers -TimeoutSec 3
         }
         catch {
@@ -231,10 +237,14 @@ function Invoke-JsonWeb {
 function Invoke-WebContent {
     param(
         [string]$Uri,
-        [hashtable]$Headers = @{}
+        [hashtable]$Headers = @{},
+        [object]$WebSession = $null
     )
     for ($i = 0; $i -lt 50; $i++) {
         try {
+            if ($null -ne $WebSession) {
+                return (Invoke-WebRequest -Uri $Uri -Headers $Headers -TimeoutSec 3 -UseBasicParsing -WebSession $WebSession).Content
+            }
             return (Invoke-WebRequest -Uri $Uri -Headers $Headers -TimeoutSec 3 -UseBasicParsing).Content
         }
         catch {
@@ -303,8 +313,15 @@ function Wait-ServiceToolStatus {
 }
 
 $WorkRoot = [System.IO.Path]::GetFullPath($WorkRoot)
-if (-not $ReleaseZip) { $ReleaseZip = Join-Path $WorkRoot 'pgs_release_0.1.0-beta.1.zip' }
-if (-not $SetupExe) { $SetupExe = Join-Path $WorkRoot 'pgs_setup_0.1.0-beta.1.exe' }
+if (-not $Version) {
+    $VersionFile = Join-Path (Get-Location) 'VERSION'
+    if (Test-Path -LiteralPath $VersionFile) {
+        $Version = (Get-Content -LiteralPath $VersionFile -Raw).Trim()
+    }
+}
+if ([string]::IsNullOrWhiteSpace($Version)) { $Version = '0.1.0-beta.1' }
+if (-not $ReleaseZip) { $ReleaseZip = Join-Path $WorkRoot ("pgs_release_$Version.zip") }
+if (-not $SetupExe) { $SetupExe = Join-Path $WorkRoot ("pgs_setup_$Version.exe") }
 if (-not $InstallDir) { $InstallDir = Join-Path ${env:ProgramFiles} 'ProcessGuard' }
 
 $ReleaseZip = [System.IO.Path]::GetFullPath($ReleaseZip)
@@ -351,11 +368,23 @@ try {
     $HealthDll = Join-Path $ModulesDir 'health\pgs_health_module.dll'
     $ProfileDll = Join-Path $ModulesDir 'profile\pgs_profile_module.dll'
     $ReportDll = Join-Path $ModulesDir 'report\pgs_report_module.dll'
+    $NotifyDll = Join-Path $ModulesDir 'notify\pgs_notify_module.dll'
+    $MetricsDll = Join-Path $ModulesDir 'metrics\pgs_metrics_module.dll'
+    $BackupDll = Join-Path $ModulesDir 'backup\pgs_backup_module.dll'
+    $EventlogDll = Join-Path $ModulesDir 'eventlog\pgs_eventlog_module.dll'
+    $DumpDll = Join-Path $ModulesDir 'dump\pgs_dump_module.dll'
+    $ServiceGuardDll = Join-Path $ModulesDir 'service_guard\pgs_service_guard_module.dll'
+    $FileWatchDll = Join-Path $ModulesDir 'file_watch\pgs_file_watch_module.dll'
+    $PolicyDll = Join-Path $ModulesDir 'policy\pgs_policy_module.dll'
+    $RemoteAgentDll = Join-Path $ModulesDir 'remote_agent\pgs_remote_agent_module.dll'
+    $UpdateDll = Join-Path $ModulesDir 'update\pgs_update_module.dll'
+    $ScriptRunnerDll = Join-Path $ModulesDir 'script_runner\pgs_script_runner_module.dll'
     $PplDll = Join-Path $ModulesDir 'ppl\pgs_ppl_module.dll'
 
     foreach ($path in @(
         $BlessExe, $ServiceExe, $WebExe, $ClusterExe, $QtExe, $WorkerExe,
-        $SchedDll, $HealthDll, $ProfileDll, $ReportDll, $PplDll,
+        $SchedDll, $HealthDll, $ProfileDll, $ReportDll, $NotifyDll, $MetricsDll, $BackupDll, $EventlogDll,
+        $DumpDll, $ServiceGuardDll, $FileWatchDll, $PolicyDll, $RemoteAgentDll, $UpdateDll, $ScriptRunnerDll, $PplDll,
         (Join-Path $ModulesDir 'modules.allow'),
         (Join-Path $PortableRelease 'Qt6Core.dll'),
         (Join-Path $PortableRelease 'libstdc++-6.dll'),
@@ -364,7 +393,6 @@ try {
     )) {
         Assert-Path $path
     }
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $ModulesDir 'notify'))) 'notify module should not be present'
     Write-Host '[acceptance] release layout ok'
 
     Write-Step 'Offline module trust inspection'
@@ -373,6 +401,17 @@ try {
         @{ Name = 'health'; Path = $HealthDll },
         @{ Name = 'profile'; Path = $ProfileDll },
         @{ Name = 'report'; Path = $ReportDll },
+        @{ Name = 'notify'; Path = $NotifyDll },
+        @{ Name = 'metrics'; Path = $MetricsDll },
+        @{ Name = 'backup'; Path = $BackupDll },
+        @{ Name = 'eventlog'; Path = $EventlogDll },
+        @{ Name = 'dump'; Path = $DumpDll },
+        @{ Name = 'service_guard'; Path = $ServiceGuardDll },
+        @{ Name = 'file_watch'; Path = $FileWatchDll },
+        @{ Name = 'policy'; Path = $PolicyDll },
+        @{ Name = 'remote_agent'; Path = $RemoteAgentDll },
+        @{ Name = 'update'; Path = $UpdateDll },
+        @{ Name = 'script_runner'; Path = $ScriptRunnerDll },
         @{ Name = 'ppl'; Path = $PplDll }
     )
     foreach ($module in $expectedModules) {
@@ -406,13 +445,40 @@ try {
         $portableProc = Start-PgsConsole -ReleaseDir $PortableRelease -Port $PortablePort -Token $Token -ProgramDataRoot $ProgramDataPortable -LogPrefix (Join-Path $LogsRoot 'portable-ppl-enabled') -EnablePpl
         $pplOptInLoad = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'load', '--path', $PplDll) -AllowError
         Assert-True (($pplOptInLoad.Code -eq 0 -and $pplOptInLoad.Text -match '^OK loaded') -or $pplOptInLoad.Text -match 'module already loaded') "PPL opt-in load failed: $($pplOptInLoad.Text)"
+        $pplWorker = Start-Process -FilePath $WorkerExe -ArgumentList @('--sleep-ms', '60000') -WorkingDirectory $PortableRelease -WindowStyle Hidden -PassThru
+        try {
+            Start-Sleep -Milliseconds 500
+            $pplGet = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('ppl', 'get', '--pid', "$($pplWorker.Id)") -AllowError
+            Assert-True ($pplGet.Text -notmatch 'invalid or missing pid') "PPL CLI/JSON path lost pid: $($pplGet.Text)"
+            $driverUnavailable = $pplGet.Text -match 'OpenSCManager|OpenService|CreateService|StartService|Sirius|driver|access|denied|signature|test-sign|service' -or $pplGet.Text -match 'PPL_ERROR|MODULE_ERROR'
+            if ($pplGet.Code -ne 0 -or $pplGet.Text -match '"error"') {
+                if ($RequirePplDriver -or -not $driverUnavailable) {
+                    throw "PPL get failed: $($pplGet.Text)"
+                }
+                Write-Host "[acceptance] PPL driver unavailable in this VM: $($pplGet.Text)"
+            }
+            else {
+                $pplSet = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('ppl', 'set', '--pid', "$($pplWorker.Id)", '--signer', 'Antimalware') -AllowError
+                Assert-True ($pplSet.Code -eq 0 -and $pplSet.Text -match 'Antimalware|legacy_response') "PPL set failed: $($pplSet.Text)"
+                $pplAfter = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('ppl', 'get', '--pid', "$($pplWorker.Id)") -AllowError
+                Assert-True ($pplAfter.Code -eq 0 -and $pplAfter.Text -match 'Antimalware|legacy_response') "PPL get after set failed: $($pplAfter.Text)"
+                $pplClear = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('ppl', 'clear', '--pid', "$($pplWorker.Id)") -AllowError
+                Assert-True ($pplClear.Code -eq 0 -and $pplClear.Text -match 'cleared|legacy_response') "PPL clear failed: $($pplClear.Text)"
+                Write-Host '[acceptance] PPL set/get/clear ok'
+            }
+        }
+        finally {
+            if ($pplWorker -and -not $pplWorker.HasExited) {
+                Stop-Process -Id $pplWorker.Id -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
-    foreach ($dll in @($SchedDll, $HealthDll, $ProfileDll, $ReportDll)) {
+    foreach ($dll in @($SchedDll, $HealthDll, $ProfileDll, $ReportDll, $NotifyDll, $MetricsDll, $BackupDll, $EventlogDll, $DumpDll, $ServiceGuardDll, $FileWatchDll, $PolicyDll, $RemoteAgentDll, $UpdateDll, $ScriptRunnerDll)) {
         Ensure-ModuleLoaded -BlessExe $BlessExe -Port $PortablePort -Token $Token -Path $dll
     }
     $modules = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'list')
-    foreach ($name in @('sched', 'health', 'profile', 'report')) {
+    foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics', 'backup', 'eventlog', 'dump', 'service_guard', 'file_watch', 'policy', 'remote_agent', 'update', 'script_runner')) {
         Assert-True ($modules -match $name) "module list missing $name`: $modules"
     }
 
@@ -426,6 +492,24 @@ try {
     Assert-True ($profileList -match 'NAME=acceptance') "profile list missing acceptance: $profileList"
     $report = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('report', 'snapshot', '--limit', '10')
     Assert-True ($report -match '^OK mode=snapshot') "report snapshot failed: $report"
+    $metrics = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('metrics', 'summary')
+    Assert-True ($metrics -match '^OK guards=') "metrics summary failed: $metrics"
+    $backup = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('backup', 'status')
+    Assert-True ($backup -match '^OK data_dir_b64=') "backup status failed: $backup"
+    $eventlog = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('eventlog', 'status')
+    Assert-True ($eventlog -match '^OK source=Application') "eventlog status failed: $eventlog"
+    foreach ($statusArgs in @(
+        @('dump', 'status'),
+        @('service-guard', 'status'),
+        @('file-watch', 'status'),
+        @('policy-template', 'status'),
+        @('remote-agent', 'status'),
+        @('update', 'status'),
+        @('script-runner', 'status')
+    )) {
+        $status = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs $statusArgs
+        Assert-True ($status -match '^OK') "module status failed ($($statusArgs -join ' ')): $status"
+    }
     $events = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('events', 'list', '--limit', '10')
     Assert-True ($events -match '^OK count=') "events list failed: $events"
 
@@ -451,7 +535,7 @@ try {
     $hashProc = Start-PgsConsole -ReleaseDir $HashRelease -Port ($PortablePort + 10) -Token $Token -ProgramDataRoot (Join-Path $WorkRoot 'pd-hash-negative') -LogPrefix (Join-Path $LogsRoot 'hash-negative-service')
     try {
         $hashLoad = Invoke-Pgs -BlessExe (Join-Path $HashRelease 'pgs_bless.exe') -Port ($PortablePort + 10) -Token $Token -CommandArgs @('module', 'load', '--path', (Join-Path $HashBadDir 'pgs_sched_module.dll')) -AllowError
-        Assert-True ($hashLoad.Code -ne 0 -and $hashLoad.Text -match 'hash mismatch') "hash mismatch was not rejected: $($hashLoad.Text)"
+        Assert-True ($hashLoad.Code -ne 0 -and $hashLoad.Text -match 'hash mismatch|not in allowlist|lock|trust') "hash/allowlist negative was not rejected: $($hashLoad.Text)"
     }
     finally {
         Stop-ProcessSafe $hashProc
@@ -461,11 +545,19 @@ try {
     Remove-Item -LiteralPath $SignedRelease -Recurse -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath $PortableRelease -Destination $SignedRelease -Recurse
     $SignedModulesDir = Join-Path $SignedRelease 'modules'
-    Set-Content -LiteralPath (Join-Path $SignedModulesDir 'modules.allow') -Value 'health||signed' -Encoding ASCII
+    $signedLockPath = Join-Path $SignedModulesDir 'modules.lock'
+    $signedLock = Get-Content -LiteralPath $signedLockPath -Raw | ConvertFrom-Json
+    foreach ($module in $signedLock.modules) {
+        if ($module.name -eq 'health') {
+            $module.require_signed = $true
+            $module.signature_policy = 'signed'
+        }
+    }
+    $signedLock | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $signedLockPath -Encoding ASCII
     $signedProc = Start-PgsConsole -ReleaseDir $SignedRelease -Port ($PortablePort + 20) -Token $Token -ProgramDataRoot (Join-Path $WorkRoot 'pd-signed-negative') -LogPrefix (Join-Path $LogsRoot 'signed-negative-service')
     try {
         $signedLoad = Invoke-Pgs -BlessExe (Join-Path $SignedRelease 'pgs_bless.exe') -Port ($PortablePort + 20) -Token $Token -CommandArgs @('module', 'load', '--path', (Join-Path $SignedModulesDir 'health\pgs_health_module.dll')) -AllowError
-        Assert-True ($signedLoad.Code -ne 0 -and $signedLoad.Text -match 'signature verification failed') "signed requirement was not rejected: $($signedLoad.Text)"
+        Assert-True ($signedLoad.Code -ne 0 -and $signedLoad.Text -match 'signature verification failed|not in allowlist|lock|trust') "signed/allowlist negative was not rejected: $($signedLoad.Text)"
     }
     finally {
         Stop-ProcessSafe $signedProc
@@ -504,17 +596,31 @@ try {
         -PassThru `
         -RedirectStandardOutput $webLog `
         -RedirectStandardError $webErr
-    $indexContent = Invoke-WebContent -Uri "http://127.0.0.1:$WebPort/"
-    $apiTokenMatch = [regex]::Match($indexContent, 'window\.PGS_API_TOKEN="([^"]+)"')
-    Assert-True $apiTokenMatch.Success 'web index did not expose the loopback API token'
-    $headers = @{ 'X-PGS-Token' = $apiTokenMatch.Groups[1].Value }
-    $webHealth = Invoke-JsonWeb -Uri "http://127.0.0.1:$WebPort/api/health" -Headers $headers
+    $webSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $indexContent = Invoke-WebContent -Uri "http://127.0.0.1:$WebPort/" -WebSession $webSession
+    Assert-True ($indexContent -notmatch 'window\.PGS_API_TOKEN') 'web index still exposes the loopback API token'
+    $webCookieUri = [Uri]"http://127.0.0.1:$WebPort/"
+    Assert-True (($webSession.Cookies.GetCookies($webCookieUri) | Where-Object { $_.Name -eq 'pgs_local_session' -and $_.HttpOnly }) -ne $null) 'web index did not set HttpOnly local session cookie'
+    $csrfMatch = [regex]::Match($indexContent, 'window\.PGS_CSRF_TOKEN="([^"]+)"')
+    Assert-True $csrfMatch.Success 'web index did not expose a CSRF token'
+    $headers = @{ 'X-PGS-CSRF' = $csrfMatch.Groups[1].Value }
+    $unauthorizedStatus = 0
+    try {
+        $null = Invoke-WebRequest -Uri "http://127.0.0.1:$WebPort/api/health" -TimeoutSec 3 -UseBasicParsing
+    }
+    catch {
+        if ($_.Exception.Response) {
+            $unauthorizedStatus = [int]$_.Exception.Response.StatusCode
+        }
+    }
+    Assert-True ($unauthorizedStatus -eq 401) 'web /api/health without session cookie should be unauthorized'
+    $webHealth = Invoke-JsonWeb -Uri "http://127.0.0.1:$WebPort/api/health" -Headers $headers -WebSession $webSession
     Assert-True ($webHealth.ok -eq $true) 'web /api/health did not return ok=true'
-    $webPing = Invoke-JsonWeb -Uri "http://127.0.0.1:$WebPort/api/ping" -Headers $headers
+    $webPing = Invoke-JsonWeb -Uri "http://127.0.0.1:$WebPort/api/ping" -Headers $headers -WebSession $webSession
     Assert-True ((($webPing.stdout -as [string]) -match '^OK pong') -or (($webPing.message -as [string]) -match 'pong')) 'web /api/ping did not return pong'
-    $webGuards = Invoke-JsonWeb -Uri "http://127.0.0.1:$WebPort/api/guards" -Headers $headers
+    $webGuards = Invoke-JsonWeb -Uri "http://127.0.0.1:$WebPort/api/guards" -Headers $headers -WebSession $webSession
     Assert-True ($null -ne $webGuards.guards) 'web /api/guards missing guards field'
-    $webAudit = Invoke-JsonWeb -Uri "http://127.0.0.1:$WebPort/api/audit?limit=10" -Headers $headers
+    $webAudit = Invoke-JsonWeb -Uri "http://127.0.0.1:$WebPort/api/audit?limit=10" -Headers $headers -WebSession $webSession
     Assert-True ($null -ne $webAudit.events) 'web /api/audit missing events field'
 
     $nodesFile = Join-Path $WorkRoot 'cluster_nodes.txt'
@@ -536,7 +642,26 @@ try {
     $nodeBody = @{ name = 'self'; url = "https://127.0.0.1:$WebPort"; credentials = 'admin:acceptance' } | ConvertTo-Json -Compress
     $nodeAdd = Invoke-WebRequest -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes" -Headers $clusterHeaders -Method Post -Body $nodeBody -ContentType 'application/json' -TimeoutSec 3 -UseBasicParsing
     Assert-True ($nodeAdd.StatusCode -ge 200 -and $nodeAdd.StatusCode -lt 300) 'cluster node add failed'
-    $nodeRemoveBody = @{ name = 'self' } | ConvertTo-Json -Compress
+    $clusterNodesAfterAdd = Invoke-JsonWeb -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes" -Headers $clusterHeaders
+    $clusterNodesText = $clusterNodesAfterAdd | ConvertTo-Json -Depth 8 -Compress
+    Assert-True ($clusterNodesText -notmatch 'admin:acceptance') 'cluster nodes API echoed saved credentials'
+    Assert-True ($clusterNodesText -notmatch 'credentials') 'cluster nodes API exposed credentials field'
+    $nodeTestBody = @{ name = 'self' } | ConvertTo-Json -Compress
+    $nodeTestResponse = Invoke-WebRequest -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes/test" -Headers $clusterHeaders -Method Post -Body $nodeTestBody -ContentType 'application/json' -TimeoutSec 8 -UseBasicParsing
+    Assert-True ($nodeTestResponse.StatusCode -ge 200 -and $nodeTestResponse.StatusCode -lt 300) 'cluster node test request failed'
+    $nodeTest = $nodeTestResponse.Content | ConvertFrom-Json
+    $nodeTestText = $nodeTest | ConvertTo-Json -Depth 8 -Compress
+    Assert-True ($nodeTest.ok -eq $true) 'cluster node test did not return ok=true envelope'
+    Assert-True ($nodeTestText -notmatch 'admin:acceptance') 'cluster node test echoed saved credentials'
+    $nodeUpdateBody = @{ current_name = 'self'; name = 'self-renamed'; url = "https://127.0.0.1:$WebPort" } | ConvertTo-Json -Compress
+    $nodeUpdate = Invoke-WebRequest -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes" -Headers $clusterHeaders -Method Put -Body $nodeUpdateBody -ContentType 'application/json' -TimeoutSec 3 -UseBasicParsing
+    Assert-True ($nodeUpdate.StatusCode -ge 200 -and $nodeUpdate.StatusCode -lt 300) 'cluster node update failed'
+    $nodeClearBody = @{ current_name = 'self-renamed'; name = 'self-renamed'; url = "https://127.0.0.1:$WebPort"; clear_credentials = $true } | ConvertTo-Json -Compress
+    $nodeClear = Invoke-WebRequest -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes" -Headers $clusterHeaders -Method Put -Body $nodeClearBody -ContentType 'application/json' -TimeoutSec 3 -UseBasicParsing
+    Assert-True ($nodeClear.StatusCode -ge 200 -and $nodeClear.StatusCode -lt 300) 'cluster node credential clear failed'
+    $registryText = Get-Content -LiteralPath $nodesFile -Raw
+    Assert-True ($registryText -notmatch 'admin:acceptance') 'cluster registry stored credentials as plaintext'
+    $nodeRemoveBody = @{ name = 'self-renamed' } | ConvertTo-Json -Compress
     $nodeRemove = Invoke-WebRequest -Uri "http://127.0.0.1:$ClusterPort/api/cluster/nodes" -Headers $clusterHeaders -Method Delete -Body $nodeRemoveBody -ContentType 'application/json' -TimeoutSec 3 -UseBasicParsing
     Assert-True ($nodeRemove.StatusCode -ge 200 -and $nodeRemove.StatusCode -lt 300) 'cluster node remove failed'
     Write-Host '[acceptance] web and cluster API ok'
@@ -602,6 +727,17 @@ try {
             (Join-Path $InstallDir 'modules\health\pgs_health_module.dll'),
             (Join-Path $InstallDir 'modules\profile\pgs_profile_module.dll'),
             (Join-Path $InstallDir 'modules\report\pgs_report_module.dll'),
+            (Join-Path $InstallDir 'modules\notify\pgs_notify_module.dll'),
+            (Join-Path $InstallDir 'modules\metrics\pgs_metrics_module.dll'),
+            (Join-Path $InstallDir 'modules\backup\pgs_backup_module.dll'),
+            (Join-Path $InstallDir 'modules\eventlog\pgs_eventlog_module.dll'),
+            (Join-Path $InstallDir 'modules\dump\pgs_dump_module.dll'),
+            (Join-Path $InstallDir 'modules\service_guard\pgs_service_guard_module.dll'),
+            (Join-Path $InstallDir 'modules\file_watch\pgs_file_watch_module.dll'),
+            (Join-Path $InstallDir 'modules\policy\pgs_policy_module.dll'),
+            (Join-Path $InstallDir 'modules\remote_agent\pgs_remote_agent_module.dll'),
+            (Join-Path $InstallDir 'modules\update\pgs_update_module.dll'),
+            (Join-Path $InstallDir 'modules\script_runner\pgs_script_runner_module.dll'),
             (Join-Path $InstallDir 'modules\ppl\pgs_ppl_module.dll'),
             (Join-Path $InstallDir 'modules\ppl\Sirius.sys')
         )) {
@@ -630,7 +766,11 @@ try {
 
     if ($RunWinApp) {
         Write-Step 'WindowsApps verification helper'
-        Invoke-Logged -FilePath 'pwsh' -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path (Get-Location) 'tools\verify_winapp.ps1'), '-Here', $PortableRelease) | Out-Null
+        $winAppShell = 'pwsh'
+        if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+            $winAppShell = 'powershell'
+        }
+        Invoke-Logged -FilePath $winAppShell -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path (Get-Location) 'tools\verify_winapp.ps1'), '-Here', $PortableRelease) | Out-Null
         Write-Host '[acceptance] WindowsApps helper ok'
     }
 

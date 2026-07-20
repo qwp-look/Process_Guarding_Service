@@ -12,20 +12,19 @@ on:
       tag_name:
         description: Release tag to create or update when dispatching from a branch.
         required: false
-        default: Personal_Version_V3.1.0
+        default: ''
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   publish:
     runs-on: windows-2025
     env:
-      DEFAULT_TAG_NAME: Personal_Version_V3.1.0
       REQUESTED_TAG_NAME: ${{ github.event.inputs.tag_name }}
-      RELEASE_NAME: ProcessGuard Service 3.1.0
-      INSTALLER: installer/Output/pgs_setup_3.1.0.exe
-      RELEASE_ZIP: installer/Output/pgs_release_3.1.0.zip
+      PGS_VERSION_FILE: VERSION
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
@@ -95,7 +94,31 @@ jobs:
       - name: Build release artifacts from current ref
         shell: pwsh
         run: |
+          $version = (Get-Content -LiteralPath $env:PGS_VERSION_FILE -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) { throw 'VERSION is empty' }
+          "PGS_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_NAME=ProcessGuard Service $version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "INSTALLER=installer/Output/pgs_setup_$version.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_ZIP=installer/Output/pgs_release_$version.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SHA256SUMS=installer/Output/SHA256SUMS.txt" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_MANIFEST=installer/Output/release-manifest.json" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SBOM=installer/Output/sbom.spdx.json" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ([string]::IsNullOrWhiteSpace($env:REQUESTED_TAG_NAME)) {
+            "DEFAULT_TAG_NAME=Personal_Version_V$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            "DEFAULT_TAG_NAME=$env:REQUESTED_TAG_NAME" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
           .\tools\build_installer.bat
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            installer/Output/pgs_setup_*.exe
+            installer/Output/pgs_release_*.zip
+            installer/Output/SHA256SUMS.txt
+            installer/Output/release-manifest.json
+            installer/Output/sbom.spdx.json
 
       - name: Publish GitHub release
         shell: pwsh
@@ -117,34 +140,55 @@ jobs:
             'User-Agent' = 'pgs-release-publisher'
           }
 
-          foreach ($path in @($env:INSTALLER, $env:RELEASE_ZIP)) {
-            if (-not (Test-Path -LiteralPath $path)) {
-              throw "Release asset missing: $path"
+          $uploadAssets = @(
+            [pscustomobject]@{ Path = $env:INSTALLER; ContentType = 'application/octet-stream' }
+            [pscustomobject]@{ Path = $env:RELEASE_ZIP; ContentType = 'application/zip' }
+            [pscustomobject]@{ Path = $env:SHA256SUMS; ContentType = 'text/plain' }
+            [pscustomobject]@{ Path = $env:RELEASE_MANIFEST; ContentType = 'application/json' }
+            [pscustomobject]@{ Path = $env:SBOM; ContentType = 'application/json' }
+          )
+
+          foreach ($asset in $uploadAssets) {
+            if (-not (Test-Path -LiteralPath $asset.Path)) {
+              throw "Release asset missing: $($asset.Path)"
             }
           }
 
           $installerHash = (Get-FileHash -LiteralPath $env:INSTALLER -Algorithm SHA256).Hash
           $zipHash = (Get-FileHash -LiteralPath $env:RELEASE_ZIP -Algorithm SHA256).Hash
+          $checksumsHash = (Get-FileHash -LiteralPath $env:SHA256SUMS -Algorithm SHA256).Hash
+          $manifestHash = (Get-FileHash -LiteralPath $env:RELEASE_MANIFEST -Algorithm SHA256).Hash
+          $sbomHash = (Get-FileHash -LiteralPath $env:SBOM -Algorithm SHA256).Hash
           $body = @"
-ProcessGuard Service 3.1.0 release.
+ProcessGuard Service $env:PGS_VERSION release.
 
 Source ref:
 - $env:GITHUB_REF_NAME ($env:GITHUB_SHA)
 
 Assets:
-- pgs_setup_3.1.0.exe - installer, SHA256 $installerHash
-- pgs_release_3.1.0.zip - portable release tree, SHA256 $zipHash
+- $([IO.Path]::GetFileName($env:INSTALLER)) - installer, SHA256 $installerHash
+- $([IO.Path]::GetFileName($env:RELEASE_ZIP)) - portable release tree, SHA256 $zipHash
+- $([IO.Path]::GetFileName($env:SHA256SUMS)) - release asset checksums, SHA256 $checksumsHash
+- $([IO.Path]::GetFileName($env:RELEASE_MANIFEST)) - file/module manifest, SHA256 $manifestHash
+- $([IO.Path]::GetFileName($env:SBOM)) - SPDX SBOM, SHA256 $sbomHash
+
+Supply-chain metadata:
+- release-manifest.json records release tree files, hashes, source commit, toolchain versions, and modules.lock.
+- sbom.spdx.json is generated from the exact release tree.
+- GitHub Actions artifact attestation is generated for the installer, portable zip, checksum file, release manifest, and SBOM.
 
 Includes:
 - hardened admin web remote mode with TLS/RBAC/audit/CSRF gates
 - hardened cluster dashboard with API token, HTTPS, node TLS verification, and safe registry handling
 - lightweight Qt TCP HTTP shim for Windows VM response reliability
 - refreshed self-contained release tree with Qt/OpenSSL runtime closure
+- bundled metrics, backup, eventlog, and Windows-native notify modules
 - Inno Setup installer plus portable zip
 
 Validation completed by this workflow:
 - tools\verify.bat from the checked-out ref
 - tools\build_installer.bat, which rebuilds release\ and installer\Output from the checked-out ref
+- release manifest, SBOM, SHA256SUMS, and artifact attestation generation from CI outputs
 "@
 
           $release = $null
@@ -192,8 +236,9 @@ Validation completed by this workflow:
             -Uri "https://api.github.com/repos/$repo/releases/$($release.id)/assets" `
             -Headers $headers
 
+          $assetNames = $uploadAssets | ForEach-Object { [IO.Path]::GetFileName($_.Path) }
           foreach ($asset in $assets) {
-            if ($asset.name -in @('pgs_setup_3.1.0.exe', 'pgs_release_3.1.0.zip')) {
+            if ($asset.name -in $assetNames) {
               Invoke-RestMethod -Method Delete -Uri $asset.url -Headers $headers | Out-Null
             }
           }
@@ -209,7 +254,8 @@ Validation completed by this workflow:
               -ContentType $ContentType | Out-Null
           }
 
-          Upload-Asset $env:INSTALLER 'application/octet-stream'
-          Upload-Asset $env:RELEASE_ZIP 'application/zip'
+          foreach ($asset in $uploadAssets) {
+            Upload-Asset $asset.Path $asset.ContentType
+          }
 
           "Published $($release.html_url)"

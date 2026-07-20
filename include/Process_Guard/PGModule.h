@@ -193,6 +193,7 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
  *   {"jsonrpc":"2.0","id":"...","error":{"code":"ERR_CODE","message":"..."}}
  */
 typedef int (*PG_InvokeJsonFn)(const char *requestJson, char *responseJson, size_t responseJsonSize);
+PG_MODULE_API int PG_InvokeJson(const char *requestJson, char *responseJson, size_t responseJsonSize);
 
 #ifdef __cplusplus
 }

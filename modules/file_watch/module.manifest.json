@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "file_watch",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Demand-driven local file change watcher.",
+  "risk": "medium",
+  "capabilities": ["file.watch", "event.emit"],
+  "methods": [
+    {"name": "file_watch.add", "risk": "medium", "sync": true, "required_capabilities": ["file.watch"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "file_watch.check", "risk": "low", "sync": true, "required_capabilities": ["file.watch", "event.emit"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

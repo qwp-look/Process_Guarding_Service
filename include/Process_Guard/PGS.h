@@ -84,6 +84,13 @@ namespace ProcessGuard
         // health checks and restart hooks are stored/validated by the core,
         // while execution remains opt-in via trusted modules/future runners.
         std::string healthCheckJson;
+        std::string healthStatus = "disabled";
+        std::string healthLastMessage;
+        std::int64_t healthLastCheckMs = 0;
+        std::int64_t healthLastOkMs = 0;
+        std::int64_t healthLastFailureMs = 0;
+        std::int64_t healthNextCheckMs = 0;
+        int healthFailureCount = 0;
         std::string groupName;
         bool paused = false;
         std::int64_t createdAtMs = 0;
@@ -95,6 +102,11 @@ namespace ProcessGuard
         int restartIntervalCount = 0;
         bool crashLoop = false;
         std::string restartHookJson;
+        bool quarantined = false;
+        std::string lastFailureCode;
+        std::string lastFailure;
+        std::int64_t nextRetryMs = 0;
+        int failureCount = 0;
     };
 
     struct GuardGroupState
@@ -156,6 +168,11 @@ namespace ProcessGuard
         int restartIntervalCount = 0;
         bool crashLoop = false;
         std::string restartHookJson;
+        bool quarantined = false;
+        std::string lastFailureCode;
+        std::string lastFailure;
+        std::int64_t nextRetryMs = 0;
+        int failureCount = 0;
     };
 
     class PGS
@@ -240,6 +257,8 @@ namespace ProcessGuard
         std::atomic<bool> m_running{false};
         std::thread m_listenerThread;
         std::thread m_monitorThread;
+        std::thread m_healthThread;
+        std::thread m_notifyThread;
 
         SOCKET m_listenSocket = INVALID_SOCKET;
 
@@ -253,6 +272,79 @@ namespace ProcessGuard
         std::unordered_map<std::uint64_t, PersistedGuardState> m_persistedGuards;
         std::unordered_map<std::string, GuardGroupState> m_guardGroups;
         std::atomic<std::uint64_t> m_nextGuardId{1};
+
+    public:
+
+        struct OperationRecord
+        {
+            std::string id;
+            std::string module;
+            std::string method;
+            std::string status;
+            int progress = -1;
+            std::string message;
+            std::string resultJson;
+            std::string errorCode;
+            std::string errorMessage;
+            std::vector<std::string> artifactIds;
+            std::int64_t createdMs = 0;
+            std::int64_t updatedMs = 0;
+            std::int64_t expiresMs = 0;
+            std::string traceId;
+            std::string caller;
+        };
+
+        struct ArtifactRecord
+        {
+            std::string id;
+            std::string module;
+            std::string method;
+            std::string contentType;
+            std::string filename;
+            std::uint64_t size = 0;
+            std::string sha256;
+            std::int64_t createdMs = 0;
+            std::int64_t expiresMs = 0;
+            std::string traceId;
+            std::string operationId;
+            std::string storageHash;
+            bool storageHashVerified = false;
+        };
+
+        struct ArtifactCleanupResult
+        {
+            std::size_t removed = 0;
+            std::uint64_t reclaimedBytes = 0;
+            std::size_t verified = 0;
+            std::size_t corruptRemoved = 0;
+        };
+
+        struct ArtifactStoreStatus
+        {
+            bool storeExists = false;
+            bool rootSecured = false;
+            std::size_t count = 0;
+            std::uint64_t totalBytes = 0;
+            std::size_t expired = 0;
+            std::size_t corrupt = 0;
+            std::size_t orphaned = 0;
+            std::size_t verified = 0;
+        };
+
+    private:
+
+        std::mutex m_operationMutex;
+        std::unordered_map<std::string, OperationRecord> m_operations;
+        mutable std::mutex m_artifactMutex;
+        std::unordered_map<std::string, ArtifactRecord> m_artifacts;
+        std::int64_t m_artifactRetentionTtlMs = 24LL * 60LL * 60LL * 1000LL;
+        bool m_artifactAutoCleanup = true;
+        bool m_artifactVerifyOnStatus = false;
+        ArtifactCleanupResult cleanupArtifactsLocked(bool removeExpired, bool removeAll, bool verifyContentHash, std::string &detail);
+        ArtifactStoreStatus artifactStoreStatusLocked(bool verifyContentHash, std::string &detail);
+        void loadArtifactPolicyLocked();
+        bool saveArtifactPolicyLocked(std::string &error) const;
+        std::string artifactPolicySummaryLocked() const;
 
         // Modules: loaded DLL plugins discovered under m_modulesDir.
         ModuleManager m_modules;
@@ -302,6 +394,11 @@ namespace ProcessGuard
         std::condition_variable m_clientQueueCv;
         std::queue<SOCKET> m_clientQueue;
         std::vector<std::thread> m_clientWorkers;
+        std::mutex m_healthMutex;
+        std::condition_variable m_healthCv;
+        std::mutex m_notifyMutex;
+        std::condition_variable m_notifyCv;
+        std::queue<std::pair<std::string, std::string>> m_notifyQueue;
 
         std::mutex m_eventsMutex;
         std::deque<std::string> m_events;
@@ -309,6 +406,8 @@ namespace ProcessGuard
 
         void listenerLoop();
         void monitorLoop();
+        void healthLoop();
+        void notifyLoop();
         void clientWorkerLoop();
         void handleClient(SOCKET clientSocket);
 
@@ -319,11 +418,17 @@ namespace ProcessGuard
         std::string dispatchCommandLine(const std::string &commandLine);
         // "module list|load|unload|call|invoke" sub-protocol handler.
         std::string handleModuleCommand(const std::string &args);
+        std::string handleCoreJsonRpc(const std::string &requestJson);
+        std::string handleArtifactChunkCommand(const std::string &args);
+        std::string handleArtifactCleanupCommand(const std::string &args);
+        std::string handleArtifactStatusCommand(const std::string &args);
+        std::string handleArtifactPolicyCommand(const std::string &args);
         // "ppl set|get|clear" convenience wrapper that routes to the ppl module.
         std::string handlePplCommand(const std::string &args);
         // Phase 8 guard metadata and batch-control commands.
         std::string handleHealthCheckCommand(const std::string &args);
         std::string handleGroupCommand(const std::string &args);
+        std::string handleGuardCommand(const std::string &args);
         std::string handleRestartHookCommand(const std::string &args);
         // "events list [limit]" returns a bounded in-memory action timeline.
         std::string handleEventsCommand(const std::string &args);
@@ -357,10 +462,10 @@ namespace ProcessGuard
         std::string handleList();
         std::string handleGet(DWORD pid);
         bool isGuardAlive(const GuardInfo &info) const;
-        bool restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard);
-        bool restartGuardInSession(const GuardInfo &info, int restartIndex, GuardInfo &newGuard);
+        bool restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage);
+        bool restartGuardInSession(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage);
         // Restart a WindowsApps (UWP/Store) guard via AUMID activation.
-        bool restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard);
+        bool restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage);
 
         // ---- Job Object helpers (full cascade, IOCP-driven monitoring) ----
         // Create a named job Global\PGS-Job-<guardId>, bind its completion port
@@ -413,6 +518,15 @@ namespace ProcessGuard
         static RecvResult recvMessage(SOCKET socket, std::string &payload);
         static bool sendAll(SOCKET socket, const std::string &payload);
         static std::string makeGuardSummaryLine(const GuardInfo &guard, int restartCount, bool groupPaused = false);
+        static std::string makePersistedGuardSummaryLine(const PersistedGuardState &guard, int restartCount, bool groupPaused = false);
+        static void clearFailureState(GuardInfo &guard);
+        static void clearFailureState(PersistedGuardState &guard);
+        static void resetHealthRuntimeState(GuardInfo &guard);
+        static bool validateHealthCheckConfig(const std::string &configJson, std::string &error);
+        static void markGuardQuarantined(PersistedGuardState &guard, const std::string &code, const std::string &reason, std::int64_t nowMs);
+        void quarantineGuardLocked(const GuardInfo &guard, const std::string &code, const std::string &reason);
+        std::string retryQuarantinedGuard(std::uint64_t guardId);
+        std::string clearQuarantinedGuard(std::uint64_t guardId);
         static std::string parentDirectory(const std::string &path);
         static std::string maxRestartsLabelFor(int maxRestarts) { return maxRestartsLabel(maxRestarts); }
         bool stripAuthEnvelope(const std::string &message, std::string &commandLine) const;

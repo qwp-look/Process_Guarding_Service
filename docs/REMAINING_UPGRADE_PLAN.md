@@ -7,23 +7,35 @@ This document captures the unfinished work after the module ecosystem and securi
 Completed in the current repository state:
 
 - Module protocol v3 foundation: JSON-RPC style `module invoke`, ABI v3 `PG_InvokeJson`, `PGS_ServicesV3`, request/response size and deadline policy.
+- Shared OperationStore / ArtifactStore: core JSON methods now expose `pgs.operation.*` and `pgs.artifact.*`; CLI/Web/Qt cover operation status, artifact metadata/download, cleanup, store status, and retention policy controls.
+- WindowsApps activation: `bless-start --winapp --aumid` can activate and register apps, and CLI can best-effort derive AUMID from `AppxManifest.xml` when given a WindowsApps exe path.
+- Notify module: Windows-native Event Log delivery plus opt-in local popup, no chat/webhook/mail integration.
+- Profile/scheduler runtime DB migration: state DBs now live under the service data directory with copy-only compatibility from the old module directory.
 - PPL decoupling: PPL is treated as a critical-risk module gated by explicit kernel/risk flags, while legacy `ppl set/get/clear` remains a CLI compatibility layer.
 - Module trust foundation: `module.manifest.json`, `modules.lock`, staging install, rollback, reload/disable/verify commands, capability/risk checks, and protected loader ownership in core.
 - Module manager extension foundation: separate `module_managers/` directory, manager manifest/schema, and ABI declarations; managers can advise but cannot bypass the core loader.
 - Doctor and UI scope: CLI/Web/Qt doctor surface, v3 guard fields, module page risk/trust details, and existing visual style preserved.
 - Guard protocol upgrades: service-side `start-register`, health-check config, restart-hook config storage with execution disabled, guard groups, paused state, and runtime profile fields.
 - Build and release foundation: top-level CMake, build script updates, package script rebuild behavior, bundled `modules.lock`, release smoke coverage, and release docs/schema packaging.
+- Metrics/backup/eventlog modules: bundled first pass is implemented, covered by build/smoke, and exposed through CLI plus Web/Qt convenience surfaces.
+- Remaining candidate modules implemented as bundled first pass: `dump`, `service_guard`, `file_watch`, `policy`, `remote_agent`, `update`, and `script_runner` now build into `modules.lock`, ship in release packaging, and have high-level CLI wrappers plus smoke status/function checks.
+- Release metadata first pass: `tools/write_release_manifest.ps1` generates `release-manifest.json`, `SHA256SUMS.txt`, and first-party `sbom.spdx.json`; `build_installer.bat` writes them beside installer/zip; publish workflow uploads them and requests GitHub artifact attestation.
 
 Known intentionally incomplete areas:
 
-- `module op-status` and `module artifact get` are stable protocol slots, but the global operation/artifact backing stores are not implemented yet.
 - `restart-hook` only stores structured config and returns `execution=disabled`; no script or module action execution is enabled.
-- SBOM and release provenance are documented as goals, but not automated as CI artifacts yet.
+- Code signing is still not configured. Release manifest/SBOM/checksum generation is implemented locally and wired into publish workflow, but a live GitHub Release run must still confirm repository attestation permissions and final asset upload behavior.
+- New higher-risk bundled modules are intentionally conservative: `dump collect`, service start/stop/ensure, and `script_runner run` require `--confirm`; `script_runner` is disabled by default and only accepts scripts registered under the service data directory; `update` only verifies local manifests and does not download or install anything.
 - VM-level E2E checks for LocalSystem, low-privilege service accounts, real PPL/test-signing, remote TLS, and clean installers still need dedicated environment runs.
+- Local Web loopback mode now uses an HttpOnly `pgs_local_session` cookie plus `X-PGS-CSRF`; the page no longer embeds a Web API bearer. This still needs live VM/browser validation before a security release.
+- `ModuleManager` / protocol JSON parsing still uses lightweight string extraction in several security-relevant paths. It is acceptable for bundled fixtures but should be replaced or explicitly constrained before opening community modules.
+- Release versioning is now sourced from root `VERSION` for local packaging and the publish workflow; README/download snippets still need review whenever the public version string changes.
+- `PGSClient::sendCommand()` now owns its Winsock runtime setup, so fresh shared-library callers do not need hidden `WSAStartup()` boilerplate.
+- Artifact download verifies downloaded size and SHA-256 client-side; service-side chunk reads recompute size/SHA-256 before serving; `module artifact cleanup/status/policy` exist; doctor reports ArtifactStore health. Remaining artifact work is periodic/background cleanup, download audit, richer sensitive-artifact reporting, and operation persistence decisions if durable long tasks become required.
 
 ## Workstream A: Global Operation Store
 
-Goal: make long-running module work observable through `module op-status <operation-id>` without blocking worker threads.
+Status: implemented first functional pass in the service core. `module op-status <operation-id> [--json]` now queries the shared OperationStore; the remaining work below is hardening, durable persistence if needed, and richer long-task conventions.
 
 ### Design
 
@@ -75,13 +87,13 @@ CLI/protocol:
 
 ### Implementation Steps
 
-1. Add `OperationStore` types and locking in service/core layer.
-2. Wire store into `PGS` or `PGSProtocol` where module callbacks can access it.
-3. Implement namespaced core JSON calls via `PGS_ServicesV3.call_json`.
-4. Replace `module op-status` placeholder with real lookup.
-5. Add cleanup tick or opportunistic cleanup on create/get.
-6. Add CLI `--json` support if low-risk.
-7. Add example long-operation behavior to one bundled module only if it does not bloat scope; otherwise add a test-only module path.
+1. Done: Add `OperationStore` types and locking in the service/core layer.
+2. Done: Wire store into module callback access through `PGS_ServicesV3.call_json`.
+3. Done: Implement namespaced core JSON calls: `pgs.operation.create/get/update/finish/fail`.
+4. Done: Replace `module op-status` placeholder with real lookup and CLI `--json`.
+5. Done: Add opportunistic TTL/max-count cleanup.
+6. Remaining: decide whether operation records need durable snapshots for long-running modules.
+7. Remaining: add richer long-operation examples only when a bundled module genuinely needs asynchronous work.
 
 ### Tests
 
@@ -109,7 +121,7 @@ Acceptance criteria:
 
 ## Workstream B: Global Artifact Store
 
-Goal: allow modules to return large or binary outputs as artifact ids instead of embedding data in JSON-RPC responses.
+Status: implemented first functional pass plus retention and integrity cleanup. Modules can put artifacts through `pgs.artifact.put`; operators can inspect metadata with `module artifact get <id> --json`, download chunks with `--out`, clean the store with `module artifact cleanup [--expired|--all] [--verify]`, inspect health with `module artifact status [--verify]`, and configure policy with `module artifact policy`. Client downloads verify size/SHA-256, service chunk reads recompute size/SHA-256 before serving, metadata id/file-name mismatches fail closed, and doctor reports ArtifactStore health. Remaining work is periodic/background cleanup, download audit, sensitive-artifact reporting, and durability polish.
 
 ### Design
 
@@ -137,7 +149,7 @@ Default policy:
 
 - max artifact size: start with 16 MB unless a config value already exists.
 - max total artifact bytes: start with 256 MB under ProgramData.
-- default TTL: 24 hours for transient artifacts.
+- default TTL: 24 hours for transient artifacts; configurable through `module artifact policy --ttl-ms` with a bounded range of 60 seconds to 7 days.
 - no direct path exposure in protocol responses.
 
 ### API Shape
@@ -152,9 +164,10 @@ For large payloads, avoid asking modules to pass huge base64 through the 64 KB J
 
 CLI/protocol:
 
-- `module artifact get <id>` streams bytes to stdout only when safe.
-- Prefer adding `pgs_bless module artifact get <id> --out <path>` for normal usage.
-- `--json` should return metadata only, not raw bytes.
+- `module artifact get <id> --json` returns metadata only, not raw bytes.
+- `pgs_bless module artifact get <id> --out <path>` downloads by chunks and verifies size/SHA-256.
+- `module artifact status [--verify] [--json]` reports `store_exists`, `root_secured`, count/bytes, expired/corrupt/orphaned counts, and effective policy.
+- `module artifact policy [--ttl-ms N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]` reads or updates the retention policy.
 
 ### Security Rules
 
@@ -168,12 +181,18 @@ CLI/protocol:
 
 ### Implementation Steps
 
-1. Add `ArtifactStore` with metadata read/write and atomic file writes.
-2. Add size/TTL cleanup.
-3. Wire `pgs.artifact.put` and metadata lookup into module `call_json` service callbacks.
-4. Replace `module artifact get` placeholder with real retrieval.
-5. Extend CLI with `--out <path>` and metadata mode.
-6. Document artifact id response pattern in module ecosystem docs.
+1. Done: Add `ArtifactStore` metadata/content write path under the service state directory.
+2. Done: Enforce per-artifact and total-store size limits, plus metadata expiry checks.
+3. Done: Wire `pgs.artifact.put` and `pgs.artifact.get_meta` into module `call_json` callbacks.
+4. Done: Replace `module artifact get` placeholder with real metadata/chunk retrieval.
+5. Done: Extend CLI with `--json` metadata mode and `--out <path>` chunk download.
+6. Done: Verify downloaded artifact size/SHA-256 in CLI and smoke test output.
+7. Done: add cleanup command with expired/all/hash-verification modes and event recording.
+8. Done: validate artifact content size/SHA-256 before every server-side chunk response.
+9. Done 2026-07-20: promote cleanup into configurable retention policy (`ttl_ms`, `auto_cleanup`, `verify_on_status`).
+10. Done 2026-07-20: expose store health through CLI `module artifact status`, Web `/api/artifact/status`, Qt report controls, and doctor `artifact_store` check.
+11. Done 2026-07-20: fail closed on artifact metadata id/file-name mismatch and cover status/policy/doctor paths in smoke.
+12. Remaining: add periodic/background cleanup and explicit download audit/sensitive-artifact reporting.
 
 ### Tests
 
@@ -190,8 +209,9 @@ Integration tests:
 
 - module/core test creates artifact and returns id.
 - `pgs_bless module artifact get <id> --out <file>` writes expected bytes.
-- stdout mode works for text artifacts or is explicitly blocked for binary if that is the chosen policy.
-- release smoke includes one artifact retrieval path.
+- status/policy JSON output parses and reflects effective TTL/verification policy.
+- doctor JSON includes an `artifact_store` check.
+- release/runtime smoke includes artifact retrieval, policy, status, cleanup, and doctor visibility paths.
 
 Acceptance criteria:
 
@@ -200,6 +220,8 @@ Acceptance criteria:
 - no artifact API exposes raw filesystem paths.
 
 ## Workstream C: SBOM And Release Provenance Automation
+
+Status: implemented first functional pass on 2026-07-19. `tools/write_release_manifest.ps1` is PowerShell 5.1-compatible and generates a release tree manifest, artifact checksums, and first-party SPDX JSON. `tools/build_installer.bat` invokes it after installer/zip creation. `.github/workflows/publish-release.yml` now verifies these metadata files, uploads them as release assets, and runs `actions/attest-build-provenance@v2` for installer, portable zip, checksums, manifest, and SBOM. Remaining work is code signing, a live GitHub release run to validate attestation permissions, and richer third-party dependency identification if a full dependency SBOM is required.
 
 Goal: every GitHub release artifact is traceable to CI-built binaries and includes machine-readable component and hash metadata.
 
@@ -242,12 +264,15 @@ Fallback if SBOM tooling is noisy on Windows Qt DLLs:
 
 ### Implementation Steps
 
-1. Add `tools/write_release_manifest.ps1` using .NET SHA256 API, not `Get-FileHash`.
-2. Add CI workflow for build/test/package/artifact upload.
-3. Add SBOM generation action.
-4. Add provenance/attestation step.
-5. Update README and service guide release sections with verification instructions.
-6. Add a CI smoke job that fails if `release/modules/modules.lock` has fewer than 5 modules or missing 64-char hashes.
+1. Done: add `tools/write_release_manifest.ps1` using .NET SHA256 API, with a PowerShell 5.1-compatible relative-path helper.
+2. Done: wire metadata generation into `tools/build_installer.bat` after zip/installer creation.
+3. Done: generate first-party SPDX JSON from the exact release tree.
+4. Done: publish workflow uploads `SHA256SUMS.txt`, `release-manifest.json`, and `sbom.spdx.json` beside installer/zip.
+5. Done: publish workflow requests GitHub build provenance attestation for installer, zip, checksums, manifest, and SBOM.
+6. Done: root `VERSION` feeds batch packaging, Inno Setup, release workflow asset names, release name, and default tag.
+7. Remaining: run a live workflow release and confirm attestation permissions/assets in GitHub UI.
+8. Remaining: add code signing and, if needed, replace/augment first-party SBOM with Syft or Microsoft SBOM Tool output.
+9. Remaining: make README/download snippets version-placeholder based so public docs do not drift from `VERSION`.
 
 ### Tests
 
@@ -265,12 +290,14 @@ CI tests:
 - uploaded artifact contains `modules.lock`, schemas, manager manifest, and docs.
 - SBOM file exists and is valid JSON.
 - provenance/attestation step completes.
+- publish workflow expected filenames match generated filenames for the same `PGS_VERSION`.
 
 Acceptance criteria:
 
 - No release artifact is produced from local stale `release/` state.
 - CI build publishes hash manifest, SBOM, and provenance.
 - Docs clearly instruct users to verify release artifacts against CI/GitHub Release metadata.
+- One version value controls installer name, zip name, workflow release asset names, and user-facing docs.
 
 ## Workstream D: VM E2E Validation
 
@@ -301,24 +328,141 @@ Acceptance criteria:
 - `tools/vm_acceptance.ps1` passes on a clean VM.
 - Any required manual PPL/test-signing step is documented with exact commands and expected output.
 
+## Workstream E: Reliability Layer
+
+Goal: move PGS from a basic restart tool toward an operator-grade guard that can explain failures, suppress destructive loops, and detect false-alive targets.
+
+Scope:
+
+- Done 2026-07-18: Quarantine / needs-attention state for restart failures instead of immediate guard retirement.
+- Done 2026-07-18: Durable failure fields `QUARANTINED`, `LAST_FAILURE_B64`, `NEXT_RETRY_MS`, `FAILURE_COUNT`; bounded failure history remains future work.
+- Done 2026-07-18: Health Check execution for `process`, `tcp`, and `http` probes, using a dedicated health worker thread that cannot block monitor or client workers.
+- Done 2026-07-18: Windows-native notify surface for `guard.restart`, `guard.restart-failed`, `guard.quarantine`, `auth.token-set`, `module.load-failed`, PPL-related events, and other core events. Per operator decision, no chat software, webhook, mail, or remote messenger integration; default is Windows Event Log, optional local popup is opt-in.
+- Done 2026-07-19: Web console can retry/clear quarantined guards and set/get/clear health checks; guard table shows quarantine/failure/health fields. Full guard detail timeline remains future work.
+- Done 2026-07-20: Qt guard table now shows guard id, quarantine/failure-code/health fields, highlights quarantined rows, and can retry or clear quarantine for the selected guard.
+- Done 2026-07-20: Qt guard table now includes a Health policy editor for `process`, `tcp`, and `http` probes, with set/get/clear actions wired through the existing `pgs_bless health-check` command path.
+- Done 2026-07-20: `tools/smoke_test_pgs.sh` now covers TCP closed and HTTP unexpected-status health failures, uses a dynamic smoke port by default, and clears stale artifacts before artifact count assertions so repeated local runs remain deterministic.
+
+Implementation notes:
+
+1. Done: Add quarantine fields to persisted guard state and summary output.
+2. Done: Change restart failure handling to persist quarantine instead of erasing the guard by default.
+3. Done: Add `guard retry` and `guard clear-quarantine` protocol verbs and CLI wrappers.
+4. Done: Implement health probes with per-probe timeout, failure thresholds, and `event`/`restart`/`quarantine` actions.
+5. Done: Add bundled `notify` module and async `notifyLoop` delivery from structured `recordEvent()` calls.
+6. Done 2026-07-19: Add Web controls for guard recovery, health-check config, notify config, report artifact operations, and artifact download.
+7. Done 2026-07-19: Add Qt module-page convenience controls for scheduler, notify, report operation/artifact flows.
+8. Done 2026-07-20: Add Qt guard table quarantine/failure-code/health columns and selected-guard retry/clear-quarantine actions.
+9. Done 2026-07-20: Add Qt Health policy controls for process/tcp/http probes and health-check set/get/clear.
+
+Tests:
+
+- Done: restart-window exhaustion enters quarantine and can be cleared, covered by `tools/smoke_test_pgs.sh`.
+- Done: process health probe reaches `healthy`, covered by `tools/smoke_test_pgs.sh`.
+- Done 2026-07-20: TCP closed and HTTP unexpected-status probes reach `unhealthy`, covered by `tools/smoke_test_pgs.sh`.
+- Done: Qt health policy UI builds through `cmake --build build\pgs_admin_qt --config Release` with explicit MSYS2/MinGW environment variables.
+- Next: missing executable, access denied, hash mismatch, and session token failure enter quarantine with deterministic reason codes.
+- Next: retry succeeds after the underlying issue is fixed and clears quarantine.
+- Next: timeout/DNS health failures and `restart`/`quarantine` health actions get dedicated automated E2E coverage.
+- Done: Windows-native notify delivery failure records `notify.delivery-failed` and never blocks core monitoring; smoke verifies `notify status` when modules are enabled.
+
+## Workstream F: Doctor And Repair Center
+
+Goal: give operators one consistent diagnostic surface across CLI, Qt, and Web instead of scattering checks through scripts and UI-specific code.
+
+Diagnostics should cover:
+
+- service install/running status and SCM recovery configuration.
+- PGS token state, bootstrap token file location, and state directory ACL.
+- listen port occupancy and PGS protocol reachability.
+- modules root ACL, `modules.lock` hash coverage, PPL gate state, and permissive mode.
+- Qt/OpenSSL/MinGW runtime closure for release trees.
+- ProgramData state/module data directories and runtime DB migration status.
+- release version consistency across workflow, installer, docs, and generated artifact names.
+
+Repair commands should start conservative:
+
+- `repair-state-acl`.
+- `repair-modules-acl`.
+- `repair-modules-lock` / bundled hash regeneration for local release trees.
+- `clear-web-session` after loopback Web moves to cookie/session mode.
+
+Acceptance criteria:
+
+- `pgs_bless doctor --json` returns stable machine-readable fields.
+- Done 2026-07-20: Qt and Web render the same doctor schema instead of duplicating checks.
+- Deliberately broken ACLs, missing lockfiles, missing runtime DLLs, and port conflicts are detected with actionable messages.
+- Done 2026-07-20: Qt Doctor / Repair page exposes `repair-state-acl`, `repair-modules-acl`, and `repair-modules-lock`, then refreshes doctor output after successful repair.
+
+## Workstream G: Module Roadmap
+
+## Workstream G0: Cluster Dashboard Productization
+
+Status: partially completed on 2026-07-20. Cluster Web now supports node add/remove/edit/test, credential replacement/clearing without echoing saved credentials, immediate `/api/cluster/health` testing, and guard detail fields for quarantine/health/failure code. The registry still persists credentials through the existing DPAPI path where available.
+
+Remaining work: add a real remote-gateway integration smoke using a second running Web node, add browser/DOM automation for add/edit/test/remove, and decide whether remote cluster mutations need a separate audit log beyond the local registry file. HTTP API automation now exists through `tools/cluster_api_smoke.ps1` and the expanded VM acceptance Cluster section.
+
+Web console response productization status: completed first pass on 2026-07-20. The page now has a `Structured Result` area for module, scheduler, report, operation, artifact, metrics, backup, eventlog, and notify responses. It keeps raw Activity Log output while rendering parsed key-value/table views and auto-filling operation/artifact ids when returned by report/backup flows. Remaining Web work is browser DOM automation, stronger field-level validation, and grouped error guidance.
+
+Implemented bundled first pass:
+
+1. `metrics`: JSON and Prometheus-style metrics for guards, restarts, crash loops, events, and service uptime.
+2. `backup`: local service-state snapshot export with token/artifact/temp exclusions and optional ArtifactStore output. Import/restore is intentionally not implemented yet.
+3. `eventlog`: read local Windows Application Event Log entries with source filtering; notify remains the writer for PGS-origin events.
+4. `dump`: explicit opt-in local minidump collection into ArtifactStore. Collection requires `confirm=1`, caps artifacts at 16 MB, and does not expose raw dump paths.
+5. `service_guard`: local Windows SCM query/start/stop/ensure helper. Mutations require `confirm=1`.
+6. `file_watch`: demand-driven local file change detector. Rules persist under the service data directory, `check` emits local PGS events for changed files, and no background watcher thread or remote notification channel is opened.
+7. `policy`: named guard-policy templates with optional apply through the service callback surface.
+8. `remote_agent`: local node heartbeat/guard metadata surface for future cluster integration. It opens no listener and provides no chat/webhook integration.
+9. `update`: local `release-manifest.json` verifier. It reads manifest `release_root`, verifies only the release tree `files` array, ignores artifact absolute paths for tree verification, and performs no network download or install.
+10. `script_runner`: disabled-by-default restricted local runner. Operators must enable it, register scripts under `modules\script_runner\scripts` in the service data directory, and pass `confirm=1` to run.
+
+Every bundled module now ships with manifest files, `modules.lock` capability/risk metadata, build script integration, release packaging, and smoke coverage. Remaining work is production hardening: structured UI for the new modules, doctor visibility, stronger capability enforcement, signing/hash fail-closed policy, and dedicated negative tests for high-risk operations.
+
+## Workstream H: Local Transport And Client Runtime
+
+Goal: make local management safer and shared client code harder to misuse. First runtime-hardening step is complete; named pipe transport remains the main security item.
+
+Implementation steps:
+
+1. Done: `PGSClient::sendCommand()` performs internal one-time Winsock initialization, so callers no longer need to call `WSAStartup()` first.
+2. Add Windows named pipe transport with a DACL limited to SYSTEM and Administrators.
+3. Keep loopback TCP during compatibility, but make new local clients prefer named pipe.
+4. Eventually let installed-service mode disable loopback TCP unless explicitly requested.
+
+Tests:
+
+- `PGSClient` works from a fresh process without caller-managed `WSAStartup()`.
+- non-admin users cannot connect to the named pipe.
+- existing CLI/Qt/Web TCP behavior remains compatible during transition.
+
 ## Recommended Next Order
 
-1. Implement OperationStore first, because it defines the long-task status contract.
-2. Implement ArtifactStore second, because operations can reference artifact ids.
-3. Add release manifest/SBOM/provenance automation third, because package script and release smoke are already stable.
-4. Run VM E2E last, after the protocol and release surfaces stop changing.
+1. Verify the Web loopback session-cookie change in a live VM/browser run before claiming the security release.
+2. Add code signing and run one live GitHub release to validate metadata upload plus provenance attestation.
+3. Decide whether OperationStore needs durable snapshots; add periodic artifact cleanup, download audit, and sensitive-artifact reporting if artifacts become long-lived or remotely exposed.
+4. Add deterministic quarantine reason codes and negative E2E coverage for missing exe, access denied, hash mismatch, session token failure, health timeout/DNS failures, health restart/quarantine actions, and retry-after-fix.
+5. Productize UI responses further: add Web browser DOM automation, grouped error guidance, field-level validation, and Cluster browser automation for add/edit/test/remove.
+6. Build out Doctor/Repair schema hardening and additional repair actions on top of the current shared CLI/Qt/Web doctor surface.
+7. Productize the newly bundled modules: add structured Web/Qt views, doctor checks, and negative tests for dump size/permission failures, service mutation confirmations, file-watch unreadable paths, update manifest tampering, and script-runner path confinement.
+8. Run VM E2E last for the release candidate, after protocol and release surfaces stop changing.
 
 Expected effort:
 
-- OperationStore + tests: 1 to 1.5 days.
-- ArtifactStore + tests: 1 to 1.5 days.
-- SBOM/provenance CI: 0.5 to 1.5 days depending on GitHub runner/Qt setup.
+- Web session/cookie local-mode change: 0.5 to 1 day.
+- Operation durability decision plus artifact audit/periodic cleanup: 0.5 to 1 day.
+- Quarantine reason-code negative tests: 0.5 to 1.5 days.
+- Doctor/Repair center MVP: 1 to 2 days depending on UI scope.
+- New module production hardening and structured UI: 1 to 2 days depending on how much Web/Qt surface is included.
+- Code signing plus live GitHub attestation validation: 0.5 to 1.5 days depending on certificate and repository permissions.
 - VM E2E validation: 0.5 to 1 day once a suitable VM is available.
 
 ## Handoff Notes
 
-- Keep `module op-status` and `module artifact get` backward-compatible with their current placeholder command names.
+- Keep `module op-status` and `module artifact get/status/policy/cleanup` backward-compatible with the command names now used by CLI/Web/Qt; do not expose raw artifact filesystem paths.
 - Do not enable restart-hook execution in the same PR as operation/artifact stores; keep that risk isolated.
 - Do not let manager extensions execute loader actions directly. They should continue returning plans only.
 - Keep request/response defaults at 64 KB and invoke deadline default at 5 seconds, max 60 seconds.
 - Prefer adding focused tests to existing `test_pgs_core` and `test_module_manager` before adding broad new harnesses.
+- Treat `SECURITY_HARDENING_BACKLOG.md` as the source for security release blockers and `UNFINISHED_FEATURES_BACKLOG.md` as the source for feature/module backlog.
+- Update these handoff documents whenever implementation changes one of their “current state” assumptions; stale handoff notes are more dangerous than missing notes.

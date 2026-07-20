@@ -35,7 +35,7 @@ or:
 {"jsonrpc":"2.0","id":"...","error":{"code":"ERR_CODE","message":"..."}}
 ```
 
-Limits: default request/response payload is 64 KB. Long tasks should return `{ "accepted": true, "operation_id": "..." }`; large binary data should return an artifact id instead of embedding bytes. The current service exposes `module op-status` and `module artifact get` as stable protocol slots, but the shared operation/artifact stores are not enabled yet; modules that accept long work must either keep their own durable status or return an external artifact id.
+Limits: default request/response payload is 64 KB. Long tasks should return `{ "accepted": true, "operation_id": "..." }`; large binary data should return an artifact id instead of embedding bytes. The service now includes a shared in-memory OperationStore with TTL cleanup and an ArtifactStore under the service state directory. `module op-status` queries operation records, while `module artifact get --json` returns metadata and `module artifact get --out <path>` downloads content by chunks with client-side size/SHA-256 verification. Service chunk reads also recompute artifact size/SHA-256 before returning bytes. Operators can use `module artifact cleanup [--expired|--all] [--verify]`, `module artifact status [--verify]`, and `module artifact policy` for retention and health visibility.
 
 ## Module ABI
 
@@ -51,7 +51,7 @@ PGS probes this export dynamically. If it is missing, `module invoke` falls back
 
 ## Trust Files
 
-`modules.lock` is the primary trust file. `modules.allow` remains compatible and is used when no lock entries are present.
+`modules.lock` is the primary trust file. When a release tree contains `modules.lock`, the loader expects strict hash-pinned entries; `modules.allow` is only a legacy compatibility path for trees that do not ship `modules.lock`.
 
 `modules.lock` records:
 
@@ -90,8 +90,22 @@ PGS itself should only download to `modules_staging/` and never load a community
 - `pgs_bless doctor [--json]`
 - `pgs_bless module invoke --name <name> --method <namespace.method> --params-json <json>`
 - `pgs_bless module verify|reload|disable|rollback`
-- `pgs_bless module op-status <operation-id>`
-- `pgs_bless module artifact get <id>`
+- `pgs_bless module op-status <operation-id> [--json]`
+- `pgs_bless module artifact get <id> [--json|--out <path>]`
+- `pgs_bless module artifact cleanup [--expired|--all] [--verify]`
+- `pgs_bless module artifact status [--verify] [--json]`
+- `pgs_bless module artifact policy [--ttl-ms N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]`
+- `pgs_bless notify status|config [--eventlog|--no-eventlog] [--popup|--no-popup]`
+- `pgs_bless metrics summary|json|prometheus`
+- `pgs_bless backup status|snapshot [--artifact] [--max-bytes N]`
+- `pgs_bless eventlog status|recent [--limit N] [--source <name>]`
+- `pgs_bless dump status|collect --pid <pid> [--type normal|with-data] [--confirm]`
+- `pgs_bless service-guard status|query|start|stop|ensure --name <service> [--state running|stopped] [--confirm]`
+- `pgs_bless file-watch status|add|list|check|remove --path <file> [--id <id>] [--action event|none]`
+- `pgs_bless policy-template status|set|list|remove|apply --name <template> [--pid <pid>]`
+- `pgs_bless remote-agent status|heartbeat|guards`
+- `pgs_bless update status|verify --path <release-manifest.json>`
+- `pgs_bless script-runner status|config|add|list|run [--enable|--disable] [--confirm]`
 - `pgs_bless ppl set|get|clear` as compatibility sugar through module invocation
 
 `module call` and `module.manifest` remain supported for ABI v2 modules.
@@ -105,5 +119,11 @@ The guard core now exposes service-side `start-register`, per-guard `health-chec
 - guard groups store startup order, dependencies, pause/resume state, and allow group restart.
 - restart hooks are stored as structured JSON only; script execution is disabled unless a future trusted module/runner explicitly implements it.
 - guard summaries include runtime profile fields such as last exit time/code, cumulative runtime, average restart interval, paused, group, and crash-loop state.
+- guard summaries include quarantine fields such as guard id, status, last failure, next retry time, and failure count.
+- health checks now execute process/TCP/HTTP probes in a dedicated worker and can emit events, restart, or quarantine.
 
 Modules that call back into these commands through `PGS_ServicesV3.call_json` need matching capabilities such as `guard.register`, `guard.health`, `guard.group`, or `guard.hook`.
+
+## Bundled Module Set
+
+The release build currently writes 16 bundled modules into `modules.lock`: `sched`, `health`, `profile`, `report`, `notify`, `metrics`, `backup`, `eventlog`, `dump`, `service_guard`, `file_watch`, `policy`, `remote_agent`, `update`, `script_runner`, and `ppl`. The newer operational modules are deliberately narrow first passes: no chat/webhook/mail integrations, no update downloader/installer, no remote listener in `remote_agent`, and script execution is disabled until explicitly enabled and confirmed.

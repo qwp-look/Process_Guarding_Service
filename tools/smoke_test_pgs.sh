@@ -16,16 +16,19 @@ export PATH="${MINGW_ROOT}/bin:/usr/bin:${PATH:-}"
 
 token="smoke-token"
 rotated_token="smoke-token-rotated"
-pgs_port="${PGS_SMOKE_PORT:-12345}"
+pgs_port="${PGS_SMOKE_PORT:-}"
 build_dir="${PGS_BUILD_DIR:-build}"
 service_pid=""
 service_job_pid=""
 guard_pid=""
+http_server_job_pid=""
+http_server_win_pid=""
 worker_path_win="$(cygpath -w "$repo_root/$build_dir/smoke_worker.exe")"
 service_log="$repo_root/$build_dir/smoke_service.log"
 service_err_log="$repo_root/$build_dir/smoke_service.err.log"
 smoke_program_data="${PGS_SMOKE_PROGRAMDATA:-$repo_root/$build_dir/local_pd_smoke}"
 ps_exe="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+taskkill_exe="/c/Windows/System32/taskkill.exe"
 
 process_exists() {
   local pid="$1"
@@ -38,7 +41,58 @@ bless() {
 
 force_stop_process() {
   local pid="$1"
-  "$ps_exe" -NoProfile -Command "Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
+  "$ps_exe" -NoProfile -Command "\$pidValue = $pid; \$p = Get-Process -Id \$pidValue -ErrorAction SilentlyContinue; if (\$p) { Stop-Process -Id \$pidValue -Force -ErrorAction SilentlyContinue; Wait-Process -Id \$pidValue -Timeout 5 -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+  if process_exists "$pid"; then
+    "$taskkill_exe" /PID "$pid" /F /T >/dev/null 2>&1 || true
+  fi
+}
+
+json_guard_field() {
+  local json_path="$1"
+  local field_name="$2"
+  local json_path_win
+  json_path_win="$(cygpath -w "$json_path")"
+  "$ps_exe" -NoProfile -Command "\$item = Get-Content -Raw '$json_path_win' | ConvertFrom-Json | Select-Object -First 1; if (\$item) { Write-Output \$item.$field_name }" 2>/dev/null | tr -d '\r\n'
+}
+
+find_available_port() {
+  "$ps_exe" -NoProfile -Command "\$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse('127.0.0.1'), 0); \$listener.Start(); \$port = \$listener.LocalEndpoint.Port; \$listener.Stop(); Write-Output \$port" 2>/dev/null | tr -d '\r\n'
+}
+
+wait_health_status() {
+  local pid="$1"
+  local expected="$2"
+  local out_path="$3"
+  local status=""
+  for _ in $(seq 1 30); do
+    bless get --pid "$pid" --json >"$out_path"
+    status="$(json_guard_field "$out_path" health_status)"
+    if [[ "$status" == "$expected" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+wait_port_open() {
+  local port="$1"
+  "$ps_exe" -NoProfile -Command "\$port = $port; for (\$i = 0; \$i -lt 40; \$i++) { \$client = New-Object System.Net.Sockets.TcpClient; try { \$iar = \$client.BeginConnect('127.0.0.1', \$port, \$null, \$null); if (\$iar.AsyncWaitHandle.WaitOne(250)) { \$client.EndConnect(\$iar); \$stream = \$client.GetStream(); \$nl = [string][char]13 + [string][char]10; \$request = 'GET /ready HTTP/1.1' + \$nl + 'Host: 127.0.0.1' + \$nl + 'Connection: close' + \$nl + \$nl; \$bytes = [System.Text.Encoding]::ASCII.GetBytes(\$request); \$stream.Write(\$bytes, 0, \$bytes.Length); \$stream.Flush(); \$client.Close(); exit 0 } } catch { } finally { \$client.Close() }; Start-Sleep -Milliseconds 100 }; exit 1" >/dev/null 2>&1
+}
+
+start_http_status_server() {
+  local port="$1"
+  "$ps_exe" -NoProfile -Command "\$port = $port; \$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse('127.0.0.1'), \$port); \$listener.Start(); try { while (\$true) { \$client = \$listener.AcceptTcpClient(); try { \$stream = \$client.GetStream(); \$stream.ReadTimeout = 2000; \$buffer = New-Object byte[] 1024; try { [void]\$stream.Read(\$buffer, 0, \$buffer.Length) } catch { }; \$nl = [string][char]13 + [string][char]10; \$response = 'HTTP/1.1 500 Internal Server Error' + \$nl + 'Content-Length: 0' + \$nl + 'Connection: close' + \$nl + \$nl; \$bytes = [System.Text.Encoding]::ASCII.GetBytes(\$response); \$stream.Write(\$bytes, 0, \$bytes.Length); \$stream.Flush() } catch { } finally { \$client.Close() } } } finally { \$listener.Stop() }" >/dev/null 2>&1 &
+  local job_pid=$!
+  local win_pid=""
+  for _ in $(seq 1 20); do
+    if [[ -r "/proc/$job_pid/winpid" ]]; then
+      win_pid="$(tr -d '\r\n' <"/proc/$job_pid/winpid")"
+      break
+    fi
+    sleep 0.05
+  done
+  echo "$job_pid;$win_pid"
 }
 
 force_stop_service_host() {
@@ -54,9 +108,9 @@ start_service_process() {
   local token_value="${1:-}"
   mkdir -p "$smoke_program_data"
   if [[ -n "$token_value" ]]; then
-    PGS_SERVICE_TOKEN="$token_value" ProgramData="$(cygpath -w "$smoke_program_data")" "$build_dir/pgs_service.exe" run --port "$pgs_port" >"$service_log" 2>"$service_err_log" &
+    PGS_SERVICE_TOKEN="$token_value" ProgramData="$(cygpath -w "$smoke_program_data")" "$build_dir/pgs_service.exe" run --port "$pgs_port" --enable-modules >"$service_log" 2>"$service_err_log" &
   else
-    ProgramData="$(cygpath -w "$smoke_program_data")" "$build_dir/pgs_service.exe" run --port "$pgs_port" >"$service_log" 2>"$service_err_log" &
+    ProgramData="$(cygpath -w "$smoke_program_data")" "$build_dir/pgs_service.exe" run --port "$pgs_port" --enable-modules >"$service_log" 2>"$service_err_log" &
   fi
 
   service_job_pid=$!
@@ -78,12 +132,28 @@ cleanup() {
     force_stop_process "$guard_pid"
   fi
 
+  if [[ -n "$http_server_job_pid" ]]; then
+    if [[ -n "$http_server_win_pid" ]]; then
+      force_stop_process "$http_server_win_pid"
+    fi
+    kill "$http_server_job_pid" >/dev/null 2>&1 || true
+  fi
+
   if [[ -n "$service_pid" || -n "$service_job_pid" ]]; then
     force_stop_service_host
   fi
 }
 
 trap cleanup EXIT
+
+if [[ -z "$pgs_port" ]]; then
+  pgs_port="$(find_available_port)"
+fi
+if [[ ! "$pgs_port" =~ ^[0-9]+$ ]]; then
+  echo "[Smoke] invalid PGS smoke port: $pgs_port"
+  exit 1
+fi
+echo "[Smoke] using port $pgs_port"
 
 echo "[Smoke] Starting console PGS..."
 service_pid="$(start_service_process "$token" | tr -d '\r\n')"
@@ -118,6 +188,155 @@ if [[ ! "$stats_text" =~ ^OK[[:space:]]guards= ]]; then
   exit 1
 fi
 echo "[Smoke] protocol contract ok"
+doctor_json="$(bless doctor --json)"
+if [[ "$doctor_json" != *'"id":"artifact_store"'* ]]; then
+  echo "[Smoke] doctor JSON missing artifact_store check: $doctor_json"
+  exit 1
+fi
+bless notify status >/dev/null
+echo "[Smoke] notify module ok"
+metrics_summary="$(bless metrics summary)"
+if [[ ! "$metrics_summary" =~ ^OK[[:space:]]guards= ]]; then
+  echo "[Smoke] metrics summary failed: $metrics_summary"
+  exit 1
+fi
+backup_status="$(bless backup status)"
+if [[ ! "$backup_status" =~ ^OK[[:space:]]data_dir_b64= ]]; then
+  echo "[Smoke] backup status failed: $backup_status"
+  exit 1
+fi
+eventlog_status="$(bless eventlog status)"
+if [[ ! "$eventlog_status" =~ ^OK[[:space:]]source=Application ]]; then
+  echo "[Smoke] eventlog status failed: $eventlog_status"
+  exit 1
+fi
+dump_status="$(bless dump status)"
+if [[ ! "$dump_status" =~ ^OK[[:space:]]enabled=1 ]]; then
+  echo "[Smoke] dump status failed: $dump_status"
+  exit 1
+fi
+service_guard_status="$(bless service-guard status)"
+if [[ ! "$service_guard_status" =~ ^OK[[:space:]]scm=local ]]; then
+  echo "[Smoke] service-guard status failed: $service_guard_status"
+  exit 1
+fi
+service_guard_query="$(bless service-guard query --name EventLog)"
+if [[ ! "$service_guard_query" =~ ^OK[[:space:]]name=EventLog ]]; then
+  echo "[Smoke] service-guard query failed: $service_guard_query"
+  exit 1
+fi
+file_watch_status="$(bless file-watch status)"
+if [[ ! "$file_watch_status" =~ ^OK[[:space:]]rules= ]]; then
+  echo "[Smoke] file-watch status failed: $file_watch_status"
+  exit 1
+fi
+file_watch_target="$repo_root/$build_dir/smoke_file_watch_target.txt"
+printf 'one\n' >"$file_watch_target"
+file_watch_add="$(bless file-watch add --path "$(cygpath -w "$file_watch_target")" --id smoke_fw --action none)"
+if [[ ! "$file_watch_add" =~ ^OK[[:space:]]id=smoke_fw ]]; then
+  echo "[Smoke] file-watch add failed: $file_watch_add"
+  exit 1
+fi
+printf 'two\n' >>"$file_watch_target"
+file_watch_check="$(bless file-watch check)"
+if [[ ! "$file_watch_check" =~ changed=1 ]]; then
+  echo "[Smoke] file-watch check failed: $file_watch_check"
+  exit 1
+fi
+bless file-watch remove --id smoke_fw >/dev/null
+policy_status="$(bless policy-template status)"
+if [[ ! "$policy_status" =~ ^OK[[:space:]]templates= ]]; then
+  echo "[Smoke] policy-template status failed: $policy_status"
+  exit 1
+fi
+policy_set="$(bless policy-template set --name smoke_policy --max-restarts 2 --restart-window 30 --restart-delay 0)"
+if [[ ! "$policy_set" =~ ^OK[[:space:]]name=smoke_policy ]]; then
+  echo "[Smoke] policy-template set failed: $policy_set"
+  exit 1
+fi
+policy_list="$(bless policy-template list)"
+if [[ ! "$policy_list" =~ TEMPLATE[[:space:]]name=smoke_policy ]]; then
+  echo "[Smoke] policy-template list failed: $policy_list"
+  exit 1
+fi
+bless policy-template remove --name smoke_policy >/dev/null
+remote_agent_status="$(bless remote-agent status)"
+if [[ ! "$remote_agent_status" =~ ^OK[[:space:]]node_b64= ]]; then
+  echo "[Smoke] remote-agent status failed: $remote_agent_status"
+  exit 1
+fi
+update_status="$(bless update status)"
+if [[ ! "$update_status" =~ ^OK[[:space:]]mode=local-manifest ]]; then
+  echo "[Smoke] update status failed: $update_status"
+  exit 1
+fi
+update_release_dir="$repo_root/$build_dir/smoke_update_release"
+mkdir -p "$update_release_dir/bin"
+printf 'release-payload\n' >"$update_release_dir/bin/payload.txt"
+payload_hash="$(sha256sum "$update_release_dir/bin/payload.txt" | awk '{print $1}')"
+release_root_json="$(cygpath -m "$update_release_dir")"
+cat >"$update_release_dir/release-manifest.json" <<EOF
+{"schema":"pgs.release-manifest.v1","release_root":"$release_root_json","files":[{"path":"bin/payload.txt","size":16,"sha256":"$payload_hash"}],"artifacts":[{"name":"ignored.zip","path":"$release_root_json/ignored.zip","sha256":"0000"}]}
+EOF
+update_verify="$(bless update verify --path "$(cygpath -w "$update_release_dir/release-manifest.json")")"
+if [[ ! "$update_verify" =~ ^OK[[:space:]]files=1\;verified=1 ]]; then
+  echo "[Smoke] update verify failed: $update_verify"
+  exit 1
+fi
+script_runner_status="$(bless script-runner status)"
+if [[ ! "$script_runner_status" =~ ^OK[[:space:]]enabled= ]]; then
+  echo "[Smoke] script-runner status failed: $script_runner_status"
+  exit 1
+fi
+echo "[Smoke] metrics/backup/eventlog/new modules ok"
+echo "[Smoke] report artifact and operation store..."
+bless module artifact cleanup --all --verify >/dev/null || true
+report_artifact_output="$(bless report backup --artifact --limit 5)"
+operation_id="$(printf '%s\n' "$report_artifact_output" | sed -n 's/.*operation_id=\([^; ]*\).*/\1/p' | head -n 1)"
+artifact_id="$(printf '%s\n' "$report_artifact_output" | sed -n 's/.*artifact_id=\([^; ]*\).*/\1/p' | head -n 1)"
+if [[ -z "$operation_id" || -z "$artifact_id" ]]; then
+  echo "[Smoke] failed to parse operation/artifact ids: $report_artifact_output"
+  exit 1
+fi
+bless module op-status "$operation_id" --json >"$repo_root/$build_dir/smoke_operation_status.json"
+if ! grep -q '"status":"succeeded"' "$repo_root/$build_dir/smoke_operation_status.json"; then
+  echo "[Smoke] operation status did not reach succeeded"
+  exit 1
+fi
+bless module artifact get "$artifact_id" --json >"$repo_root/$build_dir/smoke_artifact_meta.json"
+if ! grep -q '"filename":"pgs-backup.txt"' "$repo_root/$build_dir/smoke_artifact_meta.json"; then
+  echo "[Smoke] artifact metadata missing expected filename"
+  exit 1
+fi
+bless module artifact policy --ttl-ms 60000 --auto-cleanup --verify-on-status --json >"$repo_root/$build_dir/smoke_artifact_policy.json"
+if ! grep -q '"ttl_ms":60000' "$repo_root/$build_dir/smoke_artifact_policy.json" || ! grep -q '"verify_on_status":true' "$repo_root/$build_dir/smoke_artifact_policy.json"; then
+  echo "[Smoke] artifact policy JSON did not reflect requested settings"
+  cat "$repo_root/$build_dir/smoke_artifact_policy.json"
+  exit 1
+fi
+bless module artifact status --json >"$repo_root/$build_dir/smoke_artifact_status.json"
+if ! grep -q '"count":1' "$repo_root/$build_dir/smoke_artifact_status.json" || ! grep -q '"ttl_ms":60000' "$repo_root/$build_dir/smoke_artifact_status.json"; then
+  echo "[Smoke] artifact status JSON missing expected count/policy"
+  cat "$repo_root/$build_dir/smoke_artifact_status.json"
+  exit 1
+fi
+artifact_out="$repo_root/$build_dir/smoke_report_artifact.txt"
+artifact_download_output="$(bless module artifact get "$artifact_id" --out "$(cygpath -w "$artifact_out")")"
+if [[ "$artifact_download_output" != *"sha256="* ]]; then
+  echo "[Smoke] artifact download did not report sha256 validation: $artifact_download_output"
+  exit 1
+fi
+if ! grep -q 'PGS backup' "$artifact_out"; then
+  echo "[Smoke] downloaded artifact does not contain report content"
+  exit 1
+fi
+cleanup_output="$(bless module artifact cleanup --all --verify)"
+if [[ "$cleanup_output" != OK\ artifact\ cleanup* ]]; then
+  echo "[Smoke] artifact cleanup failed: $cleanup_output"
+  exit 1
+fi
+bless module artifact policy --ttl-ms 86400000 --auto-cleanup --no-verify-on-status --json >/dev/null
+echo "[Smoke] operation/artifact store ok"
 bless list --json >"$repo_root/$build_dir/smoke_list_initial.json"
 
 echo "[Smoke] rotating token..."
@@ -129,7 +348,7 @@ echo "[Smoke] bless-start smoke_worker..."
 bless_output="$(
   bless bless-start \
     --path "$worker_path_win" \
-    --start-args "--sleep-ms 30000" \
+    --start-args "--sleep-ms 120000" \
     --max-restarts 1 \
     --hash auto
 )"
@@ -142,6 +361,69 @@ if [[ -z "$guard_pid" ]]; then
 fi
 
 bless get --pid "$guard_pid" >"$repo_root/$build_dir/smoke_guard_get.txt"
+echo "[Smoke] health-check process probe..."
+bless health-check set --pid "$guard_pid" --config-json '{"type":"process","interval_ms":1000,"timeout_ms":500,"failures":1,"action":"event"}' >/dev/null
+health_path="$repo_root/$build_dir/smoke_guard_health.json"
+if ! wait_health_status "$guard_pid" healthy "$health_path"; then
+  echo "[Smoke] health-check process probe did not become healthy"
+  exit 1
+fi
+bless health-check clear --pid "$guard_pid" >/dev/null
+
+echo "[Smoke] health-check TCP negative probe..."
+tcp_closed_port="$(find_available_port)"
+if [[ ! "$tcp_closed_port" =~ ^[0-9]+$ ]]; then
+  echo "[Smoke] failed to allocate TCP closed test port"
+  exit 1
+fi
+bless health-check set --pid "$guard_pid" --config-json "{\"type\":\"tcp\",\"host\":\"127.0.0.1\",\"port\":$tcp_closed_port,\"interval_ms\":1000,\"timeout_ms\":300,\"failures\":1,\"action\":\"event\"}" >/dev/null
+if ! wait_health_status "$guard_pid" unhealthy "$health_path"; then
+  echo "[Smoke] health-check TCP negative probe did not become unhealthy"
+  cat "$health_path"
+  exit 1
+fi
+tcp_message="$(json_guard_field "$health_path" health_last_message)"
+if [[ "$tcp_message" != tcp\ connect\ failed* ]]; then
+  echo "[Smoke] health-check TCP negative message was unexpected: $tcp_message"
+  exit 1
+fi
+bless health-check clear --pid "$guard_pid" >/dev/null
+
+echo "[Smoke] health-check HTTP unexpected-status probe..."
+http_status_port="$(find_available_port)"
+if [[ ! "$http_status_port" =~ ^[0-9]+$ ]]; then
+  echo "[Smoke] failed to allocate HTTP status test port"
+  exit 1
+fi
+http_server_ids="$(start_http_status_server "$http_status_port")"
+http_server_job_pid="${http_server_ids%%;*}"
+http_server_win_pid="${http_server_ids#*;}"
+if [[ ! "$http_server_job_pid" =~ ^[0-9]+$ ]]; then
+  echo "[Smoke] failed to start HTTP status test server"
+  exit 1
+fi
+if ! wait_port_open "$http_status_port"; then
+  echo "[Smoke] HTTP status test server did not become ready"
+  exit 1
+fi
+bless health-check set --pid "$guard_pid" --config-json "{\"type\":\"http\",\"url\":\"http://127.0.0.1:$http_status_port/health\",\"expected_status\":200,\"interval_ms\":1000,\"timeout_ms\":500,\"failures\":1,\"action\":\"event\"}" >/dev/null
+if ! wait_health_status "$guard_pid" unhealthy "$health_path"; then
+  echo "[Smoke] health-check HTTP unexpected-status probe did not become unhealthy"
+  cat "$health_path"
+  exit 1
+fi
+http_message="$(json_guard_field "$health_path" health_last_message)"
+if [[ "$http_message" != http\ unexpected\ status=500* ]]; then
+  echo "[Smoke] health-check HTTP negative message was unexpected: $http_message"
+  exit 1
+fi
+bless health-check clear --pid "$guard_pid" >/dev/null
+if [[ -n "$http_server_win_pid" ]]; then
+  force_stop_process "$http_server_win_pid"
+fi
+kill "$http_server_job_pid" >/dev/null 2>&1 || true
+http_server_job_pid=""
+http_server_win_pid=""
 bless list --json >"$repo_root/$build_dir/smoke_list_after_bless.json"
 if ! grep -q '"app_kind"' "$repo_root/$build_dir/smoke_list_after_bless.json" ||
    ! grep -q '"restart_window"' "$repo_root/$build_dir/smoke_list_after_bless.json"; then
@@ -246,7 +528,7 @@ window_list_win="$(cygpath -w "$window_list_path")"
 # echo the pid of any currently-guarded smoke_worker (empty if none)
 find_worker_pid() {
   bless list --json >"$window_list_path" 2>/dev/null || true
-  "$ps_exe" -NoProfile -Command "\$items = Get-Content -Raw '$window_list_win' | ConvertFrom-Json; \$item = \$items | Where-Object { \$_.path -like '*smoke_worker.exe' } | Select-Object -First 1; if (\$item) { Write-Output \$item.pid }" 2>/dev/null | tr -d '\r\n'
+  "$ps_exe" -NoProfile -Command "\$items = Get-Content -Raw '$window_list_win' | ConvertFrom-Json; \$item = \$items | Where-Object { \$_.path -like '*smoke_worker.exe' -and \$_.pid -ne '0' -and \$_.status -ne 'quarantined' } | Select-Object -First 1; if (\$item) { Write-Output \$item.pid }" 2>/dev/null | tr -d '\r\n'
   return 0
 }
 
@@ -299,8 +581,15 @@ if [[ "$still_dead" -ne 1 ]]; then
   echo "[Smoke] v3: worker was restarted after kill #2 despite max-restarts=1 (window policy not honored)"
   exit 1
 fi
-echo "[Smoke] v3: window-exhaust stop confirmed (no restart after kill #2)"
+echo "[Smoke] v3: window-exhaust quarantine confirmed (no restart after kill #2)"
 
-# tidy: unregister the exhausted guard if its entry lingers
-bless unregister --pid "$first_restarted" >/dev/null 2>&1 || true
+quarantine_id="$(
+  "$ps_exe" -NoProfile -Command "\$items = Get-Content -Raw '$window_list_win' | ConvertFrom-Json; \$item = \$items | Where-Object { \$_.path -like '*smoke_worker.exe' -and \$_.status -eq 'quarantined' -and \$_.quarantined -eq '1' } | Select-Object -First 1; if (\$item) { Write-Output \$item.guard_id }" 2>/dev/null | tr -d '\r\n'
+)"
+if [[ -z "$quarantine_id" ]]; then
+  echo "[Smoke] v3: exhausted guard was not visible as quarantined in list --json"
+  exit 1
+fi
+bless guard clear-quarantine --id "$quarantine_id" >/dev/null
+echo "[Smoke] v3: quarantine clear confirmed guard_id=$quarantine_id"
 echo "[Smoke] smoke test completed"

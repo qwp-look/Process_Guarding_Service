@@ -28,12 +28,14 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRandomGenerator>
+#include <QEventLoop>
 #include <QSslCertificate>
 #include <QSslConfiguration>
 #include <QSslKey>
 #include <QSslServer>
 #include <QSslSocket>
 #include <QTextStream>
+#include <QTimer>
 #include <QTcpServer>
 #include <QUrl>
 #include <QVariant>
@@ -429,6 +431,22 @@ bool ClusterServer::start()
                     return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
                 return handleNodeAdd(req);
             }
+            if (path == QStringLiteral("/api/cluster/nodes") && req.method() == Method::Put)
+            {
+                if (!isApiAuthorized(req))
+                    return jsonUnauthorized();
+                if (!isJsonRequest(req))
+                    return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
+                return handleNodeUpdate(req);
+            }
+            if (path == QStringLiteral("/api/cluster/nodes/test") && req.method() == Method::Post)
+            {
+                if (!isApiAuthorized(req))
+                    return jsonUnauthorized();
+                if (!isJsonRequest(req))
+                    return jsonError(QStringLiteral("Content-Type must be application/json"), 415);
+                return handleNodeTest(req);
+            }
             if (path == QStringLiteral("/api/cluster/nodes") && req.method() == Method::Delete)
             {
                 if (!isApiAuthorized(req))
@@ -753,6 +771,133 @@ QHttpServerResponse ClusterServer::handleNodeAdd(const PgsHttp::Request &request
     return QHttpServerResponse(QJsonObject{{"ok", true}, {"added", name}});
 }
 
+QHttpServerResponse ClusterServer::handleNodeUpdate(const PgsHttp::Request &request)
+{
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return jsonError(QStringLiteral("invalid JSON"), 400);
+    const QJsonObject o = doc.object();
+    QString currentName = o.value("current_name").toString().trimmed();
+    if (currentName.isEmpty())
+        currentName = o.value("old_name").toString().trimmed();
+    QString newName = o.value("name").toString().trimmed();
+    if (newName.isEmpty())
+        newName = currentName;
+    const QString url = o.value("url").toString().trimmed();
+    const QString creds = o.value("credentials").toString().trimmed();
+    const bool replaceCredentials = o.contains("credentials") && !creds.isEmpty();
+    const bool clearCredentials = o.value("clear_credentials").toBool(false);
+    if (currentName.isEmpty() || newName.isEmpty() || url.isEmpty())
+        return jsonError(QStringLiteral("current_name, name, and url required"), 400);
+    const auto existing = m_nodes.constFind(currentName);
+    if (existing == m_nodes.constEnd())
+        return jsonError(QStringLiteral("node not found"), 404);
+    QString normalizedUrl;
+    if (!normalizeNodeUrl(url, normalizedUrl))
+        return jsonError(QStringLiteral("url must be https://host[:port] without path, query, fragment, or embedded credentials"), 400);
+    if (!isSafeRegistryField(newName) || !isSafeRegistryField(normalizedUrl) || !isSafeRegistryField(creds))
+        return jsonError(QStringLiteral("name, url, and credentials must not contain control characters or semicolons"), 400);
+    if (newName != currentName && m_nodes.contains(newName))
+        return jsonError(QStringLiteral("node name already exists"), 409);
+
+    Node n = existing.value();
+    n.name = newName;
+    n.baseHttpsUrl = normalizedUrl;
+    if (clearCredentials)
+        n.credentials.clear();
+    else if (replaceCredentials)
+        n.credentials = creds;
+    n.generation = m_nextNodeGeneration++;
+
+    m_nodes.remove(currentName);
+    m_cache.remove(currentName);
+    m_cache.remove(newName);
+    m_nodes.insert(newName, n);
+    saveNodes();
+    pollNode(n);
+    return QHttpServerResponse(QJsonObject{{"ok", true}, {"updated", newName}, {"url", normalizedUrl}});
+}
+
+QHttpServerResponse ClusterServer::handleNodeTest(const PgsHttp::Request &request)
+{
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return jsonError(QStringLiteral("invalid JSON"), 400);
+    const QJsonObject o = doc.object();
+    const QString name = o.value("name").toString().trimmed();
+    const auto existing = name.isEmpty() ? m_nodes.constEnd() : m_nodes.constFind(name);
+    QString url = o.value("url").toString().trimmed();
+    QString creds = o.value("credentials").toString().trimmed();
+    if (url.isEmpty() && existing != m_nodes.constEnd())
+        url = existing->baseHttpsUrl;
+    if (creds.isEmpty() && existing != m_nodes.constEnd())
+        creds = existing->credentials;
+    if (url.isEmpty())
+        return jsonError(QStringLiteral("url or known node name required"), 400);
+    QString normalizedUrl;
+    if (!normalizeNodeUrl(url, normalizedUrl))
+        return jsonError(QStringLiteral("url must be https://host[:port] without path, query, fragment, or embedded credentials"), 400);
+    if (!isSafeRegistryField(normalizedUrl) || !isSafeRegistryField(creds))
+        return jsonError(QStringLiteral("url and credentials must not contain control characters or semicolons"), 400);
+
+    QNetworkRequest req(QUrl(normalizedUrl + QStringLiteral("/api/cluster/health")));
+    if (!creds.isEmpty())
+        req.setRawHeader("Authorization", "Basic " + creds.toUtf8().toBase64());
+    QSslConfiguration cfg = req.sslConfiguration();
+    if (m_nodeInsecureTls)
+    {
+        cfg.setPeerVerifyMode(QSslSocket::VerifyNone);
+    }
+    else
+    {
+        cfg.setPeerVerifyMode(QSslSocket::VerifyPeer);
+        if (!m_nodeCaCertificates.isEmpty())
+            cfg.addCaCertificates(m_nodeCaCertificates);
+    }
+    req.setSslConfiguration(cfg);
+
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    QNetworkReply *reply = m_nam->get(req);
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timer.start(5000);
+    loop.exec();
+    const bool timedOut = !reply->isFinished();
+    if (timedOut)
+        reply->abort();
+    const int status = httpStatusCode(reply);
+    const bool reachable = !timedOut && reply->error() == QNetworkReply::NoError && isHttpSuccess(status);
+    const QString body = timedOut ? QString() : QString::fromUtf8(reply->readAll());
+    QString error = timedOut ? QStringLiteral("request timed out") : pollFailureMessage(QStringLiteral("/api/cluster/health"), reply, status);
+    if (reachable)
+        error.clear();
+    reply->deleteLater();
+
+    QJsonObject obj;
+    obj.insert("ok", true);
+    obj.insert("reachable", reachable);
+    obj.insert("status", status);
+    obj.insert("url", normalizedUrl);
+    if (!error.isEmpty())
+        obj.insert("error", error);
+    if (!body.isEmpty())
+    {
+        QJsonParseError pe;
+        const QJsonDocument bodyDoc = QJsonDocument::fromJson(body.toUtf8(), &pe);
+        if (pe.error == QJsonParseError::NoError && bodyDoc.isObject())
+        {
+            const QJsonObject health = bodyDoc.object();
+            obj.insert("pgs_ok", health.value("pgs_ok").toBool(false));
+            obj.insert("guard_count", health.value("guard_count").toInt(0));
+            obj.insert("message", health.value("message").toString());
+            obj.insert("listen_url", health.value("listen_url").toString());
+        }
+    }
+    return QHttpServerResponse(obj);
+}
+
 QHttpServerResponse ClusterServer::handleNodeRemove(const PgsHttp::Request &request)
 {
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
@@ -836,6 +981,10 @@ QHttpServerResponse ClusterServer::handleSummary() const
                     QJsonObject row;
                     row.insert("pid", guard.value("pid").toString());
                     row.insert("path", guard.value("path").toString());
+                    row.insert("status", guard.value("status").toString());
+                    row.insert("quarantined", guard.value("quarantined").toString());
+                    row.insert("health_status", guard.value("health_status").toString());
+                    row.insert("last_failure_code", guard.value("last_failure_code").toString());
                     row.insert("restart_count", guard.value("restart_count").toString());
                     row.insert("max_restarts", guard.value("max_restarts").toString());
                     row.insert("alive", alive);
@@ -894,6 +1043,7 @@ h1{font-size:20px;margin:0 0 12px}
 button,.button-link{background:#3b6fd8;color:#fff;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;margin-right:8px;text-decoration:none;font:inherit}
 button.remove{background:#7f2d2d}
 input{background:#2b2f36;border:1px solid #444a54;color:#e6e9ef;border-radius:4px;padding:5px 8px;margin-right:6px}
+label{font-size:12px;color:#9aa3b0;margin-right:8px}.edit-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}.edit-grid input{width:100%;box-sizing:border-box;margin:4px 0 0}.edit-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}.edit-status{font-size:12px;color:#9aa3b0;min-height:18px}
 .detail{margin-top:18px;background:#1b1e24;border:1px solid #3a3f47;border-radius:8px;padding:16px}
 .detail h2{font-size:16px;margin:0 0 10px}
 .detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:10px 0}
@@ -960,6 +1110,14 @@ function detailItem(label,value,cls){
   item.appendChild(el('div','k',label));
   item.appendChild(el('div','v'+(cls?' '+cls:''),fmt(value)));
   return item;
+}
+function labeledInput(id,label,value,type){
+  const wrap=document.createElement('label');
+  wrap.textContent=label;
+  const input=document.createElement('input');
+  input.id=id;input.type=type||'text';input.value=value||'';input.autocomplete='off';
+  wrap.appendChild(input);
+  return wrap;
 }
 function appendCell(row,value,cls){
   const cell=document.createElement('td');
@@ -1062,14 +1220,27 @@ function renderDetail(){
   grid.appendChild(detailItem('HTTP',`health ${fmt(n.health_status||'--')} / guards ${fmt(n.guards_status||'--')}`));
   grid.appendChild(detailItem('PGS',n.pgs_ok===true?'ok':(n.pgs_ok===false?'not ok':'unknown'),n.pgs_ok===true?'ok':(n.pgs_ok===false?'bad':'')));
   grid.appendChild(detailItem('Message',n.last_error||n.health_message||'--',n.last_error?'bad':''));
-  const parts=[title,open,grid];
+  const edit=el('div','edit-grid');
+  edit.appendChild(labeledInput('edit-name','Name',n.name));
+  edit.appendChild(labeledInput('edit-url','URL',n.url));
+  edit.appendChild(labeledInput('edit-creds','Credentials','', 'password'));
+  const clearWrap=document.createElement('label');
+  const clearBox=document.createElement('input');
+  clearBox.id='edit-clear-creds';clearBox.type='checkbox';
+  clearWrap.appendChild(clearBox);clearWrap.appendChild(document.createTextNode(' Clear credentials'));edit.appendChild(clearWrap);
+  const editActions=el('div','edit-actions');
+  const save=el('button',null,'Save Node');save.addEventListener('click',saveSelectedNode);
+  const test=el('button',null,'Test Node');test.addEventListener('click',testSelectedNode);
+  const editStatus=el('div','edit-status');editStatus.id='edit-status';
+  editActions.append(save,test,editStatus);
+  const parts=[title,open,grid,edit,editActions];
   const guards=Array.isArray(n.guards)?n.guards:[];
   if(guards.length){
     const table=document.createElement('table');
     table.className='guard-table';
     const head=document.createElement('thead');
     const hr=document.createElement('tr');
-    ['PID','Alive','Restarts','Max','Session','App','Window','Delay','Backoff','Hang','Kill','Path'].forEach(h=>{const th=document.createElement('th');th.textContent=h;hr.appendChild(th);});
+    ['PID','Alive','Status','Health','Failure','Restarts','Max','Session','App','Window','Delay','Backoff','Hang','Kill','Path'].forEach(h=>{const th=document.createElement('th');th.textContent=h;hr.appendChild(th);});
     head.appendChild(hr);
     table.appendChild(head);
     const body=document.createElement('tbody');
@@ -1079,6 +1250,9 @@ function renderDetail(){
       const dead=alive!=='1'&&alive.toLowerCase()!=='true';
       appendCell(row,g.pid);
       appendCell(row,g.alive,dead?'bad':'ok');
+      appendCell(row,g.status||g.quarantined);
+      appendCell(row,g.health_status);
+      appendCell(row,g.last_failure_code,g.last_failure_code?'warn':'');
       appendCell(row,g.restart_count);
       appendCell(row,g.max_restarts);
       appendCell(row,g.session);
@@ -1107,6 +1281,30 @@ async function addNode(){
     body:JSON.stringify({name,url,credentials:creds})});
   document.getElementById('nname').value='';document.getElementById('nurl').value='';document.getElementById('ncreds').value='';
   refresh();
+}
+function currentEditPayload(){
+  const n=selectedNode();
+  return {current_name:n?n.name:'',name:document.getElementById('edit-name')?.value.trim()||'',url:document.getElementById('edit-url')?.value.trim()||'',credentials:document.getElementById('edit-creds')?.value.trim()||'',clear_credentials:!!document.getElementById('edit-clear-creds')?.checked};
+}
+function setEditStatus(text,cls){
+  const node=document.getElementById('edit-status');if(!node)return;node.className='edit-status'+(cls?' '+cls:'');node.textContent=text;
+}
+async function saveSelectedNode(){
+  const body=currentEditPayload();
+  if(!body.current_name||!body.name||!body.url)return;
+  setEditStatus('saving...');
+  const r=await fetch('/api/cluster/nodes',{method:'PUT',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({error:'invalid response'}));
+  if(!r.ok||j.ok===false){setEditStatus('save failed: '+(j.error||r.status),'bad');return;}
+  selectedNodeName=j.updated||body.name;setEditStatus('saved','ok');refresh();
+}
+async function testSelectedNode(){
+  const body=currentEditPayload();
+  setEditStatus('testing...');
+  const r=await fetch('/api/cluster/nodes/test',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({name:body.current_name,url:body.url,credentials:body.credentials})});
+  const j=await r.json().catch(()=>({error:'invalid response'}));
+  if(!r.ok||j.ok===false){setEditStatus('test failed: '+(j.error||r.status),'bad');return;}
+  setEditStatus(j.reachable?`reachable: ${j.message||'ok'}`:`unreachable: ${j.error||j.status}`,j.reachable?'ok':'bad');
 }
 async function removeNode(name){
   if(!confirm(`Remove node "${name}" from this dashboard?`))return;

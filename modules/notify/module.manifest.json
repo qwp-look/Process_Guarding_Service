@@ -1,0 +1,13 @@
+{
+  "name": "notify",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Windows-native Event Log and optional local popup notifications.",
+  "capabilities": ["notify.eventlog", "notify.popup", "event.read"],
+  "risk": "low",
+  "methods": [
+    {"name": "notify.status", "risk": "low", "sync": true, "required_capabilities": ["notify.eventlog"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "notify.config", "risk": "low", "sync": true, "required_capabilities": ["notify.eventlog", "notify.popup"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "notify.event", "risk": "low", "sync": true, "required_capabilities": ["notify.eventlog"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

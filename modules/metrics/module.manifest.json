@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "name": "metrics",
+  "version": "1.0.0",
+  "abi": 3,
+  "summary": "Local PGS guard and host metrics.",
+  "risk": "low",
+  "capabilities": ["metrics.summary", "metrics.prometheus", "health.stats", "guard.list"],
+  "methods": [
+    {"name": "metrics.summary", "risk": "low", "sync": true, "required_capabilities": ["metrics.summary", "health.stats", "guard.list"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "metrics.prometheus", "risk": "low", "sync": true, "required_capabilities": ["metrics.prometheus", "health.stats", "guard.list"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

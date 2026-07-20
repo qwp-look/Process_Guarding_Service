@@ -22,13 +22,12 @@
 
 ## WindowsApps 当前用法
 
-WindowsApps / Store / UWP 应用的启动方式和普通 exe 不一样。当前版本采用显式 AUMID 的“先启动，再注册”流程：
+WindowsApps / Store / UWP 应用的启动方式和普通 exe 不一样。当前版本支持两种流程：
 
-1. 先手动启动 Store 应用。
-2. 找到对应 PID。
-3. 使用 `--winapp --aumid <id>` 注册。
+1. 已运行应用：先启动 Store 应用，找到对应 PID，然后使用 `pgs_bless bless --pid <pid> --winapp --aumid <id>` 注册。
+2. 直接启动注册：使用 `pgs_bless bless-start --winapp --aumid <id>`，CLI 会通过 Windows AUMID activation 激活应用并注册返回的 PID。
 
-`bless-start --winapp` 当前会被拒绝；自动识别 AUMID 也尚未实现。这两项已记录在未完成功能交接文档中。
+如果传入的是 WindowsApps 目录内的 exe 路径，CLI 会尝试读取上层 `AppxManifest.xml` 并推导 AUMID；也可以显式传 `--aumid`。这条路径已实现 manifest fixture 单元测试，真实 Store/UWP 环境仍需要用 `tools/verify_winapp.ps1` 做管理员/交互会话 E2E 验证。
 
 ## 进一步阅读
 

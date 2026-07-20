@@ -44,11 +44,34 @@ namespace ProcessGuard
     {
         thread_local std::vector<const void *> g_invokeRuntimeStack;
         std::string jsonStringValue(const std::string &text, const std::string &key);
+        std::string jsonEscape(const std::string &value);
 
         bool hasCapability(const std::vector<std::string> &caps, const std::string &required)
         {
             return std::find(caps.begin(), caps.end(), required) != caps.end() ||
                    std::find(caps.begin(), caps.end(), "core.call.any") != caps.end();
+        }
+
+        std::string addCallerModuleToJson(const std::string &requestJson, const std::string &moduleName)
+        {
+            const std::string text = util::trim(requestJson);
+            if (text.empty() || text.front() != '{')
+            {
+                return requestJson;
+            }
+            const std::size_t close = text.find_last_of('}');
+            if (close == std::string::npos)
+            {
+                return requestJson;
+            }
+            std::string out = text.substr(0, close);
+            if (!out.empty() && out.back() != '{')
+            {
+                out += ",";
+            }
+            out += "\"__caller_module\":\"" + jsonEscape(moduleName) + "\"";
+            out += text.substr(close);
+            return out;
         }
 
         std::string commandVerb(const char *request)
@@ -126,7 +149,8 @@ namespace ProcessGuard
                 writeResponse(response, responseSize, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":\"CAPABILITY_DENIED\",\"message\":\"module capability denied\"}}");
                 return 0;
             }
-            return ctx->host.call_json(ctx->host.context, requestJson, response, responseSize);
+            const std::string annotated = addCallerModuleToJson(requestJson ? requestJson : "", ctx->moduleName);
+            return ctx->host.call_json(ctx->host.context, annotated.c_str(), response, responseSize);
         }
 
         int moduleEmitEventThunk(void *context, const char *eventJson)
@@ -340,6 +364,12 @@ namespace ProcessGuard
         std::string modulesLockPath(const std::string &dir)
         {
             return dir.empty() ? std::string("modules.lock") : (dir + "\\modules.lock");
+        }
+
+        bool fileExistsUtf8(const std::string &path)
+        {
+            std::error_code ec;
+            return std::filesystem::exists(std::filesystem::path(util::utf8ToWide(path)), ec);
         }
 
         std::string jsonStringValue(const std::string &text, const std::string &key)
@@ -1612,14 +1642,14 @@ namespace ProcessGuard
 
     void ModuleManager::loadAllowlist(const std::string &dir)
     {
-        // Allowlist format (one entry per line, '#' comments, blank ignored):
-        //   name
-        //   name|<sha256Hex>
-        //   name|<sha256Hex>|signed
-        //   name||signed      (signature required, no pinned hash)
-        // Empty allowlist => fail-closed (permissive mode is the only escape).
+        // modules.lock is the release trust source. If present, it must parse
+        // into strict hash-pinned entries; corruption keeps the allowlist empty
+        // so non-permissive loading fails closed instead of falling back to
+        // name-only modules.allow.
         const std::string lockFile = modulesLockPath(dir);
         std::vector<AllowEntry> lockEntries;
+        const bool lockFileExists = fileExistsUtf8(lockFile);
+        bool lockInvalid = false;
         {
             std::ifstream in(lockFile, std::ios::in | std::ios::binary);
             std::string body;
@@ -1628,6 +1658,14 @@ namespace ProcessGuard
                 std::ostringstream oss;
                 oss << in.rdbuf();
                 body = oss.str();
+            }
+            else if (lockFileExists)
+            {
+                lockInvalid = true;
+            }
+            if (lockFileExists && body.find("\"modules\"") == std::string::npos)
+            {
+                lockInvalid = true;
             }
             std::size_t pos = 0;
             while (!body.empty())
@@ -1641,6 +1679,7 @@ namespace ProcessGuard
                 const std::size_t objEnd = body.find('}', namePos);
                 if (objStart == std::string::npos || objEnd == std::string::npos)
                 {
+                    lockInvalid = true;
                     break;
                 }
                 const std::string obj = body.substr(objStart, objEnd - objStart + 1);
@@ -1651,12 +1690,23 @@ namespace ProcessGuard
                 entry.requireSigned = jsonBoolValue(obj, "require_signed", false) ||
                                       jsonBoolValue(obj, "signed", false) ||
                                       signaturePolicy == "signed";
-                if (!entry.name.empty() && (entry.sha256.empty() || isSha256Hex(entry.sha256)))
+                if (!entry.name.empty() && isSha256Hex(entry.sha256))
                 {
                     lockEntries.push_back(std::move(entry));
                 }
+                else
+                {
+                    lockInvalid = true;
+                }
                 pos = objEnd + 1;
             }
+        }
+        if (lockFileExists && (lockInvalid || lockEntries.empty()))
+        {
+            m_allowlist.clear();
+            m_allowlistLoaded = true;
+            Logger::warning("PGS: modules.lock invalid or empty; module loading will fail closed: " + lockFile);
+            return;
         }
         if (!lockEntries.empty())
         {
@@ -1665,6 +1715,8 @@ namespace ProcessGuard
             return;
         }
 
+        // Legacy developer compatibility path used only when modules.lock is
+        // absent. Empty allowlist still fails closed outside permissive mode.
         const std::string file = (dir.empty() ? std::string() : (dir + "\\")) + "modules.allow";
         std::vector<std::string> diagnostics;
         m_allowlist = loadAllowlistEntries(file, &diagnostics);

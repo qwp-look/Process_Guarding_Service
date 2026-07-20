@@ -51,7 +51,14 @@ pgs_cluster_web.exe --listen-address 0.0.0.0 --listen-port 19090 --api-token tok
 
 ## `bless-start --winapp` 失败
 
-这是当前预期行为。WindowsApps 目前只支持先启动应用，再按 PID 使用 `--winapp --aumid` attach。自动 AUMID 推导和直接启动注册尚未完成。
+优先检查：
+
+- 当前会话是否是可交互用户会话，WindowsApps activation 需要用户 session。
+- `--aumid` 是否正确，格式通常是 `PackageFamilyName!AppId`。
+- 如果靠 `--path` 推导 AUMID，目标 exe 上层是否能读取 `AppxManifest.xml`。
+- 服务/CLI 是否有权限查询激活后的进程路径。
+
+该能力已接入 CLI 和重启路径，但不同 Store/UWP 应用行为差异较大，发布前仍建议在真实 WindowsApps 环境运行 `tools/verify_winapp.ps1`。
 
 ## release 打包时旧目录删不掉
 

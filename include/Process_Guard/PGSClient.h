@@ -48,8 +48,10 @@ namespace ProcessGuard::client
     std::string withAuthToken(const std::string &token, const std::string &command);
 
     // Send one line-oriented command to PGS and return the trimmed reply.
-    // timeoutMs bounds both send and receive so a stuck server cannot pin the
-    // caller. One command == one connection; the protocol is request/response.
+    // The client initializes Winsock internally on first use; callers no longer
+    // need a process-level WSAStartup precondition. timeoutMs bounds both send
+    // and receive so a stuck server cannot pin the caller. One command == one
+    // connection; the protocol is request/response.
     ClientResponse sendCommand(const ClientOptions &options, const std::string &command, std::uint32_t timeoutMs = 3000);
 
 } // namespace ProcessGuard::client

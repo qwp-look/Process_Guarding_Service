@@ -52,13 +52,13 @@ target_link_libraries(pgs_module_manager PUBLIC pgs_logger wintrust ole32 bcrypt
 
 add_library(pgs_core STATIC src/service/PGS.cpp src/service/PGSProtocol.cpp)
 target_include_directories(pgs_core PUBLIC include)
-target_link_libraries(pgs_core PUBLIC pgs_logger pgs_module_manager ws2_32 advapi32 wtsapi32 userenv bcrypt wintrust ole32 shell32)
+target_link_libraries(pgs_core PUBLIC pgs_logger pgs_module_manager ws2_32 winhttp advapi32 wtsapi32 userenv bcrypt wintrust ole32 shell32)
 
 add_executable(pgs_service src/service/pgs_service.cpp)
 target_link_libraries(pgs_service PRIVATE pgs_core)
 
 add_executable(pgs_bless tools/pgs_bless.cpp)
-target_link_libraries(pgs_bless PRIVATE pgs_client pgs_module_manager pgs_logger ws2_32 advapi32 bcrypt wintrust ole32)
+target_link_libraries(pgs_bless PRIVATE pgs_client pgs_module_manager pgs_logger ws2_32 advapi32 bcrypt wintrust ole32 shell32)
 
 add_executable(guard_example examples/guard_example.cpp)
 target_include_directories(guard_example PRIVATE include)
@@ -94,18 +94,35 @@ pgs_module(pgs_sched_module sched pgs_sched_module modules/sched/SchedCron.cpp m
 pgs_module(pgs_health_module health pgs_health_module modules/health/pgs_health_module.cpp)
 pgs_module(pgs_profile_module profile pgs_profile_module modules/profile/pgs_profile_module.cpp)
 pgs_module(pgs_report_module report pgs_report_module modules/report/pgs_report_module.cpp)
+pgs_module(pgs_notify_module notify pgs_notify_module modules/notify/pgs_notify_module.cpp)
+target_link_libraries(pgs_notify_module PRIVATE advapi32 user32)
+pgs_module(pgs_metrics_module metrics pgs_metrics_module modules/metrics/pgs_metrics_module.cpp)
+pgs_module(pgs_backup_module backup pgs_backup_module modules/backup/pgs_backup_module.cpp)
+pgs_module(pgs_eventlog_module eventlog pgs_eventlog_module modules/eventlog/pgs_eventlog_module.cpp)
+target_link_libraries(pgs_eventlog_module PRIVATE advapi32)
+pgs_module(pgs_dump_module dump pgs_dump_module modules/dump/pgs_dump_module.cpp)
+target_link_libraries(pgs_dump_module PRIVATE dbghelp)
+pgs_module(pgs_service_guard_module service_guard pgs_service_guard_module modules/service_guard/pgs_service_guard_module.cpp)
+target_link_libraries(pgs_service_guard_module PRIVATE advapi32)
+pgs_module(pgs_file_watch_module file_watch pgs_file_watch_module modules/file_watch/pgs_file_watch_module.cpp)
+target_link_libraries(pgs_file_watch_module PRIVATE bcrypt)
+pgs_module(pgs_policy_module policy pgs_policy_module modules/policy/pgs_policy_module.cpp)
+pgs_module(pgs_remote_agent_module remote_agent pgs_remote_agent_module modules/remote_agent/pgs_remote_agent_module.cpp)
+pgs_module(pgs_update_module update pgs_update_module modules/update/pgs_update_module.cpp)
+target_link_libraries(pgs_update_module PRIVATE bcrypt)
+pgs_module(pgs_script_runner_module script_runner pgs_script_runner_module modules/script_runner/pgs_script_runner_module.cpp)
 pgs_module(pgs_ppl_module ppl pgs_ppl_module modules/ppl/pgs_ppl_module.cpp)
 target_link_libraries(pgs_ppl_module PRIVATE advapi32)
 pgs_copy_if_exists(pgs_ppl_module "${PGS_ROOT}/modules/ppl/Sirius.sys" "${PGS_BUILD_DIR}/modules/ppl")
 
 file(MAKE_DIRECTORY "${PGS_BUILD_DIR}/modules")
-file(WRITE "${PGS_BUILD_DIR}/modules/modules.allow" "ppl\nsched\nhealth\nprofile\nreport\n")
+file(WRITE "${PGS_BUILD_DIR}/modules/modules.allow" "ppl\nsched\nhealth\nprofile\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\nremote_agent\nupdate\nscript_runner\n")
 add_custom_target(pgs_bundled_modules_lock ALL
     COMMAND ${CMAKE_COMMAND}
         -DPGS_MODULES_ROOT=${PGS_BUILD_DIR}/modules
         -DPGS_MODULES_LOCK_OUT=${PGS_BUILD_DIR}/modules/modules.lock
         -P ${PGS_ROOT}/cmake/WriteBundledModulesLock.cmake
-    DEPENDS pgs_sched_module pgs_health_module pgs_profile_module pgs_report_module pgs_ppl_module
+    DEPENDS pgs_sched_module pgs_health_module pgs_profile_module pgs_report_module pgs_notify_module pgs_metrics_module pgs_backup_module pgs_eventlog_module pgs_dump_module pgs_service_guard_module pgs_file_watch_module pgs_policy_module pgs_remote_agent_module pgs_update_module pgs_script_runner_module pgs_ppl_module
     COMMENT "Writing modules.lock for bundled modules")
 
 if(PGS_BUILD_TESTS)

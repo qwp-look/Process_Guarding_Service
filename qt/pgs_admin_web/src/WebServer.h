@@ -72,9 +72,24 @@ private:
     QHttpServerResponse handlePolicy(const PgsHttp::Request &request);
     QHttpServerResponse handleUnbless(const PgsHttp::Request &request);
     QHttpServerResponse handleIntentional(const PgsHttp::Request &request);
+    QHttpServerResponse handleGuardControl(const PgsHttp::Request &request, const QString &action);
+    QHttpServerResponse handleHealthCheck(const PgsHttp::Request &request, const QString &action);
     QHttpServerResponse handleTokenUpdate(const PgsHttp::Request &request);
     QHttpServerResponse handleModules();
     QHttpServerResponse handleModuleCall(const PgsHttp::Request &request);
+    QHttpServerResponse handleMetrics(const PgsHttp::Request &request);
+    QHttpServerResponse handleBackupStatus();
+    QHttpServerResponse handleBackupSnapshot(const PgsHttp::Request &request);
+    QHttpServerResponse handleEventlogStatus();
+    QHttpServerResponse handleEventlogRecent(const PgsHttp::Request &request);
+    QHttpServerResponse handleNotifyStatus();
+    QHttpServerResponse handleNotifyConfig(const PgsHttp::Request &request);
+    QHttpServerResponse handleReport(const PgsHttp::Request &request);
+    QHttpServerResponse handleOperationStatus(const PgsHttp::Request &request);
+    QHttpServerResponse handleArtifactMeta(const PgsHttp::Request &request);
+    QHttpServerResponse handleArtifactStatus(const PgsHttp::Request &request);
+    QHttpServerResponse handleArtifactPolicy(const PgsHttp::Request &request);
+    QHttpServerResponse handleArtifactDownload(const PgsHttp::Request &request);
     QHttpServerResponse handleScheduleList();
     QHttpServerResponse handleScheduleAdd(const PgsHttp::Request &request);
     QHttpServerResponse handleScheduleControl(const PgsHttp::Request &request, const QString &action);
@@ -98,11 +113,12 @@ private:
 
     static QHttpServerResponse jsonOk(const QString &message);
     static QHttpServerResponse jsonError(const QString &message, int statusCode = 400);
-    static QHttpServerResponse jsonUnauthorized();
+    QHttpServerResponse jsonUnauthorized() const;
     static QHttpServerResponse jsonCommandResult(const CommandResult &result, const QString &message = QString(), bool allowRawStdout = true);
 
     Options m_options;
-    QString m_apiToken;
+    QString m_apiToken;  // local HttpOnly session cookie secret; remote mode does not expose it
+    QString m_csrfToken; // page-readable CSRF nonce for same-origin unsafe requests
     PgsHttp::Server *m_server = nullptr;
     QTcpServer *m_tcpServer = nullptr;
     class QSslServer *m_sslServer = nullptr;

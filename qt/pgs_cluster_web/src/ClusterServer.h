@@ -52,6 +52,8 @@ private:
     class QHttpServerResponse handleDashboard() const;
     class QHttpServerResponse handleNodesList() const;
     class QHttpServerResponse handleNodeAdd(const PgsHttp::Request &request);
+    class QHttpServerResponse handleNodeUpdate(const PgsHttp::Request &request);
+    class QHttpServerResponse handleNodeTest(const PgsHttp::Request &request);
     class QHttpServerResponse handleNodeRemove(const PgsHttp::Request &request);
     class QHttpServerResponse handleSummary() const;
 

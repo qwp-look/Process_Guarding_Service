@@ -211,6 +211,25 @@ void test_pfn_and_aumid()
     // Empty publisher should yield an empty hash (sha256Hex("") is valid but
     // the contract is "no publisher -> no PFN suffix"; keep this as a guard).
     CHECK(!u::packageFamilyNameFrom("X", "").empty()); // name_ + (sha256("")low8 b64)
+
+    CHECK_EQ(u::packageFamilyNameFromPackageFullName("Contoso.App_1.2.3.4_x64__8wekyb3d8bbwe"),
+             std::string("Contoso.App_8wekyb3d8bbwe"));
+
+    const std::string manifest =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        "<Package xmlns=\"http://schemas.microsoft.com/appx/manifest/foundation/windows10\">"
+        "<Identity Name=\"Contoso.App\" Publisher=\"CN=Contoso &amp; Sons\" Version=\"1.0.0.0\"/>"
+        "<Applications>"
+        "<Application Id=\"First\" Executable=\"other.exe\"/>"
+        "<Application Id=\"Main.App\" Executable=\"bin\\target.exe\"/>"
+        "</Applications></Package>";
+    u::AppxAumidInfo info;
+    std::string err;
+    CHECK(u::deriveAumidFromAppxManifestText(manifest, "C:\\Program Files\\WindowsApps\\Contoso.App_1.0.0.0_x64__abc\\bin\\target.exe", info, err));
+    CHECK_EQ(info.packageName, std::string("Contoso.App"));
+    CHECK_EQ(info.publisher, std::string("CN=Contoso & Sons"));
+    CHECK_EQ(info.appId, std::string("Main.App"));
+    CHECK(info.aumid.find("!Main.App") != std::string::npos);
 }
 
 void test_restart_window()
