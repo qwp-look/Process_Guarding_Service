@@ -214,3 +214,18 @@
 - 测试方式：已覆盖 build、MSYS build、runtime smoke、release smoke 和 installer metadata；后续补每个模块的负例脚本和 UI smoke。
 - 相关入口：`modules/`、`docs/MODULE_ECOSYSTEM.md`、`docs/schemas/module.manifest.schema.json`。
 - 优先级：P1
+
+## P1-17 module install — 仓库模块下载安装
+
+- **预期行为**：`pgs_bless module install <name>` 从 [PGS_Model](https://github.com/qwp-look/PGS_Model) 拉取 `registry.json`，解析模块条目，下载 DLL 到 `modules_staging/`，校验 SHA-256，写入 `modules.lock`，移入 `modules/<name>/`，最后执行 `module load`。
+- **当前状态**：未实现。仓库结构（`registry.json`、schemas、文档）已在 PGS_Model 仓库建立。
+- **信任模型**：
+  - `official`：直接安装，无额外提示
+  - `curated`：安装时提示 🟡，`risk: high/critical` 额外需要 `--confirm`
+  - `community`：默认拒绝，需 `--trust-community` 显式 opt-in，并展示高风险警告要求用户输入 YES 确认
+- **阻塞前提**：
+  1. `ModuleManager` JSON parser 必须先换掉（当前轻量字符串提取不足以安全解析外部仓库 manifest）
+  2. 需要稳定的网络下载 + hash 校验 + staging install + rollback 流程
+- **不依赖代码签名**：install 可先实现 hash 校验版本；代码签名就绪后 community 档再放开默认限制
+- **相关入口**：`tools/pgs_bless.cpp`、`src/modules/ModuleManager.cpp`、`docs/MODULE_ECOSYSTEM.md`、[PGS_Model/registry.json](https://github.com/qwp-look/PGS_Model/blob/main/registry.json)
+- **优先级**：P1

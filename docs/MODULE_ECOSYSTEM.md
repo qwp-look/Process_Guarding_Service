@@ -127,3 +127,67 @@ Modules that call back into these commands through `PGS_ServicesV3.call_json` ne
 ## Bundled Module Set
 
 The release build currently writes 16 bundled modules into `modules.lock`: `sched`, `health`, `profile`, `report`, `notify`, `metrics`, `backup`, `eventlog`, `dump`, `service_guard`, `file_watch`, `policy`, `remote_agent`, `update`, `script_runner`, and `ppl`. The newer operational modules are deliberately narrow first passes: no chat/webhook/mail integrations, no update downloader/installer, no remote listener in `remote_agent`, and script execution is disabled until explicitly enabled and confirmed.
+
+## Module Registry
+
+PGS 官方模块仓库：[qwp-look/PGS_Model](https://github.com/qwp-look/PGS_Model)
+
+仓库是 PGS 模块的权威分发渠道。客户端通过拉取 `registry.json` 索引获取可用模块列表，并按三档信任模型决定安装行为。
+
+### 三档信任
+
+| 档位 | 发布者 | PGS 默认行为 |
+|---|---|---|
+| `official` | 仅 qwp-look | 直接信任，hash 不匹配则 fail-closed |
+| `curated` | 经 qwp-look 审核 | 信任，安装时提示 🟡 |
+| `community` | 任何人 | **默认拒绝**，需 `--trust-community` 显式 opt-in |
+
+`community` 档在代码签名基础设施就绪前默认拒绝加载，防止仓库成为供应链攻击入口。详细规则见仓库 [docs/TRUST_LEVELS.md](https://github.com/qwp-look/PGS_Model/blob/main/docs/TRUST_LEVELS.md)。
+
+### registry.json 结构
+
+客户端拉取 `registry.json` 获取模块索引：
+
+```json
+{
+  "version": "1",
+  "pgs_min_version": "0.1.0-beta.1",
+  "modules": [
+    {
+      "name": "sched",
+      "trust": "official",
+      "risk": "low",
+      "capabilities": ["guard.schedule"],
+      "bundled": true,
+      "latest": "0.1.0-beta.1",
+      "versions": [
+        {
+          "version": "0.1.0-beta.1",
+          "download_url": "...",
+          "sha256": "...",
+          "manifest_url": "..."
+        }
+      ]
+    }
+  ]
+}
+```
+
+`bundled: true` 表示该模块随 PGS 安装包内置，无需单独下载；`download_url` 为空。
+
+### module install 流程（客户端，待实现）
+
+```bat
+pgs_bless.exe module install sched
+pgs_bless.exe module install my-tool --trust-curated
+pgs_bless.exe module install experimental --trust-community
+```
+
+安装流程：拉取 `registry.json` → 解析条目 → 下载到 `modules_staging/` → SHA-256 校验 → 写入 `modules.lock` → 移入 `modules/<name>/` → `module load`。
+
+高风险模块（`risk: high` 或 `risk: critical`）安装时额外需要 `--confirm`，不论档位。
+
+### 贡献模块
+
+- 提交 curated 模块：见仓库 [docs/CONTRIBUTING.md](https://github.com/qwp-look/PGS_Model/blob/main/docs/CONTRIBUTING.md)
+- 发布新版本：见仓库 [docs/PUBLISHING.md](https://github.com/qwp-look/PGS_Model/blob/main/docs/PUBLISHING.md)

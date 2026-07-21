@@ -21,6 +21,7 @@
 #include "Process_Guard/ModuleManager.h"
 #include "Process_Guard/PGLogger.h"
 #include "Process_Guard/PGUtil.h"
+#include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -374,159 +375,65 @@ namespace ProcessGuard
 
         std::string jsonStringValue(const std::string &text, const std::string &key)
         {
-            const std::string needle = "\"" + key + "\"";
-            std::size_t pos = text.find(needle);
-            if (pos == std::string::npos)
+            try
             {
-                return std::string();
+                const auto j = nlohmann::json::parse(text);
+                if (j.contains(key) && j.at(key).is_string())
+                    return j.at(key).get<std::string>();
             }
-            pos = text.find(':', pos + needle.size());
-            if (pos == std::string::npos)
-            {
-                return std::string();
-            }
-            ++pos;
-            while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-            {
-                ++pos;
-            }
-            if (pos >= text.size() || text[pos] != '"')
-            {
-                return std::string();
-            }
-            ++pos;
-            std::string out;
-            bool escaped = false;
-            for (; pos < text.size(); ++pos)
-            {
-                const char ch = text[pos];
-                if (escaped)
-                {
-                    switch (ch)
-                    {
-                    case '"': out.push_back('"'); break;
-                    case '\\': out.push_back('\\'); break;
-                    case '/': out.push_back('/'); break;
-                    case 'b': out.push_back('\b'); break;
-                    case 'f': out.push_back('\f'); break;
-                    case 'n': out.push_back('\n'); break;
-                    case 'r': out.push_back('\r'); break;
-                    case 't': out.push_back('\t'); break;
-                    default: out.push_back(ch); break;
-                    }
-                    escaped = false;
-                    continue;
-                }
-                if (ch == '\\')
-                {
-                    escaped = true;
-                    continue;
-                }
-                if (ch == '"')
-                {
-                    break;
-                }
-                out.push_back(ch);
-            }
-            return out;
+            catch (...) {}
+            return std::string();
         }
 
         std::string jsonNumberValue(const std::string &text, const std::string &key)
         {
-            const std::string needle = "\"" + key + "\"";
-            std::size_t pos = text.find(needle);
-            if (pos == std::string::npos)
+            try
             {
-                return std::string();
+                const auto j = nlohmann::json::parse(text);
+                if (!j.contains(key)) return std::string();
+                const auto &v = j.at(key);
+                if (v.is_number_integer()) return std::to_string(v.get<int>());
+                if (v.is_number()) return std::to_string(static_cast<int>(v.get<double>()));
             }
-            pos = text.find(':', pos + needle.size());
-            if (pos == std::string::npos)
-            {
-                return std::string();
-            }
-            ++pos;
-            while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-            {
-                ++pos;
-            }
-            std::size_t end = pos;
-            while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end])))
-            {
-                ++end;
-            }
-            return end > pos ? text.substr(pos, end - pos) : std::string();
+            catch (...) {}
+            return std::string();
         }
 
         std::string jsonArrayCsv(const std::string &text, const std::string &key)
         {
-            const std::string needle = "\"" + key + "\"";
-            std::size_t pos = text.find(needle);
-            if (pos == std::string::npos)
+            try
             {
-                return std::string();
-            }
-            pos = text.find('[', pos + needle.size());
-            if (pos == std::string::npos)
-            {
-                return std::string();
-            }
-            const std::size_t end = text.find(']', pos + 1);
-            if (end == std::string::npos)
-            {
-                return std::string();
-            }
-            const std::string arrayText = text.substr(pos + 1, end - pos - 1);
-            std::vector<std::string> values;
-            std::size_t cursor = 0;
-            while (cursor < arrayText.size())
-            {
-                std::size_t quote = arrayText.find('"', cursor);
-                if (quote == std::string::npos)
+                const auto j = nlohmann::json::parse(text);
+                if (!j.contains(key) || !j.at(key).is_array())
+                    return std::string();
+                std::ostringstream oss;
+                bool first = true;
+                for (const auto &item : j.at(key))
                 {
-                    break;
+                    if (item.is_string())
+                    {
+                        if (!first) oss << ',';
+                        oss << item.get<std::string>();
+                        first = false;
+                    }
                 }
-                const std::size_t close = arrayText.find('"', quote + 1);
-                if (close == std::string::npos)
-                {
-                    break;
-                }
-                values.push_back(arrayText.substr(quote + 1, close - quote - 1));
-                cursor = close + 1;
+                return oss.str();
             }
-            std::ostringstream oss;
-            for (std::size_t i = 0; i < values.size(); ++i)
-            {
-                if (i != 0)
-                {
-                    oss << ',';
-                }
-                oss << values[i];
-            }
-            return oss.str();
+            catch (...) {}
+            return std::string();
         }
 
         bool jsonBoolValue(const std::string &text, const std::string &key, bool defaultValue)
         {
-            const std::string needle = "\"" + key + "\"";
-            std::size_t pos = text.find(needle);
-            if (pos == std::string::npos)
+            try
             {
-                return defaultValue;
+                const auto j = nlohmann::json::parse(text);
+                if (!j.contains(key)) return defaultValue;
+                const auto &v = j.at(key);
+                if (v.is_boolean()) return v.get<bool>();
+                if (v.is_number()) return v.get<int>() != 0;
             }
-            pos = text.find(':', pos + needle.size());
-            if (pos == std::string::npos)
-            {
-                return defaultValue;
-            }
-            const std::string tail = util::toLowerAscii(util::trim(text.substr(pos + 1, 8)));
-            if (tail.rfind("true", 0) == 0)
-            {
-                return true;
-            }
-            if (tail.rfind("false", 0) == 0)
-            {
-                return false;
-            }
+            catch (...) {}
             return defaultValue;
         }
 
@@ -581,23 +488,39 @@ namespace ProcessGuard
 
         ModuleManager::ModuleManifest parseJsonSidecarManifest(const std::string &jsonText)
         {
-            const std::string name = jsonStringValue(jsonText, "name");
-            const std::string version = jsonStringValue(jsonText, "version");
-            const std::string summary = jsonStringValue(jsonText, "summary");
-            const std::string caps = jsonArrayCsv(jsonText, "capabilities");
-            std::string abi = jsonStringValue(jsonText, "abi");
-            if (abi.empty())
-            {
-                abi = jsonNumberValue(jsonText, "abi");
-            }
-            std::ostringstream kv;
-            if (!name.empty()) kv << "name=" << name << ";";
-            if (!version.empty()) kv << "version=" << version << ";";
-            if (!abi.empty()) kv << "abi=" << abi << ";";
-            if (!summary.empty()) kv << "summary=" << summary << ";";
-            if (!caps.empty()) kv << "capabilities=" << caps << ";";
-            ModuleManager::ModuleManifest manifest = ModuleManager::parseManifest(kv.str());
+            ModuleManager::ModuleManifest manifest;
             manifest.raw = jsonText;
+            try
+            {
+                const auto j = nlohmann::json::parse(jsonText);
+                if (j.contains("name") && j.at("name").is_string())
+                    manifest.name = j.at("name").get<std::string>();
+                if (j.contains("version") && j.at("version").is_string())
+                    manifest.version = j.at("version").get<std::string>();
+                if (j.contains("summary") && j.at("summary").is_string())
+                    manifest.summary = j.at("summary").get<std::string>();
+                if (j.contains("capabilities") && j.at("capabilities").is_array())
+                {
+                    for (const auto &item : j.at("capabilities"))
+                        if (item.is_string())
+                            manifest.capabilities.push_back(item.get<std::string>());
+                }
+                if (j.contains("abi"))
+                {
+                    try
+                    {
+                        const auto &abiVal = j.at("abi");
+                        if (abiVal.is_number_integer())
+                            manifest.abiVersion = abiVal.get<unsigned int>();
+                        else if (abiVal.is_string())
+                            manifest.abiVersion = static_cast<unsigned int>(
+                                std::stoul(abiVal.get<std::string>()));
+                        manifest.hasAbiVersion = true;
+                    }
+                    catch (...) { manifest.hasAbiVersion = false; manifest.abiVersion = 0; }
+                }
+            }
+            catch (...) {}
             return manifest;
         }
     } // namespace
@@ -1663,42 +1586,48 @@ namespace ProcessGuard
             {
                 lockInvalid = true;
             }
-            if (lockFileExists && body.find("\"modules\"") == std::string::npos)
+            if (lockFileExists && !body.empty())
             {
-                lockInvalid = true;
-            }
-            std::size_t pos = 0;
-            while (!body.empty())
-            {
-                const std::size_t namePos = body.find("\"name\"", pos);
-                if (namePos == std::string::npos)
+                try
                 {
-                    break;
+                    const auto lockJson = nlohmann::json::parse(body);
+                    if (!lockJson.contains("modules") || !lockJson.at("modules").is_array())
+                    {
+                        lockInvalid = true;
+                    }
+                    else
+                    {
+                        for (const auto &obj : lockJson.at("modules"))
+                        {
+                            if (!obj.is_object()) { lockInvalid = true; continue; }
+                            AllowEntry entry;
+                            if (obj.contains("name") && obj.at("name").is_string())
+                                entry.name = util::toLowerAscii(
+                                    util::trim(obj.at("name").get<std::string>()));
+                            if (obj.contains("sha256") && obj.at("sha256").is_string())
+                                entry.sha256 = util::toLowerAscii(
+                                    util::trim(obj.at("sha256").get<std::string>()));
+                            std::string sigPolicy;
+                            if (obj.contains("signature_policy") &&
+                                obj.at("signature_policy").is_string())
+                                sigPolicy = util::toLowerAscii(
+                                    util::trim(obj.at("signature_policy").get<std::string>()));
+                            bool reqSigned = false;
+                            if (obj.contains("require_signed") &&
+                                obj.at("require_signed").is_boolean())
+                                reqSigned = obj.at("require_signed").get<bool>();
+                            else if (obj.contains("signed") &&
+                                     obj.at("signed").is_boolean())
+                                reqSigned = obj.at("signed").get<bool>();
+                            entry.requireSigned = reqSigned || (sigPolicy == "signed");
+                            if (!entry.name.empty() && isSha256Hex(entry.sha256))
+                                lockEntries.push_back(std::move(entry));
+                            else
+                                lockInvalid = true;
+                        }
+                    }
                 }
-                const std::size_t objStart = body.rfind('{', namePos);
-                const std::size_t objEnd = body.find('}', namePos);
-                if (objStart == std::string::npos || objEnd == std::string::npos)
-                {
-                    lockInvalid = true;
-                    break;
-                }
-                const std::string obj = body.substr(objStart, objEnd - objStart + 1);
-                AllowEntry entry;
-                entry.name = util::toLowerAscii(util::trim(jsonStringValue(obj, "name")));
-                entry.sha256 = util::toLowerAscii(util::trim(jsonStringValue(obj, "sha256")));
-                const std::string signaturePolicy = util::toLowerAscii(util::trim(jsonStringValue(obj, "signature_policy")));
-                entry.requireSigned = jsonBoolValue(obj, "require_signed", false) ||
-                                      jsonBoolValue(obj, "signed", false) ||
-                                      signaturePolicy == "signed";
-                if (!entry.name.empty() && isSha256Hex(entry.sha256))
-                {
-                    lockEntries.push_back(std::move(entry));
-                }
-                else
-                {
-                    lockInvalid = true;
-                }
-                pos = objEnd + 1;
+                catch (...) { lockInvalid = true; }
             }
         }
         if (lockFileExists && (lockInvalid || lockEntries.empty()))
