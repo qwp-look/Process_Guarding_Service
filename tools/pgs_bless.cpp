@@ -6,6 +6,8 @@
 #include <objbase.h>
 #include <initguid.h>
 #include <shobjidl.h>
+#include <winhttp.h>
+#include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1775,6 +1777,8 @@ void showUsage(const char *exe)
         << "  " << exe << " module info --path <dll> [--modules-dir <dir>] [--json]\n"
         << "  " << exe << " module trust --path <dll> [--modules-dir <dir>] [--hash auto|none|HEX] [--require-signed]\n"
         << "  " << exe << " module load --path <dll>\n"
+        << "  " << exe << " module install --name <module> [--trust-curated] [--trust-community]\n"
+        << "  " << exe << " module install --path <dll>\n"
         << "  " << exe << " module unload --name <name>\n"
         << "  " << exe << " module call --name <name> --request \"op=set;pid=N;signer=X\"\n"
         << "  " << exe << " module invoke --name <name> --method <namespace.method> --params-json <json>\n"
@@ -1900,6 +1904,310 @@ bool parseUnsignedShort(const std::string &text, unsigned short &outValue)
 }
 } // namespace
 
+
+// ─── Registry-based module install helpers ────────────────────────────────
+
+static std::string downloadHttps(const std::wstring &host,
+                                  const std::wstring &path,
+                                  std::string &errOut)
+{
+    errOut.clear();
+    HINTERNET session = WinHttpOpen(L"pgs_bless/1.0",
+                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME,
+                                    WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) { errOut = "WinHttpOpen failed"; return {}; }
+
+    HINTERNET conn = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!conn) { WinHttpCloseHandle(session); errOut = "WinHttpConnect failed"; return {}; }
+
+    HINTERNET req = WinHttpOpenRequest(conn, L"GET", path.c_str(),
+                                       nullptr, WINHTTP_NO_REFERER,
+                                       WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                       WINHTTP_FLAG_SECURE);
+    if (!req) { WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
+                errOut = "WinHttpOpenRequest failed"; return {}; }
+
+    DWORD timeout = 15000;
+    WinHttpSetOption(req, WINHTTP_OPTION_CONNECT_TIMEOUT,    &timeout, sizeof(timeout));
+    WinHttpSetOption(req, WINHTTP_OPTION_RECEIVE_TIMEOUT,    &timeout, sizeof(timeout));
+    WinHttpSetOption(req, WINHTTP_OPTION_SEND_TIMEOUT,       &timeout, sizeof(timeout));
+    WinHttpSetOption(req, WINHTTP_OPTION_RESOLVE_TIMEOUT,    &timeout, sizeof(timeout));
+
+    if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(req, nullptr))
+    {
+        WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
+        errOut = "HTTP request failed"; return {};
+    }
+
+    DWORD statusCode = 0;
+    DWORD statusLen  = sizeof(statusCode);
+    WinHttpQueryHeaders(req,
+                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusLen,
+                        WINHTTP_NO_HEADER_INDEX);
+    if (statusCode != 200)
+    {
+        WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
+        errOut = "HTTP " + std::to_string(statusCode);
+        return {};
+    }
+
+    std::string body;
+    DWORD avail = 0;
+    while (WinHttpQueryDataAvailable(req, &avail) && avail > 0)
+    {
+        std::string chunk(avail, '\0');
+        DWORD read = 0;
+        WinHttpReadData(req, &chunk[0], avail, &read);
+        body.append(chunk.data(), read);
+    }
+    WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
+    return body;
+}
+
+static std::string sha256Hex(const std::vector<uint8_t> &data)
+{
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0)
+        return {};
+    DWORD hashLen = 0, dummy = 0;
+    BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, (PUCHAR)&hashLen, sizeof(hashLen), &dummy, 0);
+    BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0);
+    BCryptHashData(hash, (PUCHAR)data.data(), (ULONG)data.size(), 0);
+    std::vector<uint8_t> digest(hashLen);
+    BCryptFinishHash(hash, digest.data(), hashLen, 0);
+    BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (auto b : digest) oss << std::setw(2) << (int)b;
+    return oss.str();
+}
+
+static int runModuleInstallFromRegistry(
+    const std::string &moduleName,
+    bool trustCommunity,
+    const std::string &token,
+    const std::string &host,
+    int port)
+{
+    const std::wstring registryHost = L"raw.githubusercontent.com";
+    const std::wstring registryPath = L"/qwp-look/PGS_Model/main/registry.json";
+
+    std::cerr << "Fetching registry...\n";
+    std::string httpErr;
+    const std::string regJson = downloadHttps(registryHost, registryPath, httpErr);
+    if (regJson.empty())
+    {
+        std::cerr << "Failed to fetch registry: " << httpErr << "\n";
+        return 1;
+    }
+
+    nlohmann::json reg;
+    try { reg = nlohmann::json::parse(regJson); }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Registry JSON parse error: " << e.what() << "\n";
+        return 1;
+    }
+
+    if (!reg.contains("modules") || !reg["modules"].is_array())
+    {
+        std::cerr << "Registry format invalid: missing 'modules' array\n";
+        return 1;
+    }
+
+    // find module entry
+    nlohmann::json entry;
+    for (const auto &m : reg["modules"])
+    {
+        if (m.contains("name") && m["name"].is_string() &&
+            m["name"].get<std::string>() == moduleName)
+        {
+            entry = m;
+            break;
+        }
+    }
+    if (entry.is_null())
+    {
+        std::cerr << "Module '" << moduleName << "' not found in registry\n";
+        return 1;
+    }
+
+    // check deprecated
+    if (entry.value("deprecated", false))
+    {
+        const std::string reason = entry.value("deprecation_reason", "no reason given");
+        std::cerr << "WARNING: module '" << moduleName << "' is deprecated: " << reason << "\n";
+    }
+
+    // trust gating
+    const std::string trust = entry.value("trust", "community");
+    if (trust == "community" && !trustCommunity)
+    {
+        std::cerr << "ERROR: '" << moduleName << "' is a community module (not reviewed by PGS maintainers).\n"
+                  << "A malicious DLL runs as LocalSystem and can fully compromise your system.\n"
+                  << "Re-run with --trust-community to install anyway.\n";
+        return 1;
+    }
+    if (trust == "community")
+    {
+        std::cerr << "\n[WARNING] Community module - not reviewed by PGS maintainers.\n"
+                  << "A malicious DLL runs as LocalSystem. Type YES to confirm: ";
+        std::string confirm;
+        std::getline(std::cin, confirm);
+        if (confirm != "YES")
+        {
+            std::cerr << "Aborted.\n";
+            return 1;
+        }
+    }
+    else if (trust == "curated")
+    {
+        std::cerr << "[INFO] Curated module - reviewed by qwp-look.\n";
+    }
+
+    // find latest version
+    const std::string latest = entry.value("latest", "");
+    nlohmann::json verEntry;
+    if (entry.contains("versions") && entry["versions"].is_array())
+    {
+        for (const auto &v : entry["versions"])
+        {
+            if (v.value("version", "") == latest && !v.value("yanked", false))
+            {
+                verEntry = v;
+                break;
+            }
+        }
+    }
+    if (verEntry.is_null())
+    {
+        std::cerr << "No valid version found for '" << moduleName << "'\n";
+        return 1;
+    }
+
+    // bundled modules don't have download_url
+    if (entry.value("bundled", false))
+    {
+        std::cerr << "Module '" << moduleName << "' is bundled with PGS and already installed.\n";
+        return 0;
+    }
+
+    const std::string downloadUrl = verEntry.value("download_url", "");
+    const std::string expectedHash = ProcessGuard::util::toLowerAscii(
+        ProcessGuard::util::trim(verEntry.value("sha256", "")));
+    if (downloadUrl.empty())
+    {
+        std::cerr << "No download URL for '" << moduleName << "' v" << latest << "\n";
+        return 1;
+    }
+    if (expectedHash.size() != 64)
+    {
+        std::cerr << "Registry entry missing sha256 for '" << moduleName << "' v" << latest << "\n";
+        return 1;
+    }
+
+    // parse URL: must be https://raw.githubusercontent.com/...
+    std::wstring dlHost, dlPath;
+    const std::string prefix = "https://";
+    if (downloadUrl.rfind(prefix, 0) != 0)
+    {
+        std::cerr << "download_url must use https://\n";
+        return 1;
+    }
+    const std::string rest = downloadUrl.substr(prefix.size());
+    const auto slash = rest.find('/');
+    if (slash == std::string::npos)
+    {
+        std::cerr << "Malformed download_url\n";
+        return 1;
+    }
+    dlHost = ProcessGuard::util::utf8ToWide(rest.substr(0, slash));
+    dlPath = ProcessGuard::util::utf8ToWide(rest.substr(slash));
+
+    std::cerr << "Downloading " << moduleName << " v" << latest << " ...\n";
+    const std::string dllBytes = downloadHttps(dlHost, dlPath, httpErr);
+    if (dllBytes.empty())
+    {
+        std::cerr << "Download failed: " << httpErr << "\n";
+        return 1;
+    }
+
+    // SHA-256 verify
+    std::vector<uint8_t> dllData(dllBytes.begin(), dllBytes.end());
+    const std::string actualHash = sha256Hex(dllData);
+    if (actualHash != expectedHash)
+    {
+        std::cerr << "SHA-256 mismatch!\n"
+                  << "  expected: " << expectedHash << "\n"
+                  << "  actual:   " << actualHash << "\n";
+        return 1;
+    }
+    std::cerr << "SHA-256 verified: " << actualHash << "\n";
+
+    // write to modules_staging/<name>/
+    // derive modules root from exe path
+    std::wstring exePath(32768, L'\0');
+    GetModuleFileNameW(nullptr, &exePath[0], 32768);
+    exePath.resize(wcslen(exePath.c_str()));
+    const std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+    const std::filesystem::path stagingDir = exeDir / "modules_staging" / moduleName;
+    std::error_code ec;
+    std::filesystem::create_directories(stagingDir, ec);
+    if (ec) { std::cerr << "Failed to create staging dir: " << ec.message() << "\n"; return 1; }
+
+    const std::filesystem::path stagingDll = stagingDir / (moduleName + "_module.dll");
+    {
+        std::ofstream out(stagingDll, std::ios::binary | std::ios::trunc);
+        if (!out) { std::cerr << "Failed to write staging DLL\n"; return 1; }
+        out.write(dllBytes.data(), static_cast<std::streamsize>(dllBytes.size()));
+    }
+
+    // move to modules/<name>/
+    const std::filesystem::path modulesDir2 = exeDir / "modules" / moduleName;
+    std::filesystem::create_directories(modulesDir2, ec);
+    if (ec) { std::cerr << "Failed to create modules dir: " << ec.message() << "\n"; return 1; }
+    const std::filesystem::path finalDll = modulesDir2 / (moduleName + "_module.dll");
+    std::filesystem::copy_file(stagingDll, finalDll,
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) { std::cerr << "Failed to install DLL: " << ec.message() << "\n"; return 1; }
+    std::filesystem::remove(stagingDll, ec);
+    std::filesystem::remove(stagingDir, ec);
+
+    std::cerr << "Installed: " << ProcessGuard::util::wideToUtf8(finalDll.wstring()) << "\n";
+
+    // load via pgs service
+    if (!token.empty())
+    {
+        std::string response;
+        const std::string loadCmd = "module load " + ProcessGuard::util::base64Encode(
+            ProcessGuard::util::wideToUtf8(finalDll.wstring()));
+        ProcessGuard::client::ClientOptions opts;
+        opts.host = host;
+        opts.port = static_cast<std::uint16_t>(port);
+        opts.token = token;
+        const auto resp = ProcessGuard::client::sendCommand(
+            opts, ProcessGuard::client::withAuthToken(token, loadCmd));
+        if (resp.ok)
+            std::cout << resp.payload << "\n";
+        else
+            std::cerr << "DLL installed but load failed: " << resp.error << "\n";
+    }
+    else
+    {
+        std::cerr << "DLL installed. Run: pgs_bless module load --path \""
+                  << ProcessGuard::util::wideToUtf8(finalDll.wstring())
+                  << "\" --token <your-token>\n";
+    }
+    return 0;
+}
+
+
 int main()
 {
     int argcW = 0;
@@ -1992,6 +2300,8 @@ int main()
     std::string signerText;
     bool hasSigner = false;
     bool confirmOperation = false;
+    bool trustCommunity = false;
+    bool trustCurated = false;
     bool configEnabled = false;
     bool hasConfigEnabled = false;
     std::string serviceState;
@@ -2277,6 +2587,16 @@ int main()
             continue;
         }
 
+        if (arg == "--trust-community")
+        {
+            trustCommunity = true;
+            continue;
+        }
+        if (arg == "--trust-curated")
+        {
+            trustCurated = true;
+            continue;
+        }
         if (arg == "--name")
         {
             moduleName = needValue("--name");
@@ -3084,9 +3404,17 @@ int main()
         }
         else if (sub == "install")
         {
+            if (!hasPath && hasName)
+            {
+                // Registry-based install
+                const int rc = runModuleInstallFromRegistry(
+                    moduleName, trustCommunity, token, host, port);
+                WSACleanup();
+                return rc;
+            }
             if (!hasPath)
             {
-                std::cerr << "module install requires --path\n";
+                std::cerr << "module install requires --name <module> (registry) or --path <dll> (local)\n";
                 WSACleanup();
                 return 1;
             }

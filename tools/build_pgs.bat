@@ -107,7 +107,7 @@ if errorlevel 1 (
     popd
     exit /b 1
 )
-"%COMPILER%" %CXXFLAGS% -o %BUILD_DIR%\pgs_bless.exe tools\pgs_bless.cpp %BUILD_DIR%\PGSClient.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\PGLogger.o -I %INCLUDE_DIR% -lws2_32 -ladvapi32 -lbcrypt -lwintrust -lole32 -lshell32
+"%COMPILER%" %CXXFLAGS% -o %BUILD_DIR%\pgs_bless.exe tools\pgs_bless.cpp %BUILD_DIR%\PGSClient.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\PGLogger.o -I %INCLUDE_DIR% -lws2_32 -lwinhttp -ladvapi32 -lbcrypt -lwintrust -lole32 -lshell32
 if errorlevel 1 (
     echo Failed: tools\pgs_bless.cpp
     popd
