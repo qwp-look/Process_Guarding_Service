@@ -37,6 +37,8 @@ or:
 
 Limits: default request/response payload is 64 KB. Long tasks should return `{ "accepted": true, "operation_id": "..." }`; large binary data should return an artifact id instead of embedding bytes. The service now includes a shared in-memory OperationStore with TTL cleanup and an ArtifactStore under the service state directory. `module op-status` queries operation records, while `module artifact get --json` returns metadata and `module artifact get --out <path>` downloads content by chunks with client-side size/SHA-256 verification. Service chunk reads also recompute artifact size/SHA-256 before returning bytes. Operators can use `module artifact cleanup [--expired|--all] [--verify]`, `module artifact status [--verify]`, and `module artifact policy` for retention and health visibility.
 
+Artifact metadata includes `sensitive` and `sensitivity`; dump/minidump artifacts default to high sensitivity with a 6-hour TTL cap, backup-like artifacts default to medium with a 24-hour cap, and status/doctor expose sensitive counts. Chunk download start/complete/expired/invalid events are recorded in `events list`.
+
 ## Module ABI
 
 ABI v2 stays supported through `PG_Invoke(const char*, char*, size_t)`. ABI v3 modules can additionally export:
@@ -76,6 +78,22 @@ Manager extensions use `include/Process_Guard/PGModuleManager.h` and live under 
 
 Manager extensions also need their own manifest and trust chain. The default bundled manager is metadata-only today; future registry clients should download candidate modules to `modules_staging/`, present the plan, then let the core verify and promote into `modules/<name>/`.
 
+## Code Reuse And Split Points
+
+The codebase is now large enough that future feature work should actively split reusable pieces instead of growing `PGSProtocol.cpp`, `pgs_bless.cpp`, or individual module files indefinitely. Prefer small shared files with clear ownership when a helper is used by two or more surfaces.
+
+Recommended split points:
+
+- Protocol parsing and JSON helpers: move lightweight JSON/KV parsing toward shared structured helpers, then gradually replace string scans in module install, manifest handling, OperationStore, and ArtifactStore.
+- Module install/trust helpers: keep download, registry parsing, risk prompts, staging metadata, lockfile update, rollback, and load orchestration in reusable units instead of duplicating them between CLI, service, Qt, and Web.
+- Security policy helpers: centralize capability/risk/role decisions so CLI, Web RBAC, module callbacks, and future named-pipe transport use the same table.
+- Filesystem trust helpers: reuse final-path, ACL, hash, signature, and staging/rollback checks across `ModuleManager`, doctor/repair, release smoke, and service install flows.
+- UI response parsing: share a stable response schema for module results rather than having Qt/Web parse ad hoc text differently.
+
+When adding or splitting reusable code, update the relevant docs in the same change. A feature PR that changes protocol, module trust, validation behavior, or operator commands should not leave `MODULE_ECOSYSTEM.md`, `UNFINISHED_FEATURES_BACKLOG.md`, `SECURITY_HARDENING_BACKLOG.md`, or user/operator docs stale.
+
+All build/test examples and scripts should assume MSYS2/MinGW64 and carry explicit environment variables as documented in `docs/developer/BUILD.md` and `docs/developer/TESTING.md`.
+
 ## Community Repository Shape
 
 The future split repositories should look like this:
@@ -90,6 +108,7 @@ PGS itself should only download to `modules_staging/` and never load a community
 - `pgs_bless doctor [--json]`
 - `pgs_bless module invoke --name <name> --method <namespace.method> --params-json <json>`
 - `pgs_bless module verify|reload|disable|rollback`
+- `pgs_bless module permissive status|on|off [--confirm]`
 - `pgs_bless module op-status <operation-id> [--json]`
 - `pgs_bless module artifact get <id> [--json|--out <path>]`
 - `pgs_bless module artifact cleanup [--expired|--all] [--verify]`
@@ -139,8 +158,8 @@ PGS 官方模块仓库：[qwp-look/PGS_Model](https://github.com/qwp-look/PGS_Mo
 | 档位 | 发布者 | PGS 默认行为 |
 |---|---|---|
 | `official` | 仅 qwp-look | 直接信任，hash 不匹配则 fail-closed |
-| `curated` | 经 qwp-look 审核 | 信任，安装时提示 🟡 |
-| `community` | 任何人 | **默认拒绝**，需 `--trust-community` 显式 opt-in |
+| `curated` | 经 qwp-look 审核 | 信任，安装时提示已审核第三方模块 |
+| `community` | 任何人 | 默认拒绝，需 `--trust-community` 显式 opt-in |
 
 `community` 档在代码签名基础设施就绪前默认拒绝加载，防止仓库成为供应链攻击入口。详细规则见仓库 [docs/TRUST_LEVELS.md](https://github.com/qwp-look/PGS_Model/blob/main/docs/TRUST_LEVELS.md)。
 
@@ -175,7 +194,7 @@ PGS 官方模块仓库：[qwp-look/PGS_Model](https://github.com/qwp-look/PGS_Mo
 
 `bundled: true` 表示该模块随 PGS 安装包内置，无需单独下载；`download_url` 为空。
 
-### module install 流程（客户端，待实现）
+### module install 流程（基础闭环已完成）
 
 ```bat
 pgs_bless.exe module install sched
@@ -183,9 +202,17 @@ pgs_bless.exe module install my-tool --trust-curated
 pgs_bless.exe module install experimental --trust-community
 ```
 
-安装流程：拉取 `registry.json` → 解析条目 → 下载到 `modules_staging/` → SHA-256 校验 → 写入 `modules.lock` → 移入 `modules/<name>/` → `module load`。
+当前 CLI registry install 已串到服务端安装闭环：CLI 负责拉取 `registry.json`、结构化校验 registry/module/version 字段、限制下载地址为 `https://raw.githubusercontent.com/...`、下载 DLL 与 `module.manifest.json`、校验 SHA-256、展示 trust/risk 警告并处理确认；最终安装统一调用服务端 `module install <base64-dll-path> --confirm --load --source registry`。CLI 不再直接复制 DLL 到 `modules/<name>/`。
+
+实际安装流程：拉取 `registry.json` -> 结构化字段校验 -> 下载到 `modules_staging/` -> SHA-256 校验 -> 下载并校验 `module.manifest.json` -> 核对 name/trust/risk/capabilities -> 对 `community` 要求 `--trust-community` 和 typed `YES`，对所有 `high`/`critical` 要求 `--confirm` -> 调用服务端 `module install` -> 服务端重新检查 DLL/manifest/hash/risk -> 结构化更新 `modules.lock` -> promote 到 `modules/<name>/` -> 按请求 load。
+
+安装失败必须可解释并可回滚。失败时不要留下半安装模块，也不要绕过 `modules.lock` 直接 `module load`。社区模块即使通过 hash 校验，也只代表下载完整性，不代表代码安全。
+
+下载路径也按安全默认值处理：registry JSON、manifest 和 DLL 响应都有大小上限，外部 URL 仅允许 `https://raw.githubusercontent.com/...`，服务端仍会重新校验 sidecar manifest 和 DLL identity。
 
 高风险模块（`risk: high` 或 `risk: critical`）安装时额外需要 `--confirm`，不论档位。
+
+开放第三方模块前的剩余硬前提：live PGS_Model 正例验证、hash mismatch / manifest mismatch / community 未确认 / high-risk 未确认等负例 E2E、签名策略或更严格 publisher policy。结构化 JSON 校验、共享策略 helper、服务端安装闭环和 hash-pinned `modules.lock` 写入已经落地。
 
 ### 贡献模块
 

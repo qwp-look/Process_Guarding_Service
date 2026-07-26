@@ -63,11 +63,11 @@
 ## P1-05 `--allow-all-modules` 生命周期和撤销
 
 - 影响组件：服务宿主、状态归档、模块加载
-- 当前行为：`--allow-all-modules` 可写入 SCM binPath，并持久化 `MODULES_PERMISSIVE\t1`，用于开发逃生。
+- 当前行为：`--allow-all-modules` 可写入 SCM binPath，并持久化 `MODULES_PERMISSIVE\t1`，用于开发逃生；2026-07-26 已新增 `pgs_bless module permissive status|on|off`，`on` 需要 `--confirm`，`off` 会更新运行态 ModuleManager、写回状态归档并记录审计事件。`pgs_service` 也接受 `--no-allow-all-modules` 作为显式安装/运行参数。
 - 风险/攻击面：一次调试开启后可能长期保留，等价于关闭模块边界。
-- 建议修复：增加显式 `module permissive off` 或 `pgs_service install --no-allow-all-modules`；状态恢复时记录高危事件；Qt/Web 显示红色状态；生产 release smoke 检查默认关闭。
+- 建议修复：已完成 CLI/服务端运行时开关和审计。剩余是 Qt/Web 对 permissive 状态标红、生产 release smoke 默认关闭检查，以及已安装 SCM binPath 的自动重写/修复入口。
 - 涉及入口：`src/service/pgs_service.cpp`、`src/service/PGS.cpp`、`docs/MODULE_SYSTEM.md`。
-- 验证方式：开启后能显示/审计；关闭后归档和 SCM binPath 都移除；缺 allowlist 时模块加载重新 fail-closed。
+- 验证方式：2026-07-26 MSYS smoke 覆盖 `module permissive status`、无确认开启失败、确认开启成功、关闭成功；后续仍需真实 SCM binPath 修复验证。
 - 是否阻塞功能版 release：否。
 
 ## P1-06 命名管道或 OS 级本地认证替代裸 TCP token
@@ -164,11 +164,11 @@
 ## P2-14 ArtifactStore 留存策略与审计
 
 - 影响组件：`PGSProtocol` ArtifactStore、report 模块、CLI/Web/Qt artifact 下载。
-- 当前行为：ArtifactStore 已限制单 artifact 16MB、总量 256MB；metadata 记录 size/SHA-256；CLI `module artifact get --out` 下载后会核对 size、chunk total 和 SHA-256；服务端 `module artifact chunk` 返回前会重新计算落盘 size/SHA-256，不匹配则拒绝并记录 `artifact.integrity-failed`；`module artifact cleanup [--expired|--all] [--verify]`、`module artifact status [--verify]`、`module artifact policy` 已有 operator-facing 命令；Web/Qt 有基础 status/policy 控件；doctor JSON 已包含 `artifact_store` 检查。策略持久化到 state 目录下 `artifact_policy.cfg`，包含 `ttl_ms`、`auto_cleanup`、`verify_on_status`。metadata id 与请求 id 或 metadata 文件名 stem 不一致会按 corrupt/fail-closed 处理。
-- 风险/攻击面：本地管理员或磁盘损坏篡改 artifact 内容时，服务端和 CLI 均可发现，status/doctor 也能暴露基础健康状态；剩余风险是没有后台周期性清理线程、下载审计不完整、敏感 artifact 分类和更短 TTL 未做、配额仍为编译期常量、远程下载场景缺更严格访问审计。
-- 建议修复：增加周期性/background cleanup；Web/Qt 下载前显示 size/sha256 和敏感类型提示；下载、过期删除、校验失败、人工清理都写审计事件并可查询；dump/report 等模块按 artifact 类型设置默认 TTL；把 max artifact bytes/max total bytes 做成受限可配置策略并纳入 doctor。
+- 当前行为：ArtifactStore 已限制单 artifact 16MB、总量 256MB；metadata 记录 size/SHA-256、`sensitive`、`sensitivity`；CLI `module artifact get --out` 下载后会核对 size、chunk total 和 SHA-256；服务端 `module artifact chunk` 返回前会重新计算落盘 size/SHA-256，不匹配则拒绝并记录 `artifact.integrity-failed`；chunk 下载还会记录 start/complete/expired/invalid 审计事件；`module artifact cleanup [--expired|--all] [--verify]`、`module artifact status [--verify]`、`module artifact policy` 已有 operator-facing 命令；Web/Qt 有基础 status/policy 控件；doctor JSON 已包含 `artifact_store` 检查和敏感计数。策略持久化到 state 目录下 `artifact_policy.cfg`，包含 `ttl_ms`、`auto_cleanup`、`verify_on_status`。metadata id 与请求 id 或 metadata 文件名 stem 不一致会按 corrupt/fail-closed 处理。health loop 会按 5 分钟节流执行过期清理。
+- 风险/攻击面：本地管理员或磁盘损坏篡改 artifact 内容时，服务端和 CLI 均可发现，status/doctor 也能暴露基础健康状态；剩余风险是配额仍为编译期常量、远程下载场景缺更严格访问审计，Web/Qt 下载前敏感提示还不够完整。
+- 建议修复：已完成周期性 cleanup、下载审计、敏感分类、dump/report TTL 裁剪和 doctor 敏感计数。剩余是 Web/Qt 下载前显示 size/sha256 和敏感类型提示、把 max artifact bytes/max total bytes 做成受限可配置策略并纳入 doctor、远程访问审计策略。
 - 涉及入口：`src/service/PGSProtocol.cpp`、`tools/pgs_bless.cpp`、`qt/pgs_admin_web/src/WebServer.cpp`、`qt/pgs_admin_qt/src/ModulePage.cpp`。
-- 验证方式：篡改 artifact content 后 CLI 下载失败；过期 artifact 不可读；cleanup 后 metadata/content 同时移除；总量上限触发 deterministic error。
+- 验证方式：2026-07-26 MSYS smoke 覆盖 artifact metadata `sensitive/sensitivity`、status `sensitive` 计数、下载后 `artifact.download-complete` 事件；既有 smoke 覆盖下载 SHA-256、policy/status、cleanup。后续补总量上限和远程下载审计专项。
 - 是否阻塞功能版 release：否。建议在公开远程 artifact 下载前完成。
 
 ## P2-15 JSON/manifest/lockfile 解析需要结构化收口
@@ -184,11 +184,11 @@
 ## P1-16 Dump 模块的敏感内存与留存风险
 
 - 影响组件：`modules/dump`、ArtifactStore、CLI/Web/Qt artifact 下载。
-- 当前行为：`dump collect --pid <pid> --confirm` 可对本机进程采集 minidump，写入 ArtifactStore，单 artifact 限制 16MB，不向协议暴露临时文件路径。默认状态命令只报告能力，不采集。
+- 当前行为：`dump collect --pid <pid> --confirm` 可对本机进程采集 minidump，写入 ArtifactStore，单 artifact 限制 16MB，不向协议暴露临时文件路径。dump artifact 标记为 `sensitive=true` / `sensitivity=high`，TTL 裁剪到 6 小时。默认状态命令只报告能力，不采集。
 - 风险/攻击面：minidump 可能包含目标进程内存、路径、命令行、环境片段或业务敏感数据；若 ArtifactStore 留存、下载审计或 ACL 有缺口，可能形成敏感数据泄露。
-- 建议修复：为 dump artifact 增加更短默认 TTL、下载审计、UI 高风险提示、doctor 中的敏感 artifact 统计；对受保护/系统进程失败给稳定 reason code；必要时增加 `--type normal` 以外模式的额外确认。
+- 建议修复：更短默认 TTL、下载审计和 doctor 敏感 artifact 统计已完成。剩余是 Web/Qt 高风险提示、对受保护/系统进程失败给稳定 reason code，以及必要时为 `--type normal` 以外模式增加额外确认。
 - 涉及入口：`modules/dump/pgs_dump_module.cpp`、`src/service/PGSProtocol.cpp` ArtifactStore、`tools/pgs_bless.cpp`。
-- 验证方式：无 `--confirm` 必须失败；权限不足/进程不存在/超限 dump 有 deterministic error；artifact metadata 不暴露临时路径；cleanup 后内容不可下载。
+- 验证方式：2026-07-26 MSYS smoke 覆盖无 `--confirm` 失败；后续仍需权限不足/进程不存在/超限 dump 专项。
 - 是否阻塞功能版 release：否。阻塞生产环境默认推荐 dump collection。
 
 ## P1-17 Script runner 必须继续默认禁用并强化执行边界
@@ -199,6 +199,7 @@
 - 建议修复：生产版保持禁用并在 UI 高风险标红；脚本登记加入 hash/signature；执行前记录审计事件、caller、args hash；Web/remote RBAC 默认禁止 script run；doctor 检查脚本目录 ACL。
 - 涉及入口：`modules/script_runner/pgs_script_runner_module.cpp`、`tools/pgs_bless.cpp`、Web RBAC。
 - 验证方式：默认 run 失败；无 `--confirm` 失败；目录外脚本 add 失败；脚本目录宽 ACL 被 doctor 报告；remote viewer/operator 无权运行。
+- 2026-07-26 验证补充：MSYS smoke 覆盖默认禁用 run 失败、目录外 add 失败、登记受限目录内脚本、启用后无 confirm run 失败。
 - 是否阻塞功能版 release：否。阻塞任何“远程脚本执行”生产承诺。
 
 ## P1-18 Service guard / file watch / update 模块的生产化边界
@@ -208,5 +209,5 @@
 - 风险/攻击面：服务 start/stop 是高影响操作；file_watch 可能被配置到敏感文件并产生事件噪音；update 验证若未来扩展到下载/安装，必须先完成签名、回滚和 fail-closed。
 - 建议修复：service mutation 增加 allow policy 和审计；file_watch 增加规则上限、路径 allow/deny、doctor 展示；update 在代码签名和 release manifest 强制验证前不要实现网络更新或安装。
 - 涉及入口：`modules/service_guard/pgs_service_guard_module.cpp`、`modules/file_watch/pgs_file_watch_module.cpp`、`modules/update/pgs_update_module.cpp`。
-- 验证方式：服务 mutation 无 confirm 必须失败；file_watch unreadable/remove/check 负例稳定；篡改 manifest 文件 hash 后 `update verify` 失败；`artifacts` 数组中的绝对路径不会影响 release tree verify。
+- 验证方式：2026-07-26 MSYS smoke 覆盖服务 mutation 无 confirm 失败、file_watch unreadable add 失败、篡改 payload 后 `update verify` hash mismatch 失败；既有 smoke 覆盖 remove/check 正向和 `artifacts` 数组绝对路径不影响 release tree verify。
 - 是否阻塞功能版 release：否。阻塞自动更新和远程服务控制生产化。

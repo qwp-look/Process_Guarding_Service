@@ -101,7 +101,7 @@ pgs_bless.exe module trust --path modules\ppl\pgs_ppl_module.dll --hash auto
 
 ## 运行态状态
 
-ArtifactStore 写入服务 state 目录下的 `artifacts` 子目录，默认 TTL 为 24 小时，可通过 `module artifact policy` 在 60 秒到 7 天之间调整。`auto_cleanup=1` 时新 artifact 写入前会清理过期项，`verify_on_status=1` 时 status 查询会做 hash 校验。metadata id 与文件名不一致会按损坏处理。
+ArtifactStore 写入服务 state 目录下的 `artifacts` 子目录，默认 TTL 为 24 小时，可通过 `module artifact policy` 在 60 秒到 7 天之间调整。`auto_cleanup=1` 时新 artifact 写入前和后台 health loop 会清理过期项，`verify_on_status=1` 时 status 查询会做 hash 校验。metadata id 与文件名不一致会按损坏处理。metadata 包含 `sensitive` / `sensitivity`；dump/minidump 默认高敏并限制到 6 小时 TTL，backup 类默认中敏并限制到 24 小时 TTL；status/doctor 会显示敏感 artifact 数量。
 
 `profile` / `sched` 现在按服务数据目录写运行态 DB，默认落到 `C:\ProgramData\ProcessGuard\state\modules\<name>\` 或等价受保护目录；旧 DB 会做一次兼容复制。release smoke 和 installer 继续检查产物中不应泄漏旧模块 DB。
 
@@ -119,7 +119,7 @@ ArtifactStore 写入服务 state 目录下的 `artifacts` 子目录，默认 TTL
 
 ## 安全边界
 
-- `--allow-all-modules` 只用于开发和应急调试。
+- `--allow-all-modules` 只用于开发和应急调试；运行中可用 `pgs_bless.exe module permissive status|on|off` 查看、确认开启或关闭，`on` 必须带 `--confirm`。
 - 模块 load 路径必须位于模块目录内。
 - PPL 默认关闭。
 - capability 目前是展示/规划字段，尚未作为完整授权系统。

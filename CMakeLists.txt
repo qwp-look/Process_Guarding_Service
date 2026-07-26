@@ -50,15 +50,18 @@ add_library(pgs_module_manager STATIC src/modules/ModuleManager.cpp)
 target_include_directories(pgs_module_manager PUBLIC include)
 target_link_libraries(pgs_module_manager PUBLIC pgs_logger wintrust ole32 bcrypt)
 
-add_library(pgs_core STATIC src/service/PGS.cpp src/service/PGSProtocol.cpp)
+add_library(pgs_core STATIC
+    src/service/PGS.cpp
+    src/service/PGSProtocol.cpp
+    src/service/PGSModuleInstall.cpp)
 target_include_directories(pgs_core PUBLIC include)
 target_link_libraries(pgs_core PUBLIC pgs_logger pgs_module_manager ws2_32 winhttp advapi32 wtsapi32 userenv bcrypt wintrust ole32 shell32)
 
 add_executable(pgs_service src/service/pgs_service.cpp)
 target_link_libraries(pgs_service PRIVATE pgs_core)
 
-add_executable(pgs_bless tools/pgs_bless.cpp)
-target_link_libraries(pgs_bless PRIVATE pgs_client pgs_module_manager pgs_logger ws2_32 advapi32 bcrypt wintrust ole32 shell32)
+add_executable(pgs_bless tools/pgs_bless.cpp tools/PGSRegistryInstall.cpp)
+target_link_libraries(pgs_bless PRIVATE pgs_client pgs_module_manager pgs_logger ws2_32 winhttp advapi32 bcrypt wintrust ole32 shell32)
 
 add_executable(guard_example examples/guard_example.cpp)
 target_include_directories(guard_example PRIVATE include)

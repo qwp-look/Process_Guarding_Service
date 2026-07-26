@@ -165,7 +165,7 @@ namespace ProcessGuard
         // the legacy "load any DLL" behaviour is available for development. The
         // operator opt-in flag lives on PGS (m_modulesPermissive) and is pushed
         // here before loadFromDirectory().
-        void setPermissive(bool v) { m_permissive = v; }
+        void setPermissive(bool v);
 
         // Runtime enablement gate. Only names present here are eligible for
         // startup scan/direct load. Empty means load no modules unless the

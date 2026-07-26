@@ -207,8 +207,8 @@ namespace ProcessGuard
         // Override the listen port (default kServerPort); must be set before
         // initialize()/start(). Honoured by createListenSocket().
         void setServerPort(std::uint16_t port) { m_serverPort = port ? port : kServerPort; m_serverPortUserSet = true; }
-        bool isModulesPermissive() const { return m_modulesPermissive; }
-        void setModulesPermissive(bool v) { m_modulesPermissive = v; m_modulesPermissiveUserSet = true; }
+        bool isModulesPermissive() const { return m_modulesPermissive.load(); }
+        void setModulesPermissive(bool v) { m_modulesPermissive.store(v); m_modulesPermissiveUserSet.store(true); }
 
         static constexpr const char *kServerIp = "127.0.0.1";
         static constexpr uint16_t kServerPort = 12345;
@@ -307,6 +307,8 @@ namespace ProcessGuard
             std::int64_t expiresMs = 0;
             std::string traceId;
             std::string operationId;
+            bool sensitive = false;
+            std::string sensitivity;
             std::string storageHash;
             bool storageHashVerified = false;
         };
@@ -317,6 +319,7 @@ namespace ProcessGuard
             std::uint64_t reclaimedBytes = 0;
             std::size_t verified = 0;
             std::size_t corruptRemoved = 0;
+            std::size_t sensitiveRemoved = 0;
         };
 
         struct ArtifactStoreStatus
@@ -329,6 +332,7 @@ namespace ProcessGuard
             std::size_t corrupt = 0;
             std::size_t orphaned = 0;
             std::size_t verified = 0;
+            std::size_t sensitive = 0;
         };
 
     private:
@@ -340,8 +344,10 @@ namespace ProcessGuard
         std::int64_t m_artifactRetentionTtlMs = 24LL * 60LL * 60LL * 1000LL;
         bool m_artifactAutoCleanup = true;
         bool m_artifactVerifyOnStatus = false;
+        std::int64_t m_lastArtifactMaintenanceMs = 0;
         ArtifactCleanupResult cleanupArtifactsLocked(bool removeExpired, bool removeAll, bool verifyContentHash, std::string &detail);
         ArtifactStoreStatus artifactStoreStatusLocked(bool verifyContentHash, std::string &detail);
+        void runArtifactMaintenanceIfDue(std::int64_t nowMs);
         void loadArtifactPolicyLocked();
         bool saveArtifactPolicyLocked(std::string &error) const;
         std::string artifactPolicySummaryLocked() const;
@@ -355,10 +361,10 @@ namespace ProcessGuard
         // When false (default), ModuleManager refuses any DLL not listed in
         // <exe>\modules\modules.allow. When true, the legacy permissive load-all
         // behaviour is restored for development. Persisted as MODULES_PERMISSIVE.
-        bool m_modulesPermissive{false};
+        std::atomic<bool> m_modulesPermissive{false};
         // True once the host has explicitly chosen permissive mode, so that a
         // later loadPersistedState() does NOT silently override the operator choice.
-        bool m_modulesPermissiveUserSet{false};
+        std::atomic<bool> m_modulesPermissiveUserSet{false};
 
         // Persisted/restored listen port. Defaults to kServerPort; install/run
         // can override via --port; loadPersistedState() may restore an archived
@@ -418,6 +424,9 @@ namespace ProcessGuard
         std::string dispatchCommandLine(const std::string &commandLine);
         // "module list|load|unload|call|invoke" sub-protocol handler.
         std::string handleModuleCommand(const std::string &args);
+        std::string handleModulePermissiveCommand(const std::string &rest);
+        std::string handleModuleInstallCommand(const std::string &rest);
+        std::string handleModuleRollbackCommand(const std::string &rest);
         std::string handleCoreJsonRpc(const std::string &requestJson);
         std::string handleArtifactChunkCommand(const std::string &args);
         std::string handleArtifactCleanupCommand(const std::string &args);

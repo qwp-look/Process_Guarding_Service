@@ -31,7 +31,7 @@ Known intentionally incomplete areas:
 - `ModuleManager` / protocol JSON parsing still uses lightweight string extraction in several security-relevant paths. It is acceptable for bundled fixtures but should be replaced or explicitly constrained before opening community modules.
 - Release versioning is now sourced from root `VERSION` for local packaging and the publish workflow; README/download snippets still need review whenever the public version string changes.
 - `PGSClient::sendCommand()` now owns its Winsock runtime setup, so fresh shared-library callers do not need hidden `WSAStartup()` boilerplate.
-- Artifact download verifies downloaded size and SHA-256 client-side; service-side chunk reads recompute size/SHA-256 before serving; `module artifact cleanup/status/policy` exist; doctor reports ArtifactStore health. Remaining artifact work is periodic/background cleanup, download audit, richer sensitive-artifact reporting, and operation persistence decisions if durable long tasks become required.
+- Artifact download verifies downloaded size and SHA-256 client-side; service-side chunk reads recompute size/SHA-256 before serving; `module artifact cleanup/status/policy` exist; doctor reports ArtifactStore health. Periodic cleanup, download audit events, and first-pass sensitive-artifact metadata/reporting are now implemented; remaining artifact work is configurable byte quotas, stronger remote-download auditing/UI prompts, and operation persistence decisions if durable long tasks become required.
 
 ## Workstream A: Global Operation Store
 
@@ -121,7 +121,7 @@ Acceptance criteria:
 
 ## Workstream B: Global Artifact Store
 
-Status: implemented first functional pass plus retention and integrity cleanup. Modules can put artifacts through `pgs.artifact.put`; operators can inspect metadata with `module artifact get <id> --json`, download chunks with `--out`, clean the store with `module artifact cleanup [--expired|--all] [--verify]`, inspect health with `module artifact status [--verify]`, and configure policy with `module artifact policy`. Client downloads verify size/SHA-256, service chunk reads recompute size/SHA-256 before serving, metadata id/file-name mismatches fail closed, and doctor reports ArtifactStore health. Remaining work is periodic/background cleanup, download audit, sensitive-artifact reporting, and durability polish.
+Status: implemented first functional pass plus retention, integrity cleanup, download audit, and sensitive-artifact metadata. Modules can put artifacts through `pgs.artifact.put`; operators can inspect metadata with `module artifact get <id> --json`, download chunks with `--out`, clean the store with `module artifact cleanup [--expired|--all] [--verify]`, inspect health with `module artifact status [--verify]`, and configure policy with `module artifact policy`. Client downloads verify size/SHA-256, service chunk reads recompute size/SHA-256 before serving, metadata id/file-name mismatches fail closed, doctor reports ArtifactStore health including sensitive counts, and the health loop periodically removes expired artifacts when auto-cleanup is enabled. Remaining work is configurable quota policy, richer remote/UI prompts, and durability polish.
 
 ### Design
 
@@ -144,12 +144,14 @@ Metadata fields:
 - `sha256`: content hash.
 - `created_ms`, `expires_ms`.
 - `trace_id` and optional `operation_id`.
+- `sensitive` and `sensitivity`: currently `medium` for backup-like artifacts and `high` for minidumps/dumps.
 
 Default policy:
 
 - max artifact size: start with 16 MB unless a config value already exists.
 - max total artifact bytes: start with 256 MB under ProgramData.
 - default TTL: 24 hours for transient artifacts; configurable through `module artifact policy --ttl-ms` with a bounded range of 60 seconds to 7 days.
+- sensitive TTL clamp: `high` artifacts are capped at 6 hours and `medium` artifacts at 24 hours even when the global policy is longer.
 - no direct path exposure in protocol responses.
 
 ### API Shape
@@ -192,7 +194,8 @@ CLI/protocol:
 9. Done 2026-07-20: promote cleanup into configurable retention policy (`ttl_ms`, `auto_cleanup`, `verify_on_status`).
 10. Done 2026-07-20: expose store health through CLI `module artifact status`, Web `/api/artifact/status`, Qt report controls, and doctor `artifact_store` check.
 11. Done 2026-07-20: fail closed on artifact metadata id/file-name mismatch and cover status/policy/doctor paths in smoke.
-12. Remaining: add periodic/background cleanup and explicit download audit/sensitive-artifact reporting.
+12. Done 2026-07-26: add periodic/background cleanup from the health loop, explicit artifact download audit events, `sensitive`/`sensitivity` metadata, dump high-sensitivity TTL, sensitive counts in status/doctor, and smoke coverage for audit/sensitive fields.
+13. Remaining: make max artifact bytes/max total bytes configurable within safe bounds and add stronger remote/Web/Qt download prompts/audit policy.
 
 ### Tests
 
@@ -212,6 +215,7 @@ Integration tests:
 - status/policy JSON output parses and reflects effective TTL/verification policy.
 - doctor JSON includes an `artifact_store` check.
 - release/runtime smoke includes artifact retrieval, policy, status, cleanup, and doctor visibility paths.
+- smoke confirms sensitive artifact metadata/status fields and `artifact.download-complete` audit visibility.
 
 Acceptance criteria:
 
@@ -354,6 +358,7 @@ Implementation notes:
 7. Done 2026-07-19: Add Qt module-page convenience controls for scheduler, notify, report operation/artifact flows.
 8. Done 2026-07-20: Add Qt guard table quarantine/failure-code/health columns and selected-guard retry/clear-quarantine actions.
 9. Done 2026-07-20: Add Qt Health policy controls for process/tcp/http probes and health-check set/get/clear.
+10. Done 2026-07-26: Add runtime `module permissive status|on|off` so the development escape hatch can be audited and revoked without editing state files by hand.
 
 Tests:
 
@@ -417,7 +422,7 @@ Implemented bundled first pass:
 9. `update`: local `release-manifest.json` verifier. It reads manifest `release_root`, verifies only the release tree `files` array, ignores artifact absolute paths for tree verification, and performs no network download or install.
 10. `script_runner`: disabled-by-default restricted local runner. Operators must enable it, register scripts under `modules\script_runner\scripts` in the service data directory, and pass `confirm=1` to run.
 
-Every bundled module now ships with manifest files, `modules.lock` capability/risk metadata, build script integration, release packaging, and smoke coverage. Remaining work is production hardening: structured UI for the new modules, doctor visibility, stronger capability enforcement, signing/hash fail-closed policy, and dedicated negative tests for high-risk operations.
+Every bundled module now ships with manifest files, `modules.lock` capability/risk metadata, build script integration, release packaging, and smoke coverage. A first batch of high-risk negative tests now covers confirmation gates, script-runner path/default-disable boundaries, file-watch unreadable paths, update tampering, artifact sensitivity, and download audit. Remaining work is production hardening: structured UI for the new modules, doctor visibility, stronger capability enforcement, signing/hash fail-closed policy, and deeper environment-specific negative tests.
 
 ## Workstream H: Local Transport And Client Runtime
 
@@ -436,15 +441,72 @@ Tests:
 - non-admin users cannot connect to the named pipe.
 - existing CLI/Qt/Web TCP behavior remains compatible during transition.
 
+## Workstream I: Shared Code And Documentation Discipline
+
+Goal: split duplicated, security-relevant helpers only where reuse reduces risk or drift, and keep implementation changes paired with documentation updates.
+
+Candidate split points:
+
+1. Structured JSON/schema helpers for registry, module manifest, lockfile, OperationStore, ArtifactStore, and Web/Qt result parsing. These should replace lightweight string extraction first on external-input and install paths.
+2. Module trust/risk/capability policy helpers shared by CLI prompts, Web/Qt summaries, and service-side enforcement. The service remains the final authority; clients only preflight and explain.
+3. Filesystem safety helpers for canonical path checks, staging directories, hash verification, ACL checks, atomic promote, and rollback.
+4. Protocol/client response parsing helpers so CLI, Qt, Web, tests, and future module managers do not grow separate ad-hoc parsers.
+5. Test command wrappers that always carry explicit MSYS2/MinGW64 environment variables instead of relying on ambient `PATH`.
+
+Implementation discipline:
+
+- Split code next to the feature that needs it; avoid broad refactors with no immediate caller.
+- Keep public behavior stable while moving helpers behind existing command names and module APIs.
+- Update docs in the same change whenever protocol, module trust, validation behavior, build/test commands, or operator-visible UI changes.
+- All build/test examples must follow the explicit MSYS2/MinGW64 environment pattern in `docs/developer/BUILD.md` and `docs/developer/TESTING.md`.
+
+Acceptance criteria:
+
+- Security-sensitive parsing and install code has a single shared implementation per concern.
+- Feature changes that affect operators update the matching docs before being considered complete.
+- Existing smoke, unit, and release scripts remain runnable from an MSYS2 environment with explicit environment variables.
+
+## Workstream J: Registry Module Install Closure
+
+Goal: finish `pgs_bless module install <name>` as a safe registry-to-service install flow for the PGS_Model repository without letting the CLI bypass the core module loader.
+
+Current state:
+
+- Done 2026-07-26: CLI registry install now validates the PGS_Model registry with shared `PGModulePolicy` helpers, restricts DLL/manifest URLs to `https://raw.githubusercontent.com/...`, verifies SHA-256, validates downloaded `module.manifest.json`, applies trust/risk confirmation gates, and hands the staged DLL to service `module install --source registry --load`.
+- Done 2026-07-26: the service install path is the final authority. It requires sidecar `module.manifest.json`, validates manifest name/ABI/risk/capabilities, requires `--confirm` for high/critical and community manifests, stages/promotes with rollback, and updates `modules.lock` through structured JSON rather than string scanning.
+- Remaining closure is live registry/E2E hardening: a real non-bundled PGS_Model positive install, negative install fixtures, and code-signing/publisher policy.
+
+Target flow:
+
+1. CLI fetches `registry.json` from PGS_Model and validates it with the shared structured helper.
+2. CLI downloads the selected DLL plus `module.manifest.json` into staging and verifies SHA-256 before any install action.
+3. CLI displays source/trust/risk warnings and enforces `community` opt-in plus high/critical confirmation.
+4. CLI calls service `module install` with the staged DLL path and `--source registry`; CLI does not mutate `modules/<name>/` directly.
+5. Service revalidates DLL identity, sidecar manifest, risk confirmation, lockfile state, and performs promote/rollback.
+6. Optional load happens only after service install succeeds and records audit events for install/load/failure.
+
+Security rules:
+
+- The service is fail-closed and is the final authority for install, lockfile mutation, and load.
+- Registry and manifest parsing must be structured, bounded, and schema-validated before opening third-party modules.
+- Hash-pinned install is acceptable before code signing; signing can later add a stricter policy for curated/community modules.
+- Audit events should include registry source, module name/version, trust tier, risk, capabilities, hash, caller, and failure reason.
+
+Tests:
+
+- Done: `test_pgs_core` covers `PGModulePolicy` identifier/hash checks, manifest validation, registry validation, URL restrictions, and trust/risk install decisions.
+- Done: explicit MSYS2/MinGW64 CMake build and CTest pass with `PGS_BUILD_TESTS=ON`.
+- Remaining: positive install from a local registry fixture and live PGS_Model registry when a non-bundled module exists; negative E2E cases for hash mismatch, schema mismatch, missing fields, community without opt-in, high/critical without confirmation, staging promote failure, rollback, and reload after install.
+
 ## Recommended Next Order
 
 1. Verify the Web loopback session-cookie change in a live VM/browser run before claiming the security release.
 2. Add code signing and run one live GitHub release to validate metadata upload plus provenance attestation.
-3. Decide whether OperationStore needs durable snapshots; add periodic artifact cleanup, download audit, and sensitive-artifact reporting if artifacts become long-lived or remotely exposed.
+3. Decide whether OperationStore needs durable snapshots; add configurable artifact byte quotas and stronger Web/Qt/remote artifact download prompts/audit policy if artifacts become long-lived or remotely exposed.
 4. Add deterministic quarantine reason codes and negative E2E coverage for missing exe, access denied, hash mismatch, session token failure, health timeout/DNS failures, health restart/quarantine actions, and retry-after-fix.
 5. Productize UI responses further: add Web browser DOM automation, grouped error guidance, field-level validation, and Cluster browser automation for add/edit/test/remove.
 6. Build out Doctor/Repair schema hardening and additional repair actions on top of the current shared CLI/Qt/Web doctor surface.
-7. Productize the newly bundled modules: add structured Web/Qt views, doctor checks, and negative tests for dump size/permission failures, service mutation confirmations, file-watch unreadable paths, update manifest tampering, and script-runner path confinement.
+7. Productize the newly bundled modules: add structured Web/Qt views, doctor checks, and the remaining negative tests for dump size/permission/process-missing failures, file-watch rule/path policy, script-runner ACL/RBAC, and update signing-ready rollback boundaries.
 8. Run VM E2E last for the release candidate, after protocol and release surfaces stop changing.
 
 Expected effort:

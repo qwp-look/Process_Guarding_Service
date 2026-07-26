@@ -26,6 +26,7 @@ http_server_win_pid=""
 worker_path_win="$(cygpath -w "$repo_root/$build_dir/smoke_worker.exe")"
 service_log="$repo_root/$build_dir/smoke_service.log"
 service_err_log="$repo_root/$build_dir/smoke_service.err.log"
+service_exe_win="$(cygpath -w "$repo_root/$build_dir/pgs_service.exe")"
 smoke_program_data="${PGS_SMOKE_PROGRAMDATA:-$repo_root/$build_dir/local_pd_smoke}"
 ps_exe="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 taskkill_exe="/c/Windows/System32/taskkill.exe"
@@ -39,12 +40,32 @@ bless() {
   PGS_AUTH_TOKEN="$token" "$build_dir/pgs_bless.exe" --port "$pgs_port" "$@"
 }
 
+expect_bless_failure_contains() {
+  local expected="$1"
+  shift
+  local output=""
+  local rc=0
+  set +e
+  output="$(bless "$@" 2>&1)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 || "$output" != *"$expected"* ]]; then
+    echo "[Smoke] expected failure containing '$expected' for: bless $*"
+    echo "[Smoke] rc=$rc output=$output"
+    exit 1
+  fi
+}
+
 force_stop_process() {
   local pid="$1"
-  "$ps_exe" -NoProfile -Command "\$pidValue = $pid; \$p = Get-Process -Id \$pidValue -ErrorAction SilentlyContinue; if (\$p) { Stop-Process -Id \$pidValue -Force -ErrorAction SilentlyContinue; Wait-Process -Id \$pidValue -Timeout 5 -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
-  if process_exists "$pid"; then
+  for _ in $(seq 1 5); do
     "$taskkill_exe" /PID "$pid" /F /T >/dev/null 2>&1 || true
-  fi
+    "$ps_exe" -NoProfile -Command "\$pidValue = $pid; \$p = Get-Process -Id \$pidValue -ErrorAction SilentlyContinue; if (\$p) { Stop-Process -Id \$pidValue -Force -ErrorAction SilentlyContinue; Wait-Process -Id \$pidValue -Timeout 2 -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+    if ! process_exists "$pid"; then
+      return 0
+    fi
+    sleep 0.2
+  done
 }
 
 json_guard_field() {
@@ -114,9 +135,13 @@ start_service_process() {
   fi
 
   service_job_pid=$!
-  for _ in $(seq 1 20); do
-    if [[ -r "/proc/$service_job_pid/winpid" ]]; then
-      tr -d '\r\n' <"/proc/$service_job_pid/winpid"
+  local actual_pid=""
+  for _ in $(seq 1 40); do
+    actual_pid="$(
+      "$ps_exe" -NoProfile -Command "\$path = '$service_exe_win'; \$p = Get-Process pgs_service -ErrorAction SilentlyContinue | Where-Object { \$_.Path -eq \$path } | Sort-Object StartTime -Descending | Select-Object -First 1; if (\$p) { Write-Output \$p.Id }" 2>/dev/null | tr -d '\r\n'
+    )"
+    if [[ "$actual_pid" =~ ^[0-9]+$ ]]; then
+      echo "$actual_pid"
       return 0
     fi
     sleep 0.1
@@ -283,11 +308,53 @@ if [[ ! "$update_verify" =~ ^OK[[:space:]]files=1\;verified=1 ]]; then
   echo "[Smoke] update verify failed: $update_verify"
   exit 1
 fi
+printf 'tampered-payload\n' >"$update_release_dir/bin/payload.txt"
+expect_bless_failure_contains "hash mismatch: bin/payload.txt" update verify --path "$(cygpath -w "$update_release_dir/release-manifest.json")"
 script_runner_status="$(bless script-runner status)"
 if [[ ! "$script_runner_status" =~ ^OK[[:space:]]enabled= ]]; then
   echo "[Smoke] script-runner status failed: $script_runner_status"
   exit 1
 fi
+echo "[Smoke] high-risk module negative checks..."
+expect_bless_failure_contains "dump collect requires confirm=1" dump collect --pid "$service_pid"
+expect_bless_failure_contains "service mutation requires confirm=1" service-guard start --name EventLog
+missing_watch_target="$repo_root/$build_dir/smoke_file_watch_missing.txt"
+rm -f "$missing_watch_target"
+expect_bless_failure_contains "watched file is not readable" file-watch add --path "$(cygpath -w "$missing_watch_target")" --id smoke_missing --action none
+bless script-runner config --disable >/dev/null
+expect_bless_failure_contains "script runner disabled" script-runner run --id smoke_missing --confirm
+outside_script="$repo_root/$build_dir/smoke_outside_script.cmd"
+printf '@echo off\r\nexit /b 0\r\n' >"$outside_script"
+expect_bless_failure_contains "script must be under module data scripts directory" script-runner add --id smoke_outside --path "$(cygpath -w "$outside_script")"
+script_runner_dir="$smoke_program_data/ProcessGuard/state/modules/script_runner/scripts"
+mkdir -p "$script_runner_dir"
+allowed_script="$script_runner_dir/smoke_allowed.cmd"
+printf '@echo off\r\nexit /b 0\r\n' >"$allowed_script"
+script_add="$(bless script-runner add --id smoke_allowed --path "$(cygpath -w "$allowed_script")")"
+if [[ ! "$script_add" =~ ^OK[[:space:]]id=smoke_allowed ]]; then
+  echo "[Smoke] script-runner allowed add failed: $script_add"
+  exit 1
+fi
+bless script-runner config --enable >/dev/null
+expect_bless_failure_contains "run requires confirm=1" script-runner run --id smoke_allowed
+bless script-runner config --disable >/dev/null
+permissive_status="$(bless module permissive status)"
+if [[ "$permissive_status" != OK\ permissive=* ]]; then
+  echo "[Smoke] module permissive status failed: $permissive_status"
+  exit 1
+fi
+expect_bless_failure_contains "module permissive on requires confirm=1" module permissive on
+permissive_on="$(bless module permissive on --confirm)"
+if [[ "$permissive_on" != OK\ permissive=1* ]]; then
+  echo "[Smoke] module permissive on failed: $permissive_on"
+  exit 1
+fi
+permissive_off="$(bless module permissive off)"
+if [[ "$permissive_off" != OK\ permissive=0* ]]; then
+  echo "[Smoke] module permissive off failed: $permissive_off"
+  exit 1
+fi
+echo "[Smoke] high-risk module negative checks ok"
 echo "[Smoke] metrics/backup/eventlog/new modules ok"
 echo "[Smoke] report artifact and operation store..."
 bless module artifact cleanup --all --verify >/dev/null || true
@@ -308,6 +375,11 @@ if ! grep -q '"filename":"pgs-backup.txt"' "$repo_root/$build_dir/smoke_artifact
   echo "[Smoke] artifact metadata missing expected filename"
   exit 1
 fi
+if ! grep -q '"sensitive":true' "$repo_root/$build_dir/smoke_artifact_meta.json" || ! grep -q '"sensitivity":"medium"' "$repo_root/$build_dir/smoke_artifact_meta.json"; then
+  echo "[Smoke] artifact metadata missing expected sensitivity fields"
+  cat "$repo_root/$build_dir/smoke_artifact_meta.json"
+  exit 1
+fi
 bless module artifact policy --ttl-ms 60000 --auto-cleanup --verify-on-status --json >"$repo_root/$build_dir/smoke_artifact_policy.json"
 if ! grep -q '"ttl_ms":60000' "$repo_root/$build_dir/smoke_artifact_policy.json" || ! grep -q '"verify_on_status":true' "$repo_root/$build_dir/smoke_artifact_policy.json"; then
   echo "[Smoke] artifact policy JSON did not reflect requested settings"
@@ -315,7 +387,7 @@ if ! grep -q '"ttl_ms":60000' "$repo_root/$build_dir/smoke_artifact_policy.json"
   exit 1
 fi
 bless module artifact status --json >"$repo_root/$build_dir/smoke_artifact_status.json"
-if ! grep -q '"count":1' "$repo_root/$build_dir/smoke_artifact_status.json" || ! grep -q '"ttl_ms":60000' "$repo_root/$build_dir/smoke_artifact_status.json"; then
+if ! grep -q '"count":1' "$repo_root/$build_dir/smoke_artifact_status.json" || ! grep -q '"ttl_ms":60000' "$repo_root/$build_dir/smoke_artifact_status.json" || ! grep -q '"sensitive":1' "$repo_root/$build_dir/smoke_artifact_status.json"; then
   echo "[Smoke] artifact status JSON missing expected count/policy"
   cat "$repo_root/$build_dir/smoke_artifact_status.json"
   exit 1
@@ -328,6 +400,12 @@ if [[ "$artifact_download_output" != *"sha256="* ]]; then
 fi
 if ! grep -q 'PGS backup' "$artifact_out"; then
   echo "[Smoke] downloaded artifact does not contain report content"
+  exit 1
+fi
+events_after_artifact="$(bless events list --limit 512)"
+if [[ "$events_after_artifact" != *"TYPE=artifact.download-complete"* ]]; then
+  echo "[Smoke] artifact download audit event missing"
+  echo "$events_after_artifact"
   exit 1
 fi
 cleanup_output="$(bless module artifact cleanup --all --verify)"

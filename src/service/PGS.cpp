@@ -1087,14 +1087,14 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         svc.emit_event = &PGS::emitEventThunk;
         svc.get_data_dir = &PGS::getDataDirThunk;
         svc.log = &PGS::logThunk;
-        m_modules.setServices(svc);
+    m_modules.setServices(svc);
     }
-    m_modules.setPermissive(m_modulesPermissive);
+    m_modules.setPermissive(m_modulesPermissive.load());
     std::vector<std::string> enabledModules = highRiskModulesEnabled ?
         std::vector<std::string>{"*"} : std::vector<std::string>{"*", "!ppl"};
     m_modules.setEnabledModules(enabledModules);
     {
-        if ((m_modulesEnabled || m_modulesPermissive) && modulesDirSecured)
+        if ((m_modulesEnabled || m_modulesPermissive.load()) && modulesDirSecured)
         {
             const int loaded = m_modules.loadFromDirectory(m_modulesDir);
             if (loaded > 0)
@@ -1106,7 +1106,7 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
                 Logger::warning("PGS: no modules loaded from " + m_modulesDir);
             }
         }
-        else if (m_modulesEnabled || m_modulesPermissive)
+        else if (m_modulesEnabled || m_modulesPermissive.load())
         {
             Logger::error("PGS: module loading refused because modules directory is not secured");
         }
@@ -1644,9 +1644,9 @@ bool PGS::loadPersistedState()
     {
         m_serverPort = archivedServerPort;
     }
-    if (!m_modulesPermissiveUserSet)
+    if (!m_modulesPermissiveUserSet.load())
     {
-        m_modulesPermissive = archivedModulesPermissive;
+        m_modulesPermissive.store(archivedModulesPermissive);
     }
 
     Logger::warning("PGS: loaded persisted archive entries=" + std::to_string(m_persistedGuards.size()) +
@@ -1723,7 +1723,7 @@ void PGS::persistState()
     out << "NEXT_GUARD_ID\t" << std::max<std::uint64_t>(1ull, nextGuardId) << "\n";
     out << "AUTH_TOKEN_HASH\t" << authHash << "\n";
     out << "SERVER_PORT\t" << m_serverPort << "\n";
-    out << "MODULES_PERMISSIVE\t" << (m_modulesPermissive ? "1" : "0") << "\n";
+    out << "MODULES_PERMISSIVE\t" << (m_modulesPermissive.load() ? "1" : "0") << "\n";
     out << "GROUP_COUNT\t" << groupSnapshot.size() << "\n";
     for (const auto &group : groupSnapshot)
     {
@@ -2574,6 +2574,7 @@ void PGS::healthLoop()
         std::vector<HealthTask> tasks;
         std::vector<std::pair<std::string, std::string>> events;
         const std::int64_t nowMs = currentEpochMs();
+        runArtifactMaintenanceIfDue(nowMs);
         {
             std::lock_guard<std::mutex> lock(m_guardsMutex);
             for (auto &entry : m_guards)

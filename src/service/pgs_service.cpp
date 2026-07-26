@@ -426,7 +426,7 @@ private:
         std::cout
             << "Usage: " << exe << " [install|uninstall|start|stop|status|run|--service] [options]\n"
             << "Options: --token <value> --port <1-65535> --enable-modules --enable-kernel-modules\n"
-            << "         --enable-risk critical --enable-ppl (legacy alias) --allow-all-modules\n"
+            << "         --enable-risk critical --enable-ppl (legacy alias) --allow-all-modules --no-allow-all-modules\n"
             << "       Set PGS_SERVICE_TOKEN to provide the service token without exposing it on the command line.\n";
         return 1;
     }
@@ -731,6 +731,11 @@ private:
             if (arg == "--allow-all-modules")
             {
                 out.allowAllModules = true;
+                continue;
+            }
+            if (arg == "--no-allow-all-modules")
+            {
+                out.allowAllModules = false;
                 continue;
             }
 

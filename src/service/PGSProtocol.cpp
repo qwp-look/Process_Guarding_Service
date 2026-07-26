@@ -12,6 +12,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "Process_Guard/PGS.h"
+#include "PGSServiceHelpers.h"
 
 #include <algorithm>
 #include <chrono>
@@ -24,7 +25,6 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
-#include <fstream>
 
 namespace ProcessGuard
 {
@@ -39,96 +39,17 @@ namespace
 {
 std::string jsonEscapeLocal(const std::string &value)
 {
-    std::ostringstream out;
-    for (unsigned char ch : value)
-    {
-        switch (ch)
-        {
-        case '\\': out << "\\\\"; break;
-        case '"': out << "\\\""; break;
-        case '\b': out << "\\b"; break;
-        case '\f': out << "\\f"; break;
-        case '\n': out << "\\n"; break;
-        case '\r': out << "\\r"; break;
-        case '\t': out << "\\t"; break;
-        default:
-            if (ch < 0x20)
-            {
-                out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(ch)
-                    << std::dec << std::setfill(' ');
-            }
-            else
-            {
-                out << static_cast<char>(ch);
-            }
-            break;
-        }
-    }
-    return out.str();
+    return service_util::jsonEscape(value);
 }
 
 std::string jsonStringValueLocal(const std::string &text, const std::string &key)
 {
-    const std::string needle = "\"" + key + "\"";
-    std::size_t pos = text.find(needle);
-    if (pos == std::string::npos)
-    {
-        return std::string();
-    }
-    pos = text.find(':', pos + needle.size());
-    if (pos == std::string::npos)
-    {
-        return std::string();
-    }
-    ++pos;
-    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-    {
-        ++pos;
-    }
-    if (pos >= text.size() || text[pos] != '"')
-    {
-        return std::string();
-    }
-    ++pos;
-    std::string out;
-    bool escaped = false;
-    for (; pos < text.size(); ++pos)
-    {
-        const char ch = text[pos];
-        if (escaped)
-        {
-            switch (ch)
-            {
-            case '"': out.push_back('"'); break;
-            case '\\': out.push_back('\\'); break;
-            case 'n': out.push_back('\n'); break;
-            case 'r': out.push_back('\r'); break;
-            case 't': out.push_back('\t'); break;
-            default: out.push_back(ch); break;
-            }
-            escaped = false;
-            continue;
-        }
-        if (ch == '\\')
-        {
-            escaped = true;
-            continue;
-        }
-        if (ch == '"')
-        {
-            break;
-        }
-        out.push_back(ch);
-    }
-    return out;
+    return service_util::jsonStringValue(text, key);
 }
 
 std::string jsonRpcError(const std::string &id, const std::string &code, const std::string &message)
 {
-    const std::string idJson = id.empty() ? std::string("null") : ("\"" + jsonEscapeLocal(id) + "\"");
-    return "{\"jsonrpc\":\"2.0\",\"id\":" + idJson +
-           ",\"error\":{\"code\":\"" + jsonEscapeLocal(code) +
-           "\",\"message\":\"" + jsonEscapeLocal(message) + "\"}}";
+    return service_util::jsonRpcError(id, code, message);
 }
 
 std::string jsonRpcRequest(const std::string &module, const std::string &method, const std::string &paramsJsonB64)
@@ -154,119 +75,6 @@ std::int64_t epochMs()
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-std::filesystem::path stagingRootForModulesDir(const std::string &modulesDir)
-{
-    std::filesystem::path root = std::filesystem::path(utf8ToWide(modulesDir)).parent_path();
-    if (root.empty())
-    {
-        root = L".";
-    }
-    return root / L"modules_staging";
-}
-
-std::string safeModuleName(const ProcessGuard::ModuleManager::ModuleInspection &info)
-{
-    std::string key = info.name.empty() ? info.allowlistKey : info.name;
-    key = toLowerAscii(trim(key));
-    for (char ch : key)
-    {
-        const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.';
-        if (!ok)
-        {
-            return std::string();
-        }
-    }
-    return key;
-}
-
-std::string moduleLockObject(const ProcessGuard::ModuleManager::ModuleInspection &info, const std::string &name)
-{
-    std::string risk = jsonStringValueLocal(info.manifest.raw, "risk");
-    if (risk.empty())
-    {
-        risk = (name == "ppl") ? "critical" : "medium";
-    }
-    std::ostringstream caps;
-    caps << '[';
-    for (std::size_t i = 0; i < info.manifest.capabilities.size(); ++i)
-    {
-        if (i != 0) caps << ',';
-        caps << '"' << jsonEscapeLocal(info.manifest.capabilities[i]) << '"';
-    }
-    caps << ']';
-    return "{\"name\":\"" + jsonEscapeLocal(name) +
-           "\",\"version\":\"" + jsonEscapeLocal(info.version.empty() ? "1.0.0" : info.version) +
-           "\",\"sha256\":\"" + jsonEscapeLocal(toLowerAscii(info.sha256)) +
-           "\",\"publisher\":\"" + jsonEscapeLocal(jsonStringValueLocal(info.manifest.raw, "publisher").empty() ? "local" : jsonStringValueLocal(info.manifest.raw, "publisher")) +
-           "\",\"source\":\"local-install\",\"capabilities\":" + caps.str() +
-           ",\"risk\":\"" + jsonEscapeLocal(risk) +
-           "\",\"trustedAt\":\"" + std::to_string(epochMs()) +
-           "\",\"signature_policy\":\"hash\",\"require_signed\":false}";
-}
-
-bool writeOrUpdateModulesLock(const std::filesystem::path &lockPath,
-                              const ProcessGuard::ModuleManager::ModuleInspection &info,
-                              const std::string &name, std::string &err)
-{
-    std::string body;
-    {
-        std::ifstream in(lockPath, std::ios::in | std::ios::binary);
-        if (in.is_open())
-        {
-            std::ostringstream oss;
-            oss << in.rdbuf();
-            body = oss.str();
-        }
-    }
-
-    std::vector<std::string> objects;
-    std::size_t pos = 0;
-    while (!body.empty())
-    {
-        const std::size_t namePos = body.find("\"name\"", pos);
-        if (namePos == std::string::npos) break;
-        const std::size_t objStart = body.rfind('{', namePos);
-        const std::size_t objEnd = body.find('}', namePos);
-        if (objStart == std::string::npos || objEnd == std::string::npos) break;
-        const std::string obj = body.substr(objStart, objEnd - objStart + 1);
-        const std::string existingName = toLowerAscii(trim(jsonStringValueLocal(obj, "name")));
-        if (!existingName.empty() && existingName != name)
-        {
-            objects.push_back(obj);
-        }
-        pos = objEnd + 1;
-    }
-    objects.push_back(moduleLockObject(info, name));
-
-    std::error_code ec;
-    std::filesystem::create_directories(lockPath.parent_path(), ec);
-    if (ec)
-    {
-        err = "failed to create modules dir for modules.lock";
-        return false;
-    }
-    std::ofstream out(lockPath, std::ios::out | std::ios::binary | std::ios::trunc);
-    if (!out.is_open())
-    {
-        err = "failed to open modules.lock for write";
-        return false;
-    }
-    out << "{\"version\":1,\"generated_at\":\"service\",\"modules\":[";
-    for (std::size_t i = 0; i < objects.size(); ++i)
-    {
-        if (i != 0) out << ',';
-        out << objects[i];
-    }
-    out << "]}\n";
-    out.flush();
-    if (!out.good())
-    {
-        err = "failed to write modules.lock";
-        return false;
-    }
-    return true;
-}
-
 constexpr std::int64_t kDefaultOperationTtlMs = 24LL * 60LL * 60LL * 1000LL;
 constexpr std::int64_t kMinArtifactRetentionTtlMs = 60LL * 1000LL;
 constexpr std::int64_t kMaxArtifactRetentionTtlMs = 7LL * 24LL * 60LL * 60LL * 1000LL;
@@ -277,137 +85,22 @@ constexpr std::uint64_t kMaxArtifactChunkBytes = 32768ull;
 
 bool isOpaqueId(const std::string &id, const std::string &prefix)
 {
-    if (id.size() != prefix.size() + 32 || id.rfind(prefix, 0) != 0)
-    {
-        return false;
-    }
-    for (std::size_t i = prefix.size(); i < id.size(); ++i)
-    {
-        if (!std::isxdigit(static_cast<unsigned char>(id[i])))
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-std::string jsonNumberTextLocal(const std::string &text, const std::string &key)
-{
-    const std::string needle = "\"" + key + "\"";
-    std::size_t pos = text.find(needle);
-    if (pos == std::string::npos)
-    {
-        return std::string();
-    }
-    pos = text.find(':', pos + needle.size());
-    if (pos == std::string::npos)
-    {
-        return std::string();
-    }
-    ++pos;
-    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
-    const std::size_t start = pos;
-    if (pos < text.size() && text[pos] == '-') ++pos;
-    while (pos < text.size() && std::isdigit(static_cast<unsigned char>(text[pos]))) ++pos;
-    return pos > start ? text.substr(start, pos - start) : std::string();
+    return service_util::isOpaqueId(id, prefix);
 }
 
 std::string jsonRawValueLocal(const std::string &text, const std::string &key)
 {
-    const std::string needle = "\"" + key + "\"";
-    std::size_t pos = text.find(needle);
-    if (pos == std::string::npos) return std::string();
-    pos = text.find(':', pos + needle.size());
-    if (pos == std::string::npos) return std::string();
-    ++pos;
-    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
-    if (pos >= text.size()) return std::string();
-    const char open = text[pos];
-    if (open == '{' || open == '[')
-    {
-        const char close = open == '{' ? '}' : ']';
-        int depth = 0;
-        bool inString = false;
-        bool escaped = false;
-        for (std::size_t i = pos; i < text.size(); ++i)
-        {
-            const char ch = text[i];
-            if (inString)
-            {
-                if (escaped) { escaped = false; continue; }
-                if (ch == '\\') { escaped = true; continue; }
-                if (ch == '"') inString = false;
-                continue;
-            }
-            if (ch == '"') { inString = true; continue; }
-            if (ch == open) ++depth;
-            else if (ch == close)
-            {
-                --depth;
-                if (depth == 0) return text.substr(pos, i - pos + 1);
-            }
-        }
-        return std::string();
-    }
-    if (open == '"')
-    {
-        bool escaped = false;
-        for (std::size_t i = pos + 1; i < text.size(); ++i)
-        {
-            if (escaped) { escaped = false; continue; }
-            if (text[i] == '\\') { escaped = true; continue; }
-            if (text[i] == '"') return text.substr(pos, i - pos + 1);
-        }
-        return std::string();
-    }
-    std::size_t end = pos;
-    while (end < text.size() && text[end] != ',' && text[end] != '}' && text[end] != ']') ++end;
-    return trim(text.substr(pos, end - pos));
+    return service_util::jsonRawValue(text, key);
 }
 
 std::vector<std::string> jsonStringArrayLocal(const std::string &text, const std::string &key)
 {
-    std::vector<std::string> out;
-    const std::string raw = jsonRawValueLocal(text, key);
-    if (raw.size() < 2 || raw.front() != '[') return out;
-    std::size_t pos = 1;
-    while (pos < raw.size())
-    {
-        while (pos < raw.size() && (std::isspace(static_cast<unsigned char>(raw[pos])) || raw[pos] == ',')) ++pos;
-        if (pos >= raw.size() || raw[pos] != '"') break;
-        ++pos;
-        std::string value;
-        bool escaped = false;
-        for (; pos < raw.size(); ++pos)
-        {
-            const char ch = raw[pos];
-            if (escaped)
-            {
-                switch (ch)
-                {
-                case '"': value.push_back('"'); break;
-                case '\\': value.push_back('\\'); break;
-                case 'n': value.push_back('\n'); break;
-                case 'r': value.push_back('\r'); break;
-                case 't': value.push_back('\t'); break;
-                default: value.push_back(ch); break;
-                }
-                escaped = false;
-                continue;
-            }
-            if (ch == '\\') { escaped = true; continue; }
-            if (ch == '"') { ++pos; out.push_back(value); break; }
-            value.push_back(ch);
-        }
-    }
-    return out;
+    return service_util::jsonStringArray(text, key);
 }
 
 std::int64_t jsonInt64Local(const std::string &text, const std::string &key, std::int64_t fallback)
 {
-    const std::string value = jsonNumberTextLocal(text, key);
-    if (value.empty()) return fallback;
-    try { return std::stoll(value); } catch (const std::exception &) { return fallback; }
+    return service_util::jsonInt64(text, key, fallback);
 }
 
 std::string safeDisplayFilename(std::string value)
@@ -424,6 +117,31 @@ std::string safeDisplayFilename(std::string value)
     if (out == "." || out == "..") return "artifact.bin";
     if (out.size() > 96) out.resize(96);
     return out.empty() ? std::string("artifact.bin") : out;
+}
+
+std::string defaultArtifactSensitivity(const PGS::ArtifactRecord &rec)
+{
+    const std::string method = toLowerAscii(rec.method);
+    const std::string type = toLowerAscii(rec.contentType);
+    const std::string name = toLowerAscii(rec.filename);
+    if (method.find("dump") != std::string::npos || (name.size() >= 4 && name.rfind(".dmp") == name.size() - 4) ||
+        type.find("minidump") != std::string::npos || type.find("portable-executable") != std::string::npos)
+    {
+        return "high";
+    }
+    if (method.find("backup") != std::string::npos)
+    {
+        return "medium";
+    }
+    return std::string();
+}
+
+bool parseJsonBoolLocal(const std::string &text, const std::string &key, bool fallback = false)
+{
+    const std::string value = toLowerAscii(trim(jsonRawValueLocal(text, key)));
+    if (value == "true" || value == "1") return true;
+    if (value == "false" || value == "0") return false;
+    return fallback;
 }
 
 std::filesystem::path artifactRootForStateFile(const std::string &stateFilePath)
@@ -463,6 +181,8 @@ std::string artifactRecordJson(const PGS::ArtifactRecord &rec)
            ",\"expires_ms\":" + std::to_string(rec.expiresMs) +
            ",\"trace_id\":\"" + jsonEscapeLocal(rec.traceId) +
            "\",\"operation_id\":\"" + jsonEscapeLocal(rec.operationId) +
+           "\",\"sensitive\":" + std::string(rec.sensitive ? "true" : "false") +
+           ",\"sensitivity\":\"" + jsonEscapeLocal(rec.sensitivity) +
            "\",\"storage_hash\":\"" + jsonEscapeLocal(rec.storageHash) +
            "\",\"storage_hash_verified\":" + (rec.storageHashVerified ? "true" : "false") + "}";
 }
@@ -501,8 +221,7 @@ std::string operationRecordJson(const PGS::OperationRecord &rec)
 
 std::string jsonRpcResultLocal(const std::string &id, const std::string &resultJson)
 {
-    const std::string idJson = id.empty() ? std::string("null") : ("\"" + jsonEscapeLocal(id) + "\"");
-    return "{\"jsonrpc\":\"2.0\",\"id\":" + idJson + ",\"result\":" + resultJson + "}";
+    return service_util::jsonRpcResult(id, resultJson);
 }
 
 bool artifactRecordFromJson(const std::string &json, PGS::ArtifactRecord &rec)
@@ -521,6 +240,8 @@ bool artifactRecordFromJson(const std::string &json, PGS::ArtifactRecord &rec)
     rec.traceId = jsonStringValueLocal(json, "trace_id");
     rec.operationId = jsonStringValueLocal(json, "operation_id");
     rec.storageHash = jsonStringValueLocal(json, "storage_hash");
+    rec.sensitive = trim(jsonRawValueLocal(json, "sensitive")) == "true";
+    rec.sensitivity = jsonStringValueLocal(json, "sensitivity");
     rec.storageHashVerified = trim(jsonRawValueLocal(json, "storage_hash_verified")) == "true";
     rec.size = static_cast<std::uint64_t>(std::max<std::int64_t>(0, jsonInt64Local(json, "size", 0)));
     rec.createdMs = jsonInt64Local(json, "created_ms", 0);
@@ -530,27 +251,12 @@ bool artifactRecordFromJson(const std::string &json, PGS::ArtifactRecord &rec)
 
 bool readWholeFile(const std::filesystem::path &path, std::string &out)
 {
-    std::ifstream in(path, std::ios::in | std::ios::binary);
-    if (!in.is_open())
-    {
-        return false;
-    }
-    std::ostringstream oss;
-    oss << in.rdbuf();
-    out = oss.str();
-    return true;
+    return service_util::readWholeFile(path, out);
 }
 
 bool writeWholeFile(const std::filesystem::path &path, const std::string &data)
 {
-    std::ofstream out(path, std::ios::out | std::ios::binary | std::ios::trunc);
-    if (!out.is_open())
-    {
-        return false;
-    }
-    out.write(data.data(), static_cast<std::streamsize>(data.size()));
-    out.flush();
-    return out.good();
+    return service_util::writeWholeFile(path, data);
 }
 
 std::string makeOpaqueId(const std::string &prefix)
@@ -576,6 +282,12 @@ std::uint64_t regularFileSize(const std::filesystem::path &path)
 void removeArtifactFiles(const std::filesystem::path &root, const std::string &artifactId, PGS::ArtifactCleanupResult &result)
 {
     std::error_code ec;
+    std::string metaText;
+    PGS::ArtifactRecord rec;
+    if (readWholeFile(artifactMetaPath(root, artifactId), metaText) && artifactRecordFromJson(metaText, rec) && rec.sensitive)
+    {
+        ++result.sensitiveRemoved;
+    }
     const std::filesystem::path content = artifactContentPath(root, artifactId);
     const std::filesystem::path meta = artifactMetaPath(root, artifactId);
     result.reclaimedBytes += regularFileSize(content);
@@ -628,6 +340,7 @@ std::string artifactStatusJson(const PGS::ArtifactStoreStatus &status,
            ",\"corrupt\":" + std::to_string(status.corrupt) +
            ",\"orphaned\":" + std::to_string(status.orphaned) +
            ",\"verified\":" + std::to_string(status.verified) +
+           ",\"sensitive\":" + std::to_string(status.sensitive) +
            ",\"ttl_ms\":" + std::to_string(ttlMs) +
            ",\"auto_cleanup\":" + std::string(autoCleanup ? "true" : "false") +
            ",\"verify_on_status\":" + std::string(verifyOnStatus ? "true" : "false") +
@@ -687,69 +400,6 @@ std::string clampMessage(std::string text)
         text.resize(512);
     }
     return text;
-}
-
-bool copyModulePayloadToStage(const std::filesystem::path &sourceDll, const std::filesystem::path &stageDir, std::string &err)
-{
-    std::error_code ec;
-    std::filesystem::create_directories(stageDir, ec);
-    if (ec)
-    {
-        err = "failed to create staging directory";
-        return false;
-    }
-    const std::filesystem::path sourceDir = sourceDll.parent_path();
-    for (const auto &entry : std::filesystem::directory_iterator(sourceDir, ec))
-    {
-        if (ec) break;
-        if (!entry.is_regular_file())
-        {
-            continue;
-        }
-        const std::filesystem::path ext = entry.path().extension();
-        if (ext != L".dll" && ext != L".json" && ext != L".manifest" && ext != L".html" && ext != L".sys" && ext != L".txt")
-        {
-            continue;
-        }
-        std::filesystem::copy_file(entry.path(), stageDir / entry.path().filename(), std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec)
-        {
-            err = "failed to copy module payload file";
-            return false;
-        }
-    }
-    return true;
-}
-
-std::filesystem::path firstDllInDir(const std::filesystem::path &dir)
-{
-    std::error_code ec;
-    for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
-    {
-        if (entry.is_regular_file() && entry.path().extension() == L".dll")
-        {
-            return entry.path();
-        }
-    }
-    return std::filesystem::path();
-}
-
-std::filesystem::path newestRollbackDir(const std::filesystem::path &rollbackRoot, const std::string &name)
-{
-    std::filesystem::path newest;
-    std::error_code ec;
-    const std::wstring prefix = utf8ToWide(name + "-");
-    for (const auto &entry : std::filesystem::directory_iterator(rollbackRoot, ec))
-    {
-        if (!entry.is_directory()) continue;
-        const std::wstring leaf = entry.path().filename().wstring();
-        if (leaf.rfind(prefix, 0) != 0) continue;
-        if (newest.empty() || leaf > newest.filename().wstring())
-        {
-            newest = entry.path();
-        }
-    }
-    return newest;
 }
 
 std::string sanitizeGroupNameLocal(std::string name)
@@ -815,8 +465,7 @@ std::string joinCsvLocal(const std::vector<std::string> &values)
 
 bool looksLikeJsonObjectOrArrayLocal(const std::string &text)
 {
-    const std::string t = trim(text);
-    return !t.empty() && ((t.front() == '{' && t.back() == '}') || (t.front() == '[' && t.back() == ']'));
+    return service_util::looksLikeJsonObjectOrArray(text);
 }
 
 bool parseIntLocal(const std::string &text, int &out)
@@ -2136,6 +1785,58 @@ bool PGS::stripAuthEnvelope(const std::string &message, std::string &commandLine
     return !commandLine.empty();
 }
 
+std::string PGS::handleModulePermissiveCommand(const std::string &rest)
+{
+    const std::vector<std::string> parts = splitByChar(trim(rest), ' ');
+    const std::string action = parts.empty() || trim(parts[0]).empty()
+        ? std::string("status")
+        : toLowerAscii(trim(parts[0]));
+    const auto loaded = m_modules.list().size();
+    auto status = [&]() {
+        return std::string("OK permissive=") + (m_modulesPermissive.load() ? "1" : "0") +
+               ";loaded=" + std::to_string(loaded) +
+               ";confirm_required_for_on=1";
+    };
+    if (action == "status" || action.empty())
+    {
+        return status();
+    }
+    if (action == "on" || action == "enable")
+    {
+        bool confirm = false;
+        for (const std::string &part : parts)
+        {
+            const std::string item = toLowerAscii(trim(part));
+            if (item == "--confirm" || item == "confirm=1")
+            {
+                confirm = true;
+                break;
+            }
+        }
+        if (!confirm)
+        {
+            return "ERR module permissive on requires confirm=1";
+        }
+        m_modulesPermissive.store(true);
+        m_modulesPermissiveUserSet.store(true);
+        m_modules.setPermissive(true);
+        persistState();
+        recordEvent("module.permissive-enabled", "loaded=" + std::to_string(loaded));
+        return "OK permissive=1;loaded=" + std::to_string(loaded) + ";persisted=1";
+    }
+    if (action == "off" || action == "disable")
+    {
+        m_modulesPermissive.store(false);
+        m_modulesPermissiveUserSet.store(true);
+        m_modules.setPermissive(false);
+        m_modules.ensureAllowlistLoaded(m_modulesDir);
+        persistState();
+        recordEvent("module.permissive-disabled", "loaded=" + std::to_string(loaded));
+        return "OK permissive=0;loaded=" + std::to_string(loaded) + ";persisted=1";
+    }
+    return "ERR unknown module permissive subcommand";
+}
+
 std::string PGS::handleModuleCommand(const std::string &args)
 {
     // Sub-protocol: "module <sub> <rest>"
@@ -2160,6 +1861,11 @@ std::string PGS::handleModuleCommand(const std::string &args)
                    "\tjson=" + (m.hasInvokeJson ? "1" : "0");
         }
         return out;
+    }
+
+    if (sub == "permissive")
+    {
+        return handleModulePermissiveCommand(rest);
     }
 
     if (sub == "load")
@@ -2311,7 +2017,7 @@ std::string PGS::handleModuleCommand(const std::string &args)
         const std::filesystem::path root = std::filesystem::path(utf8ToWide(m_modulesDir));
         const bool allowExists = std::filesystem::exists(root / L"modules.allow");
         const bool lockExists = std::filesystem::exists(root / L"modules.lock");
-        const std::filesystem::path stagingRoot = stagingRootForModulesDir(m_modulesDir);
+        const std::filesystem::path stagingRoot = service_util::moduleStagingRootForModulesDir(m_modulesDir);
         const bool stagingExists = std::filesystem::exists(stagingRoot);
         const bool managerExists = std::filesystem::exists(root.parent_path() / L"module_managers");
         return std::string("OK modules_dir_b64=") + base64Encode(m_modulesDir) +
@@ -2319,7 +2025,7 @@ std::string PGS::handleModuleCommand(const std::string &args)
                ";modules_lock=" + (lockExists ? "1" : "0") +
                ";modules_staging=" + (stagingExists ? "1" : "0") +
                ";module_managers=" + (managerExists ? "1" : "0") +
-               ";permissive=" + (m_modulesPermissive ? "1" : "0") +
+               ";permissive=" + (m_modulesPermissive.load() ? "1" : "0") +
                ";kernel_enabled=" + ((m_kernelModulesEnabled || m_pplEnabled) ? "1" : "0");
     }
 
@@ -2336,7 +2042,7 @@ std::string PGS::handleModuleCommand(const std::string &args)
         std::error_code ec;
         for (const auto &entry : std::filesystem::directory_iterator(path, ec))
         {
-            if (!entry.is_regular_file() || entry.path().extension() != L".dll")
+            if (!entry.is_regular_file() || !service_util::pathHasExtension(entry.path(), ".dll"))
             {
                 continue;
             }
@@ -2367,163 +2073,13 @@ std::string PGS::handleModuleCommand(const std::string &args)
 
     if (sub == "install")
     {
-        if (rest.empty())
-        {
-            return "ERR module install requires a base64 path to a module DLL";
-        }
-        const std::string sourcePathUtf8 = base64Decode(rest);
-        std::filesystem::path sourceDll = std::filesystem::path(utf8ToWide(sourcePathUtf8));
-        std::error_code ec;
-        if (!std::filesystem::is_regular_file(sourceDll, ec) || sourceDll.extension() != L".dll")
-        {
-            return "ERR module install source must be a DLL file";
-        }
-        ModuleManager::ModuleInspection info;
-        std::string err;
-        if (!ModuleManager::inspectModulePath(sourcePathUtf8, info, err))
-        {
-            return "ERR " + err;
-        }
-        const std::string name = safeModuleName(info);
-        if (name.empty())
-        {
-            return "ERR invalid module name in manifest/path";
-        }
-        if (!info.name.empty() && toLowerAscii(info.name) != name)
-        {
-            return "ERR module manifest name does not match install key";
-        }
-        if (name == "ppl" && !(m_kernelModulesEnabled || m_pplEnabled))
-        {
-            return "ERR ppl install requires --enable-kernel-modules, --enable-risk critical, or legacy --enable-ppl";
-        }
-
-        const std::filesystem::path modulesRoot = std::filesystem::path(utf8ToWide(m_modulesDir));
-        const std::filesystem::path stagingRoot = stagingRootForModulesDir(m_modulesDir);
-        const std::string stamp = std::to_string(epochMs());
-        const std::filesystem::path stageDir = stagingRoot / utf8ToWide(name + "-stage-" + stamp);
-        const std::filesystem::path finalDir = modulesRoot / utf8ToWide(name);
-        const std::filesystem::path rollbackRoot = stagingRoot / L"rollback";
-        const std::filesystem::path backupDir = rollbackRoot / utf8ToWide(name + "-" + stamp);
-        std::filesystem::create_directories(stagingRoot, ec);
-        std::filesystem::create_directories(rollbackRoot, ec);
-        if (!copyModulePayloadToStage(sourceDll, stageDir, err))
-        {
-            std::filesystem::remove_all(stageDir, ec);
-            return "ERR " + err;
-        }
-        const std::filesystem::path stagedDll = stageDir / sourceDll.filename();
-        ModuleManager::ModuleInspection stagedInfo;
-        if (!ModuleManager::inspectModulePath(wideToUtf8(stagedDll.wstring()), stagedInfo, err))
-        {
-            std::filesystem::remove_all(stageDir, ec);
-            return "ERR staged module verification failed: " + err;
-        }
-        if (safeModuleName(stagedInfo) != name || stagedInfo.sha256 != info.sha256)
-        {
-            std::filesystem::remove_all(stageDir, ec);
-            return "ERR staged module changed during install";
-        }
-
-        m_modules.unload(name, err);
-        if (std::filesystem::exists(finalDir, ec))
-        {
-            std::filesystem::rename(finalDir, backupDir, ec);
-            if (ec)
-            {
-                std::filesystem::remove_all(stageDir, ec);
-                return "ERR failed to backup existing module for rollback";
-            }
-        }
-        std::filesystem::rename(stageDir, finalDir, ec);
-        if (ec)
-        {
-            if (std::filesystem::exists(backupDir))
-            {
-                std::filesystem::rename(backupDir, finalDir, ec);
-            }
-            return "ERR failed to promote staged module";
-        }
-        const std::filesystem::path finalDll = finalDir / sourceDll.filename();
-        ModuleManager::ModuleInspection finalInfo;
-        if (!ModuleManager::inspectModulePath(wideToUtf8(finalDll.wstring()), finalInfo, err))
-        {
-            return "ERR installed module verification failed: " + err;
-        }
-        if (!writeOrUpdateModulesLock(modulesRoot / L"modules.lock", finalInfo, name, err))
-        {
-            return "ERR " + err;
-        }
-        m_modules.setModulesRoot(std::string());
-        m_modules.ensureAllowlistLoaded(m_modulesDir);
-        recordEvent("module.install", "name=" + name + ";path=" + wideToUtf8(finalDll.wstring()));
-        return "OK installed " + name + ";staged=1;trusted=1";
+        return handleModuleInstallCommand(rest);
     }
 
     if (sub == "rollback")
     {
-        if (rest.empty())
-        {
-            return "ERR module rollback requires a name";
-        }
-        const std::string name = toLowerAscii(trim(rest));
-        const std::filesystem::path modulesRoot = std::filesystem::path(utf8ToWide(m_modulesDir));
-        const std::filesystem::path stagingRoot = stagingRootForModulesDir(m_modulesDir);
-        const std::filesystem::path rollbackRoot = stagingRoot / L"rollback";
-        const std::filesystem::path rollbackDir = newestRollbackDir(rollbackRoot, name);
-        if (rollbackDir.empty())
-        {
-            return "ERR no rollback found for module " + name;
-        }
-        std::filesystem::path rollbackDll = firstDllInDir(rollbackDir);
-        if (rollbackDll.empty())
-        {
-            return "ERR rollback payload has no DLL";
-        }
-        ModuleManager::ModuleInspection info;
-        std::string err;
-        if (!ModuleManager::inspectModulePath(wideToUtf8(rollbackDll.wstring()), info, err))
-        {
-            return "ERR rollback verification failed: " + err;
-        }
-        if (safeModuleName(info) != name)
-        {
-            return "ERR rollback module name mismatch";
-        }
-        std::error_code ec;
-        const std::filesystem::path finalDir = modulesRoot / utf8ToWide(name);
-        const std::filesystem::path currentBackupRoot = stagingRoot / L"current";
-        std::filesystem::create_directories(currentBackupRoot, ec);
-        const std::filesystem::path currentBackup = currentBackupRoot / utf8ToWide(name + "-" + std::to_string(epochMs()));
-        m_modules.unload(name, err);
-        if (std::filesystem::exists(finalDir, ec))
-        {
-            std::filesystem::rename(finalDir, currentBackup, ec);
-            if (ec)
-            {
-                return "ERR failed to backup current module before rollback";
-            }
-        }
-        std::filesystem::rename(rollbackDir, finalDir, ec);
-        if (ec)
-        {
-            if (std::filesystem::exists(currentBackup))
-            {
-                std::filesystem::rename(currentBackup, finalDir, ec);
-            }
-            return "ERR failed to restore rollback payload";
-        }
-        rollbackDll = firstDllInDir(finalDir);
-        if (!rollbackDll.empty() && ModuleManager::inspectModulePath(wideToUtf8(rollbackDll.wstring()), info, err))
-        {
-            writeOrUpdateModulesLock(modulesRoot / L"modules.lock", info, name, err);
-        }
-        m_modules.setModulesRoot(std::string());
-        m_modules.ensureAllowlistLoaded(m_modulesDir);
-        recordEvent("module.rollback", "name=" + name);
-        return "OK rolled back " + name;
+        return handleModuleRollbackCommand(rest);
     }
-
     if (sub == "artifact")
     {
         const auto sp = rest.find(' ');
@@ -2809,13 +2365,29 @@ std::string PGS::handleCoreJsonRpc(const std::string &requestJson)
         rec.contentType = jsonStringValueLocal(params, "content_type");
         if (rec.contentType.empty()) rec.contentType = "application/octet-stream";
         rec.filename = safeDisplayFilename(jsonStringValueLocal(params, "filename"));
+        rec.sensitivity = jsonStringValueLocal(params, "sensitivity");
+        const bool explicitSensitive = parseJsonBoolLocal(params, "sensitive", false);
         rec.size = static_cast<std::uint64_t>(content.size());
         rec.sha256 = sha256Hex(content);
         rec.storageHash = rec.sha256;
         rec.storageHashVerified = true;
         rec.createdMs = now;
         const std::int64_t requestedTtl = jsonInt64Local(params, "ttl_ms", policyTtlMs);
-        const std::int64_t ttl = std::clamp<std::int64_t>(requestedTtl, kMinArtifactRetentionTtlMs, kMaxArtifactRetentionTtlMs);
+        if (rec.sensitivity.empty())
+        {
+            rec.sensitivity = defaultArtifactSensitivity(rec);
+        }
+        rec.sensitive = explicitSensitive || !rec.sensitivity.empty();
+        std::int64_t ttlCap = kMaxArtifactRetentionTtlMs;
+        if (rec.sensitivity == "high")
+        {
+            ttlCap = 6LL * 60LL * 60LL * 1000LL;
+        }
+        else if (rec.sensitivity == "medium")
+        {
+            ttlCap = 24LL * 60LL * 60LL * 1000LL;
+        }
+        const std::int64_t ttl = std::clamp<std::int64_t>(requestedTtl, kMinArtifactRetentionTtlMs, ttlCap);
         rec.expiresMs = now + ttl;
         rec.traceId = jsonStringValueLocal(params, "trace_id");
         rec.operationId = jsonStringValueLocal(params, "operation_id");
@@ -2885,7 +2457,9 @@ std::string PGS::handleCoreJsonRpc(const std::string &requestJson)
                 it->second.updatedMs = now;
             }
         }
-        recordEvent("artifact.put", "module=" + rec.module + ";artifact_id=" + rec.id + ";size=" + std::to_string(rec.size));
+        recordEvent("artifact.put", "module=" + rec.module + ";artifact_id=" + rec.id + ";size=" + std::to_string(rec.size) +
+                                 ";sensitive=" + (rec.sensitive ? std::string("1") : std::string("0")) +
+                                 ";sensitivity=" + rec.sensitivity + ";ttl_ms=" + std::to_string(ttl));
         return jsonRpcResultLocal(id, "{\"artifact_id\":\"" + jsonEscapeLocal(rec.id) + "\",\"artifact\":" + artifactRecordJson(rec) + "}");
     }
 
@@ -2957,6 +2531,10 @@ PGS::ArtifactStoreStatus PGS::artifactStoreStatusLocked(bool verifyContentHash, 
         metaIds.insert(rec.id);
         m_artifacts[rec.id] = rec;
         ++status.count;
+        if (rec.sensitive)
+        {
+            ++status.sensitive;
+        }
         if (rec.expiresMs > 0 && rec.expiresMs <= now)
         {
             ++status.expired;
@@ -3197,6 +2775,33 @@ PGS::ArtifactCleanupResult PGS::cleanupArtifactsLocked(bool removeExpired, bool 
     return result;
 }
 
+void PGS::runArtifactMaintenanceIfDue(std::int64_t nowMs)
+{
+    constexpr std::int64_t kArtifactMaintenanceIntervalMs = 5LL * 60LL * 1000LL;
+    ArtifactCleanupResult result;
+    std::string detail;
+    {
+        std::lock_guard<std::mutex> lock(m_artifactMutex);
+        if (!m_artifactAutoCleanup)
+        {
+            return;
+        }
+        if (m_lastArtifactMaintenanceMs > 0 && nowMs - m_lastArtifactMaintenanceMs < kArtifactMaintenanceIntervalMs)
+        {
+            return;
+        }
+        m_lastArtifactMaintenanceMs = nowMs;
+        result = cleanupArtifactsLocked(true, false, false, detail);
+    }
+    if (result.removed > 0 || result.corruptRemoved > 0)
+    {
+        recordEvent("artifact.maintenance-cleanup", "removed=" + std::to_string(result.removed) +
+                                                  ";sensitive_removed=" + std::to_string(result.sensitiveRemoved) +
+                                                  ";reclaimed_bytes=" + std::to_string(result.reclaimedBytes) +
+                                                  (detail.empty() ? std::string() : ";detail=" + detail));
+    }
+}
+
 std::string PGS::handleArtifactCleanupCommand(const std::string &args)
 {
     const std::string trimmed = trim(args);
@@ -3238,11 +2843,15 @@ std::string PGS::handleArtifactCleanupCommand(const std::string &args)
         std::lock_guard<std::mutex> lock(m_artifactMutex);
         result = cleanupArtifactsLocked(removeExpired, removeAll, verifyContentHash, detail);
     }
-    recordEvent("artifact.cleanup", "removed=" + std::to_string(result.removed) + ";verified=" + std::to_string(result.verified) + ";corrupt_removed=" + std::to_string(result.corruptRemoved));
+    recordEvent("artifact.cleanup", "removed=" + std::to_string(result.removed) +
+                                      ";verified=" + std::to_string(result.verified) +
+                                      ";corrupt_removed=" + std::to_string(result.corruptRemoved) +
+                                      ";sensitive_removed=" + std::to_string(result.sensitiveRemoved));
     std::ostringstream out;
     out << "OK artifact cleanup removed=" << result.removed
         << ";verified=" << result.verified
         << ";corrupt_removed=" << result.corruptRemoved
+        << ";sensitive_removed=" << result.sensitiveRemoved
         << ";reclaimed_bytes=" << result.reclaimedBytes;
     if (!detail.empty())
     {
@@ -3295,6 +2904,7 @@ std::string PGS::handleArtifactStatusCommand(const std::string &args)
         << ";expired=" << status.expired
         << ";corrupt=" << status.corrupt
         << ";orphaned=" << status.orphaned
+        << ";sensitive=" << status.sensitive
         << ";verified=" << status.verified
         << ";ttl_ms=" << ttlMs
         << ";auto_cleanup=" << (autoCleanup ? "1" : "0")
@@ -3437,10 +3047,12 @@ std::string PGS::handleArtifactChunkCommand(const std::string &args)
     const std::int64_t now = epochMs();
     if (rec.expiresMs > 0 && rec.expiresMs <= now)
     {
+        recordEvent("artifact.download-expired", "artifact_id=" + artifactId + ";offset=" + std::to_string(offset));
         return "ERR artifact expired";
     }
     if (offset > rec.size)
     {
+        recordEvent("artifact.download-invalid", "artifact_id=" + artifactId + ";offset=" + std::to_string(offset));
         return "ERR artifact offset beyond end";
     }
     const std::filesystem::path contentPath = artifactContentPath(root, artifactId);
@@ -3475,6 +3087,20 @@ std::string PGS::handleArtifactChunkCommand(const std::string &args)
         data.resize(static_cast<std::size_t>(std::max<std::streamsize>(0, in.gcount())));
     }
     const std::uint64_t nextOffset = offset + static_cast<std::uint64_t>(data.size());
+    if (offset == 0)
+    {
+        recordEvent("artifact.download-start", "artifact_id=" + artifactId +
+                                             ";size=" + std::to_string(rec.size) +
+                                             ";sensitive=" + (rec.sensitive ? std::string("1") : std::string("0")) +
+                                             ";sensitivity=" + rec.sensitivity);
+    }
+    if (nextOffset >= rec.size)
+    {
+        recordEvent("artifact.download-complete", "artifact_id=" + artifactId +
+                                                ";bytes=" + std::to_string(nextOffset) +
+                                                ";sha256=" + actualHash +
+                                                ";sensitive=" + (rec.sensitive ? std::string("1") : std::string("0")));
+    }
     return "OK id=" + artifactId +
            ";offset=" + std::to_string(offset) +
            ";size=" + std::to_string(data.size()) +

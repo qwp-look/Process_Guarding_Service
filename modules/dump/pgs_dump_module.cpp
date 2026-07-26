@@ -303,7 +303,10 @@ namespace
         if (operationId.empty()) return "ERR operation.create returned no operation_id";
 
         const std::string filename = "pgs-dump-" + std::to_string(pid) + ".dmp";
-        const std::string params = "{\"operation_id\":\"" + jsonEscape(operationId) + "\",\"method\":\"dump.collect\",\"filename\":\"" + jsonEscape(filename) + "\",\"content_type\":\"application/vnd.microsoft.portable-executable\",\"content_b64\":\"" + base64Encode(content) + "\"}";
+        const std::string params = "{\"operation_id\":\"" + jsonEscape(operationId) +
+            "\",\"method\":\"dump.collect\",\"filename\":\"" + jsonEscape(filename) +
+            "\",\"content_type\":\"application/vnd.microsoft.minidump\",\"sensitive\":true,\"sensitivity\":\"high\",\"ttl_ms\":21600000,\"content_b64\":\"" +
+            base64Encode(content) + "\"}";
         if (!callPGSJson("pgs.artifact.put", params, response))
         {
             callPGSJson("pgs.operation.fail", "{\"operation_id\":\"" + jsonEscape(operationId) + "\",\"code\":\"ARTIFACT_WRITE_FAILED\",\"message\":\"dump artifact write failed\"}", response);

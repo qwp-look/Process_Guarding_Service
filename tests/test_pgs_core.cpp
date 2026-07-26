@@ -18,6 +18,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "Process_Guard/PGUtil.h"
+#include "Process_Guard/PGModulePolicy.h"
 
 #include <cstdint>
 #include <ctime>
@@ -26,6 +27,7 @@
 #include <vector>
 
 namespace u = ProcessGuard::util;
+namespace mp = ProcessGuard::module_policy;
 
 #ifdef PGS_ENABLE_TEST_HOOKS
 namespace pgs_sched_test
@@ -266,6 +268,60 @@ void test_backoff()
     // Negative base normalises to 0 (never schedule a negative wait).
     CHECK_EQ(u::computeBackoffDelay(-5, 3), 0);
 }
+
+void test_module_policy()
+{
+    CHECK(mp::isIdentifier("module.name-1"));
+    CHECK(!mp::isIdentifier("bad/name"));
+    CHECK_EQ(mp::normalizeIdentifier("  My_Module  "), std::string("my_module"));
+    CHECK(mp::isSha256Hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    CHECK(!mp::isSha256Hex("xyz"));
+
+    const std::string manifestText = R"json({
+        "name":"demo","version":"1.2.3","abi":3,"trust":"community","risk":"high",
+        "author":"tester","capabilities":["demo.run","state.read"],
+        "methods":[{"name":"demo.run","risk":"high","sync":true,"required_capabilities":["demo.run"]}]
+    })json";
+    mp::ManifestSpec manifest;
+    std::string err;
+    CHECK(mp::parseManifestJson(manifestText, manifest, err));
+    CHECK_EQ(manifest.name, std::string("demo"));
+    CHECK_EQ(manifest.abi, static_cast<unsigned int>(3));
+    CHECK_EQ(manifest.trust, std::string("community"));
+    CHECK(mp::riskAtLeast(manifest.risk, mp::RiskLevel::High));
+
+    const std::string invalidManifest = R"json({
+        "name":"demo","version":"1.2.3","abi":3,"risk":"low",
+        "capabilities":["demo.run"],
+        "methods":[{"name":"demo.run","risk":"low","sync":true,"required_capabilities":["missing.cap"]}]
+    })json";
+    CHECK(!mp::parseManifestJson(invalidManifest, manifest, err));
+
+    const std::string registryText = R"json({
+        "version":"1","pgs_min_version":"0.1.0","generated_at":"2026-07-26T00:00:00Z",
+        "modules":[{
+            "name":"demo","trust":"community","description":"demo module","author":"tester",
+            "risk":"high","capabilities":["demo.run"],"latest":"1.2.3",
+            "versions":[{"version":"1.2.3","download_url":"https://raw.githubusercontent.com/qwp-look/PGS_Model/main/demo.dll","manifest_url":"https://raw.githubusercontent.com/qwp-look/PGS_Model/main/module.manifest.json","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","risk":"high"}]
+        }]
+    })json";
+    const nlohmann::json registry = nlohmann::json::parse(registryText);
+    CHECK(mp::validateRegistryRoot(registry, err));
+    mp::RegistryModule module;
+    CHECK(mp::validateRegistryModuleEntry(registry.at("modules").at(0), "demo", module, err));
+    CHECK_EQ(module.selected.sha256, std::string("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    CHECK(!mp::evaluateInstallDecision(module, false, false, true).allowed);
+    CHECK(!mp::evaluateInstallDecision(module, false, true, false).allowed);
+    const auto decision = mp::evaluateInstallDecision(module, false, true, true);
+    CHECK(decision.allowed);
+    CHECK(decision.requiresTypedYes);
+
+    std::string urlHost;
+    std::string urlPath;
+    CHECK(mp::isAllowedHttpsUrl(module.selected.downloadUrl, true, urlHost, urlPath));
+    CHECK_EQ(urlHost, std::string("raw.githubusercontent.com"));
+    CHECK(!mp::isAllowedHttpsUrl("http://raw.githubusercontent.com/qwp-look/x", true, urlHost, urlPath));
+}
 } // namespace
 
 int main()
@@ -280,6 +336,7 @@ int main()
     test_pfn_and_aumid();
     test_restart_window();
     test_backoff();
+    test_module_policy();
 
     std::cout << "ran " << g_tests << " checks, " << g_failures << " failures\n";
     return g_failures == 0 ? 0 : 1;

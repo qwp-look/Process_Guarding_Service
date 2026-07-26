@@ -385,58 +385,6 @@ namespace ProcessGuard
             return std::string();
         }
 
-        std::string jsonNumberValue(const std::string &text, const std::string &key)
-        {
-            try
-            {
-                const auto j = nlohmann::json::parse(text);
-                if (!j.contains(key)) return std::string();
-                const auto &v = j.at(key);
-                if (v.is_number_integer()) return std::to_string(v.get<int>());
-                if (v.is_number()) return std::to_string(static_cast<int>(v.get<double>()));
-            }
-            catch (...) {}
-            return std::string();
-        }
-
-        std::string jsonArrayCsv(const std::string &text, const std::string &key)
-        {
-            try
-            {
-                const auto j = nlohmann::json::parse(text);
-                if (!j.contains(key) || !j.at(key).is_array())
-                    return std::string();
-                std::ostringstream oss;
-                bool first = true;
-                for (const auto &item : j.at(key))
-                {
-                    if (item.is_string())
-                    {
-                        if (!first) oss << ',';
-                        oss << item.get<std::string>();
-                        first = false;
-                    }
-                }
-                return oss.str();
-            }
-            catch (...) {}
-            return std::string();
-        }
-
-        bool jsonBoolValue(const std::string &text, const std::string &key, bool defaultValue)
-        {
-            try
-            {
-                const auto j = nlohmann::json::parse(text);
-                if (!j.contains(key)) return defaultValue;
-                const auto &v = j.at(key);
-                if (v.is_boolean()) return v.get<bool>();
-                if (v.is_number()) return v.get<int>() != 0;
-            }
-            catch (...) {}
-            return defaultValue;
-        }
-
         std::string jsonEscape(const std::string &value)
         {
             std::ostringstream out;
@@ -842,6 +790,12 @@ namespace ProcessGuard
             m_modulesRoot = dir;
             m_allowlistLoaded = false;
         }
+    }
+
+    void ModuleManager::setPermissive(bool v)
+    {
+        std::unique_lock<std::shared_mutex> lock(m_mutex);
+        m_permissive = v;
     }
 
     void ModuleManager::setEnabledModules(std::vector<std::string> names)

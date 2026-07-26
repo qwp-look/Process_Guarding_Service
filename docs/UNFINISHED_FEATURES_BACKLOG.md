@@ -20,7 +20,7 @@
 
 2026-07-20 Artifact/Doctor 收口记录：
 
-- ArtifactStore：已补 `module artifact status [--verify]`、`module artifact policy`、Web `/api/artifact/status`、Web `/api/artifact/policy`、Qt report 区域 status/policy 控件和 `pgs_bless doctor` 的 `artifact_store` 检查。策略持久化到服务 state 目录下 `artifact_policy.cfg`，支持 `ttl_ms`、`auto_cleanup`、`verify_on_status`，TTL 范围限制为 60 秒到 7 天。
+- ArtifactStore：已补 `module artifact status [--verify]`、`module artifact policy`、Web `/api/artifact/status`、Web `/api/artifact/policy`、Qt report 区域 status/policy 控件和 `pgs_bless doctor` 的 `artifact_store` 检查。策略持久化到服务 state 目录下 `artifact_policy.cfg`，支持 `ttl_ms`、`auto_cleanup`、`verify_on_status`，TTL 范围限制为 60 秒到 7 天；2026-07-26 又补了后台过期清理、下载审计事件、敏感 artifact metadata/status/doctor 计数，以及 dump/report 默认敏感等级和 TTL 裁剪。
 - Artifact integrity：metadata id 与请求 artifact id 不一致会 fail-closed；metadata 文件名 stem 与 metadata `id` 不一致会计为 corrupt；`cleanup --all` 或 `cleanup --verify` 会移除坏 metadata 并报告清理数量。
 - Guard failure code：状态版本已到 v5，`list/get --json` 已输出 `last_failure_code`，并已有初步稳定失败码，例如 `restart.hash_mismatch`、`restart.create_process`、`restart.session_token`、`winapp.activate_failed`；Qt 守护表格已显示隔离/失败码/健康字段并可 retry/clear-quarantine。剩余问题是分类完整度、failure timeline、处理建议和专项负例覆盖。
 - 验证：`cmake --build build_cmake --config Release`、Qt Web/Qt desktop build、`ctest --test-dir build_cmake --output-on-failure`、`tools\test_core_units.bat`、`tools\build_pgs.bat`、MSYS `tools/smoke_test_pgs.sh` 在 `build_cmake` 和传统 `build` 目录均通过。
@@ -208,24 +208,27 @@
 ## P1-16 新增模块首版的产品化与负例验证
 
 - 预期行为：新增 bundled modules 不仅能通过 CLI 调用，还要有结构化 UI、doctor 状态、负例测试和安全提示。
-- 当前状态：2026-07-19 首版已完成，2026-07-20 已补 ArtifactStore status/policy/doctor 依赖能力。`dump` 可显式确认采集 minidump 到 ArtifactStore；`service_guard` 可查询/确认 start-stop-ensure 本机 SCM 服务；`file_watch` 可登记/检测文件变化并发本机事件；`policy` 可保存/应用 guard policy 模板；`remote_agent` 暴露本机 heartbeat/guard metadata 且不开 listener；`update` 可验证本地 release manifest 的 `files` hash；`script_runner` 默认禁用且只允许登记服务数据目录下脚本，run 需 `confirm=1`。Qt 可通过通用 module invoke 入口调用这些模块，Web 仍偏基础入口。
-- 未完成原因：目前是首版功能面，Web/Qt 还没有为 7 个新模块做结构化专用页面；doctor 还没有逐模块安全摘要；dump 权限失败、服务 mutation 确认、file-watch unreadable、manifest tamper、script path confinement 等负例尚未全部专项自动化。
+- 当前状态：2026-07-19 首版已完成，2026-07-20 已补 ArtifactStore status/policy/doctor 依赖能力，2026-07-26 已补一批本机安全负例 smoke。`dump` 可显式确认采集 minidump 到 ArtifactStore，dump artifact 标记高敏并裁剪 TTL；`service_guard` 可查询/确认 start-stop-ensure 本机 SCM 服务；`file_watch` 可登记/检测文件变化并发本机事件；`policy` 可保存/应用 guard policy 模板；`remote_agent` 暴露本机 heartbeat/guard metadata 且不开 listener；`update` 可验证本地 release manifest 的 `files` hash；`script_runner` 默认禁用且只允许登记服务数据目录下脚本，run 需 `confirm=1`。Qt 可通过通用 module invoke 入口调用这些模块，Web 仍偏基础入口。
+- 未完成原因：目前是首版功能面，Web/Qt 还没有为 7 个新模块做结构化专用页面；doctor 还没有逐模块安全摘要；dump 权限失败/进程不存在/超限、file-watch 规则上限/路径策略、script 目录 ACL、remote RBAC 等生产化负例还没全部专项自动化。服务 mutation 无确认、file-watch unreadable、update hash tamper、script-runner 默认禁用/路径越界/无确认 run 已进入 MSYS smoke。
 - 下一步方案：优先给 `service_guard`、`file_watch`、`policy` 做结构化 UI 和 doctor 展示；给 `dump` 和 `script_runner` 保持高风险提示；`update` 在代码签名前仍只保留 verify，不实现下载/安装。
-- 测试方式：已覆盖 build、MSYS build、runtime smoke、release smoke 和 installer metadata；后续补每个模块的负例脚本和 UI smoke。
+- 测试方式：已覆盖 build、MSYS build、runtime smoke、release smoke 和 installer metadata；2026-07-26 smoke 增加 dump 无确认、service mutation 无确认、file-watch unreadable、update tamper、script-runner 禁用/路径/确认门槛。后续补每个模块的剩余负例脚本和 UI smoke。
 - 相关入口：`modules/`、`docs/MODULE_ECOSYSTEM.md`、`docs/schemas/module.manifest.schema.json`。
 - 优先级：P1
 
 ## P1-17 module install — 仓库模块下载安装
 
 - **预期行为**：`pgs_bless module install <name>` 从 [PGS_Model](https://github.com/qwp-look/PGS_Model) 拉取 `registry.json`，解析模块条目，下载 DLL 到 `modules_staging/`，校验 SHA-256，写入 `modules.lock`，移入 `modules/<name>/`，最后执行 `module load`。
-- **当前状态**：未实现。仓库结构（`registry.json`、schemas、文档）已在 PGS_Model 仓库建立。
+- **当前状态**：基础闭环已完成。PGS_Model 仓库结构（`registry.json`、schemas、文档）已建立；主仓库 CLI registry install 现在使用共享 `PGModulePolicy` helper 校验 registry/module/version 字段，限制 DLL/manifest 下载地址为 `https://raw.githubusercontent.com/...`，校验 SHA-256 和 `module.manifest.json`，并按 trust/risk 执行确认门槛；最终安装统一调用服务端 `module install <base64-dll-path> --confirm --load --source registry`，不再由 CLI 直接复制到 `modules/<name>/`。服务端 install 会强制 sidecar manifest、检查 name/ABI/risk、结构化更新 `modules.lock`、失败回滚，并在 install 成功后按请求 load。
 - **信任模型**：
   - `official`：直接安装，无额外提示
   - `curated`：安装时提示 🟡，`risk: high/critical` 额外需要 `--confirm`
   - `community`：默认拒绝，需 `--trust-community` 显式 opt-in，并展示高风险警告要求用户输入 YES 确认
-- **阻塞前提**：
-  1. `ModuleManager` JSON parser 必须先换掉（当前轻量字符串提取不足以安全解析外部仓库 manifest）
-  2. 需要稳定的网络下载 + hash 校验 + staging install + rollback 流程
+- **剩余收口**：
+  1. 用真实 PGS_Model 非 bundled 模块跑一次 live registry 正例；当前 PGS_Model 主要还是 bundled 元数据。
+  2. 增加 E2E 负例：hash mismatch、manifest/schema 缺字段、manifest 与 registry 不一致、community 未确认、high/critical 未确认、staging promote 失败、rollback 恢复。
+  3. 继续把 OperationStore、ArtifactStore、Web/Qt result parsing 中的轻量字符串提取迁移到结构化 helper。
+  4. 代码签名或 publisher policy 就绪后，为 curated/community 档增加更强信任策略。
 - **不依赖代码签名**：install 可先实现 hash 校验版本；代码签名就绪后 community 档再放开默认限制
-- **相关入口**：`tools/pgs_bless.cpp`、`src/modules/ModuleManager.cpp`、`docs/MODULE_ECOSYSTEM.md`、[PGS_Model/registry.json](https://github.com/qwp-look/PGS_Model/blob/main/registry.json)
+- **本轮验证**：已用显式 MSYS2/MinGW64 环境变量运行 `cmake -S . -B build_cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DPGS_BUILD_TESTS=ON`、`cmake --build build_cmake --config Release`、`ctest --test-dir build_cmake --output-on-failure` 通过；`build_cmake\pgs_bless.exe module install sched` 已能从真实 PGS_Model `master` registry 拉取并识别 bundled 模块。
+- **相关入口**：`tools/pgs_bless.cpp`、`src/modules/ModuleManager.cpp`、`docs/MODULE_ECOSYSTEM.md`、[PGS_Model/registry.json](https://github.com/qwp-look/PGS_Model/blob/master/registry.json)
 - **优先级**：P1
