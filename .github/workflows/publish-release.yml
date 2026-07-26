@@ -160,36 +160,36 @@ jobs:
           $manifestHash = (Get-FileHash -LiteralPath $env:RELEASE_MANIFEST -Algorithm SHA256).Hash
           $sbomHash = (Get-FileHash -LiteralPath $env:SBOM -Algorithm SHA256).Hash
           $body = @"
-ProcessGuard Service $env:PGS_VERSION release.
+          ProcessGuard Service $env:PGS_VERSION release.
 
-Source ref:
-- $env:GITHUB_REF_NAME ($env:GITHUB_SHA)
+          Source ref:
+          - $env:GITHUB_REF_NAME ($env:GITHUB_SHA)
 
-Assets:
-- $([IO.Path]::GetFileName($env:INSTALLER)) - installer, SHA256 $installerHash
-- $([IO.Path]::GetFileName($env:RELEASE_ZIP)) - portable release tree, SHA256 $zipHash
-- $([IO.Path]::GetFileName($env:SHA256SUMS)) - release asset checksums, SHA256 $checksumsHash
-- $([IO.Path]::GetFileName($env:RELEASE_MANIFEST)) - file/module manifest, SHA256 $manifestHash
-- $([IO.Path]::GetFileName($env:SBOM)) - SPDX SBOM, SHA256 $sbomHash
+          Assets:
+          - $([IO.Path]::GetFileName($env:INSTALLER)) - installer, SHA256 $installerHash
+          - $([IO.Path]::GetFileName($env:RELEASE_ZIP)) - portable release tree, SHA256 $zipHash
+          - $([IO.Path]::GetFileName($env:SHA256SUMS)) - release asset checksums, SHA256 $checksumsHash
+          - $([IO.Path]::GetFileName($env:RELEASE_MANIFEST)) - file/module manifest, SHA256 $manifestHash
+          - $([IO.Path]::GetFileName($env:SBOM)) - SPDX SBOM, SHA256 $sbomHash
 
-Supply-chain metadata:
-- release-manifest.json records release tree files, hashes, source commit, toolchain versions, and modules.lock.
-- sbom.spdx.json is generated from the exact release tree.
-- GitHub Actions artifact attestation is generated for the installer, portable zip, checksum file, release manifest, and SBOM.
+          Supply-chain metadata:
+          - release-manifest.json records release tree files, hashes, source commit, toolchain versions, and modules.lock.
+          - sbom.spdx.json is generated from the exact release tree.
+          - GitHub Actions artifact attestation is generated for the installer, portable zip, checksum file, release manifest, and SBOM.
 
-Includes:
-- hardened admin web remote mode with TLS/RBAC/audit/CSRF gates
-- hardened cluster dashboard with API token, HTTPS, node TLS verification, and safe registry handling
-- lightweight Qt TCP HTTP shim for Windows VM response reliability
-- refreshed self-contained release tree with Qt/OpenSSL runtime closure
-- bundled metrics, backup, eventlog, and Windows-native notify modules
-- Inno Setup installer plus portable zip
+          Includes:
+          - hardened admin web remote mode with TLS/RBAC/audit/CSRF gates
+          - hardened cluster dashboard with API token, HTTPS, node TLS verification, and safe registry handling
+          - lightweight Qt TCP HTTP shim for Windows VM response reliability
+          - refreshed self-contained release tree with Qt/OpenSSL runtime closure
+          - bundled metrics, backup, eventlog, and Windows-native notify modules
+          - Inno Setup installer plus portable zip
 
-Validation completed by this workflow:
-- tools\verify.bat from the checked-out ref
-- tools\build_installer.bat, which rebuilds release\ and installer\Output from the checked-out ref
-- release manifest, SBOM, SHA256SUMS, and artifact attestation generation from CI outputs
-"@
+          Validation completed by this workflow:
+          - tools\verify.bat from the checked-out ref
+          - tools\build_installer.bat, which rebuilds release\ and installer\Output from the checked-out ref
+          - release manifest, SBOM, SHA256SUMS, and artifact attestation generation from CI outputs
+          "@
 
           $release = $null
           try {
