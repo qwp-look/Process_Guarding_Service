@@ -140,15 +140,16 @@ echo "[2/$TOTAL_STEPS] Compiling PGS core..."
 echo "[3/$TOTAL_STEPS] Compiling module manager..."
 "$GXX" $CXXFLAGS -c src/modules/ModuleManager.cpp -o "$BUILD_DIR/ModuleManager.o"
 
-echo "[4/$TOTAL_STEPS] Compiling PGS protocol layer..."
+echo "[4/$TOTAL_STEPS] Compiling PGS protocol and module install handlers..."
 "$GXX" $CXXFLAGS -c src/service/PGSProtocol.cpp -o "$BUILD_DIR/PGSProtocol.o"
+"$GXX" $CXXFLAGS -c src/service/PGSModuleInstall.cpp -o "$BUILD_DIR/PGSModuleInstall.o"
 
 echo "[5/$TOTAL_STEPS] Compiling service host..."
 "$GXX" $CXXFLAGS -c src/service/pgs_service.cpp -o "$BUILD_DIR/pgs_service.o"
 
 echo "[6/$TOTAL_STEPS] Linking pgs_service.exe..."
 "$GXX" -std=c++17 -Wall -Wextra -O2 \
-  "$BUILD_DIR/PGLogger.o" "$BUILD_DIR/PGS.o" "$BUILD_DIR/PGSProtocol.o" "$BUILD_DIR/ModuleManager.o" "$BUILD_DIR/pgs_service.o" \
+  "$BUILD_DIR/PGLogger.o" "$BUILD_DIR/PGS.o" "$BUILD_DIR/PGSProtocol.o" "$BUILD_DIR/PGSModuleInstall.o" "$BUILD_DIR/ModuleManager.o" "$BUILD_DIR/pgs_service.o" \
   -o "$BUILD_DIR/pgs_service.exe" \
   -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
 
@@ -163,8 +164,9 @@ echo "[9/$TOTAL_STEPS] Building smoke_worker.exe..."
 
 echo "[10/$TOTAL_STEPS] Building pgs_bless.exe..."
 "$GXX" $CXXFLAGS -c src/common/PGSClient.cpp -o "$BUILD_DIR/PGSClient.o"
-"$GXX" $CXXFLAGS tools/pgs_bless.cpp "$BUILD_DIR/PGSClient.o" "$BUILD_DIR/ModuleManager.o" "$BUILD_DIR/PGLogger.o" -o "$BUILD_DIR/pgs_bless.exe" \
-  -lws2_32 -ladvapi32 -lbcrypt -lwintrust -lole32 -lshell32
+"$GXX" $CXXFLAGS -c tools/PGSRegistryInstall.cpp -o "$BUILD_DIR/PGSRegistryInstall.o"
+"$GXX" $CXXFLAGS tools/pgs_bless.cpp "$BUILD_DIR/PGSRegistryInstall.o" "$BUILD_DIR/PGSClient.o" "$BUILD_DIR/ModuleManager.o" "$BUILD_DIR/PGLogger.o" -o "$BUILD_DIR/pgs_bless.exe" \
+  -lws2_32 -lwinhttp -ladvapi32 -lbcrypt -lwintrust -lole32 -lshell32
 
 build_module 11 sched pgs_sched_module "modules/sched/SchedCron.cpp modules/sched/pgs_sched_module.cpp"
 build_module 12 health pgs_health_module "modules/health/pgs_health_module.cpp"

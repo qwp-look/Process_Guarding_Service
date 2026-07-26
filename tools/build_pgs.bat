@@ -52,10 +52,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [4/26] Compiling PGS protocol layer...
+echo [4/26] Compiling PGS protocol and module install handlers...
 "%COMPILER%" %CXXFLAGS% -c src\service\PGSProtocol.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGSProtocol.o
 if errorlevel 1 (
     echo Failed: src\service\PGSProtocol.cpp
+    popd
+    exit /b 1
+)
+"%COMPILER%" %CXXFLAGS% -c src\service\PGSModuleInstall.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGSModuleInstall.o
+if errorlevel 1 (
+    echo Failed: src\service\PGSModuleInstall.cpp
     popd
     exit /b 1
 )
@@ -69,7 +75,7 @@ if errorlevel 1 (
 )
 
 echo [6/26] Linking pgs_service.exe...
-"%COMPILER%" -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\PGSProtocol.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
+"%COMPILER%" -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\PGSProtocol.o %BUILD_DIR%\PGSModuleInstall.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
 if errorlevel 1 (
     echo Failed: link pgs_service.exe
     popd
@@ -107,7 +113,13 @@ if errorlevel 1 (
     popd
     exit /b 1
 )
-"%COMPILER%" %CXXFLAGS% -o %BUILD_DIR%\pgs_bless.exe tools\pgs_bless.cpp %BUILD_DIR%\PGSClient.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\PGLogger.o -I %INCLUDE_DIR% -lws2_32 -lwinhttp -ladvapi32 -lbcrypt -lwintrust -lole32 -lshell32
+"%COMPILER%" %CXXFLAGS% -c tools\PGSRegistryInstall.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGSRegistryInstall.o
+if errorlevel 1 (
+    echo Failed: tools\PGSRegistryInstall.cpp
+    popd
+    exit /b 1
+)
+"%COMPILER%" %CXXFLAGS% -o %BUILD_DIR%\pgs_bless.exe tools\pgs_bless.cpp %BUILD_DIR%\PGSRegistryInstall.o %BUILD_DIR%\PGSClient.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\PGLogger.o -I %INCLUDE_DIR% -lws2_32 -lwinhttp -ladvapi32 -lbcrypt -lwintrust -lole32 -lshell32
 if errorlevel 1 (
     echo Failed: tools\pgs_bless.cpp
     popd
