@@ -5,10 +5,11 @@
   "abi": 3,
   "summary": "Local Windows service guard helper.",
   "risk": "medium",
-  "capabilities": ["service.query", "service.start", "service.stop"],
+  "capabilities": ["service.query", "service.start", "service.stop", "service.policy", "event.emit"],
   "methods": [
     {"name": "service_guard.query", "risk": "low", "sync": true, "required_capabilities": ["service.query"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
     {"name": "service_guard.start", "risk": "medium", "sync": true, "required_capabilities": ["service.start"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
-    {"name": "service_guard.stop", "risk": "medium", "sync": true, "required_capabilities": ["service.stop"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+    {"name": "service_guard.stop", "risk": "medium", "sync": true, "required_capabilities": ["service.stop"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "service_guard.policy", "risk": "medium", "sync": true, "required_capabilities": ["service.policy"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
   ]
 }

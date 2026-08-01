@@ -20,7 +20,7 @@
 
 2026-07-20 Artifact/Doctor 收口记录：
 
-- ArtifactStore：已补 `module artifact status [--verify]`、`module artifact policy`、Web `/api/artifact/status`、Web `/api/artifact/policy`、Qt report 区域 status/policy 控件和 `pgs_bless doctor` 的 `artifact_store` 检查。策略持久化到服务 state 目录下 `artifact_policy.cfg`，支持 `ttl_ms`、`auto_cleanup`、`verify_on_status`，TTL 范围限制为 60 秒到 7 天；2026-07-26 又补了后台过期清理、下载审计事件、敏感 artifact metadata/status/doctor 计数，以及 dump/report 默认敏感等级和 TTL 裁剪。
+- ArtifactStore：已补 `module artifact status [--verify]`、`module artifact policy`、Web `/api/artifact/status`、Web `/api/artifact/policy`、Qt report 区域 status/policy 控件和 `pgs_bless doctor` 的 `artifact_store` 检查。策略持久化到服务 state 目录下 `artifact_policy.cfg`，支持 `ttl_ms`、`auto_cleanup`、`verify_on_status`、`max_artifact_bytes`、`max_total_bytes`；TTL 范围限制为 60 秒到 7 天；artifact 单文件配额默认 16MB、允许 64KB..64MB，总量配额默认 256MB、允许 1MB..1GB，且总量不能小于单文件上限。2026-07-26 又补了后台过期清理、下载审计事件、敏感 artifact metadata/status/doctor 计数，以及 dump/report 默认敏感等级和 TTL 裁剪；2026-07-28 补了 CLI/Web/Qt 配额策略入口和 smoke 覆盖。
 - Artifact integrity：metadata id 与请求 artifact id 不一致会 fail-closed；metadata 文件名 stem 与 metadata `id` 不一致会计为 corrupt；`cleanup --all` 或 `cleanup --verify` 会移除坏 metadata 并报告清理数量。
 - Guard failure code：状态版本已到 v5，`list/get --json` 已输出 `last_failure_code`，并已有初步稳定失败码，例如 `restart.hash_mismatch`、`restart.create_process`、`restart.session_token`、`winapp.activate_failed`；Qt 守护表格已显示隔离/失败码/健康字段并可 retry/clear-quarantine。剩余问题是分类完整度、failure timeline、处理建议和专项负例覆盖。
 - 验证：`cmake --build build_cmake --config Release`、Qt Web/Qt desktop build、`ctest --test-dir build_cmake --output-on-failure`、`tools\test_core_units.bat`、`tools\build_pgs.bat`、MSYS `tools/smoke_test_pgs.sh` 在 `build_cmake` 和传统 `build` 目录均通过。
@@ -40,7 +40,7 @@
 
 2026-07-20 Health smoke 收口补充：
 
-- Health negative smoke：`tools/smoke_test_pgs.sh` 已补 TCP closed 和 HTTP unexpected status 两类负例；TCP 探针连本机空闲端口会进入 `unhealthy` 并返回 `tcp connect failed...`，HTTP 探针连本机临时 500 响应服务且 `expected_status=200` 会进入 `unhealthy` 并返回 `http unexpected status=500`。
+- Health negative smoke：`tools/smoke_test_pgs.sh` 已补 TCP closed、TCP DNS failure、HTTP unexpected status 和 HTTP timeout 负例；TCP 探针连本机空闲端口会进入 `unhealthy` 并返回 `tcp connect failed...`，TCP DNS 失败会返回 `tcp resolve failed...`，HTTP 探针连本机临时 500 响应服务且 `expected_status=200` 会进入 `unhealthy` 并返回 `http unexpected status=500`，HTTP timeout 会返回 `http request failed...`。
 - Smoke 稳定性：smoke 默认端口改为动态空闲端口，仍可用 `PGS_SMOKE_PORT` 显式覆盖；artifact 流程前会清理旧 artifact，避免复用 `build/local_pd_smoke` 时因历史数据导致 `count` 断言误报。
 - 验证：带显式 MSYS2/MinGW 环境变量运行 `PGS_BUILD_DIR=build ./tools/smoke_test_pgs.sh` 已通过完整 smoke。
 
@@ -178,10 +178,10 @@
 ## P1-13 Health Check 执行引擎
 
 - 预期行为：`health-check` 不只存配置，还能按策略执行探针；进程假活、HTTP/TCP 不健康、资源异常时触发重启或告警。
-- 当前状态：2026-07-18 核心执行引擎已完成，2026-07-20 Qt 操作入口和关键负例 smoke 已补齐。核心新增独立 `healthLoop`，不会占用 monitor 重启线程或 TCP client worker；支持 `process`、`tcp`、`http` 三类探针；配置支持 `enabled`、`type`、`interval_ms`/`interval_sec`、`timeout_ms`、`failures`、`action`。`action` 支持 `event`/`none`/`restart`/`quarantine`，其中告警型 `alert`/`notify` 会归一为 `event`，实际本机通知交给 Notify 模块。`list/get --json` 新增 `health_status`、`health_last_message`、`health_last_check`、`health_last_ok`、`health_last_failure`、`health_next_check`、`health_failure_count`。Web 已有 health JSON set/get/clear；Qt 守护表格页已新增健康策略表单，支持 process/tcp/http 配置、set/get/clear 和选中 guard 自动填 PID；smoke 已覆盖 `process` healthy、TCP closed unhealthy、HTTP unexpected status unhealthy。
-- 未完成原因：核心探针执行、Web/Qt 操作入口和 TCP/HTTP 主要负例已完成；timeout、DNS failure 以及 health action `restart` / `quarantine` 的显式 E2E 仍需继续沉淀。自定义脚本探针仍故意不开放，等权限模型、OperationStore 和审计留存成熟后再评估。
-- 下一步方案：给 timeout、DNS failure 增加专项 smoke；把 health action `restart` / `quarantine` 做成显式 E2E。
-- 测试方式：已用显式 MSYS2/MinGW 环境变量运行 `tools\build_pgs.bat`、`tools\test_core_units.bat`、`tools\smoke_test_pgs.sh` 通过；smoke 覆盖 `process` 探针进入 healthy、TCP closed 进入 unhealthy、HTTP 500 unexpected status 进入 unhealthy，以及隔离清理不被新字段破坏；Qt health policy UI 构建验证通过。
+- 当前状态：2026-07-18 核心执行引擎已完成，2026-07-20 Qt 操作入口和关键负例 smoke 已补齐，2026-07-28 又补 timeout/DNS 负例。核心新增独立 `healthLoop`，不会占用 monitor 重启线程或 TCP client worker；支持 `process`、`tcp`、`http` 三类探针；配置支持 `enabled`、`type`、`interval_ms`/`interval_sec`、`timeout_ms`、`failures`、`action`。`action` 支持 `event`/`none`/`restart`/`quarantine`，其中告警型 `alert`/`notify` 会归一为 `event`，实际本机通知交给 Notify 模块。`list/get --json` 新增 `health_status`、`health_last_message`、`health_last_check`、`health_last_ok`、`health_last_failure`、`health_next_check`、`health_failure_count`。Web 已有 health JSON set/get/clear；Qt 守护表格页已新增健康策略表单，支持 process/tcp/http 配置、set/get/clear 和选中 guard 自动填 PID；smoke 已覆盖 `process` healthy、TCP closed/TCP DNS failure unhealthy、HTTP unexpected status/HTTP timeout unhealthy，以及 health action `restart` / `quarantine` E2E。
+- 未完成原因：核心探针执行、Web/Qt 操作入口、TCP/HTTP 主要负例和 restart/quarantine 动作链路已完成；自定义脚本探针仍故意不开放，等权限模型、OperationStore 和审计留存成熟后再评估；UI 仍缺按 failure code 分组的处理建议。
+- 下一步方案：后续补按 failure code 分组的 UI 处理建议和 failure action 审计说明。
+- 测试方式：已用显式 MSYS2/MinGW 环境变量运行 `tools\build_pgs.bat`、`tools\test_core_units.bat`、`tools\smoke_test_pgs.sh` 通过；smoke 覆盖 `process` 探针进入 healthy、TCP closed 进入 unhealthy、TCP DNS resolve failed 进入 unhealthy、HTTP 500 unexpected status 进入 unhealthy、HTTP timeout 进入 unhealthy、health restart 触发新 pid、health quarantine 进入 `health.failed` 隔离态，以及隔离清理不被新字段破坏；Qt health policy UI 构建验证通过。
 - 相关入口：`src/service/PGS.cpp`、`src/service/PGSProtocol.cpp`、`docs/GUARD_POLICIES.md`、Web/Qt guard policy 表单。
 - 优先级：P1
 
@@ -208,10 +208,10 @@
 ## P1-16 新增模块首版的产品化与负例验证
 
 - 预期行为：新增 bundled modules 不仅能通过 CLI 调用，还要有结构化 UI、doctor 状态、负例测试和安全提示。
-- 当前状态：2026-07-19 首版已完成，2026-07-20 已补 ArtifactStore status/policy/doctor 依赖能力，2026-07-26 已补一批本机安全负例 smoke。`dump` 可显式确认采集 minidump 到 ArtifactStore，dump artifact 标记高敏并裁剪 TTL；`service_guard` 可查询/确认 start-stop-ensure 本机 SCM 服务；`file_watch` 可登记/检测文件变化并发本机事件；`policy` 可保存/应用 guard policy 模板；`remote_agent` 暴露本机 heartbeat/guard metadata 且不开 listener；`update` 可验证本地 release manifest 的 `files` hash；`script_runner` 默认禁用且只允许登记服务数据目录下脚本，run 需 `confirm=1`。Qt 可通过通用 module invoke 入口调用这些模块，Web 仍偏基础入口。
-- 未完成原因：目前是首版功能面，Web/Qt 还没有为 7 个新模块做结构化专用页面；doctor 还没有逐模块安全摘要；dump 权限失败/进程不存在/超限、file-watch 规则上限/路径策略、script 目录 ACL、remote RBAC 等生产化负例还没全部专项自动化。服务 mutation 无确认、file-watch unreadable、update hash tamper、script-runner 默认禁用/路径越界/无确认 run 已进入 MSYS smoke。
-- 下一步方案：优先给 `service_guard`、`file_watch`、`policy` 做结构化 UI 和 doctor 展示；给 `dump` 和 `script_runner` 保持高风险提示；`update` 在代码签名前仍只保留 verify，不实现下载/安装。
-- 测试方式：已覆盖 build、MSYS build、runtime smoke、release smoke 和 installer metadata；2026-07-26 smoke 增加 dump 无确认、service mutation 无确认、file-watch unreadable、update tamper、script-runner 禁用/路径/确认门槛。后续补每个模块的剩余负例脚本和 UI smoke。
+- 当前状态：2026-07-19 首版已完成，2026-07-20 已补 ArtifactStore status/policy/doctor 依赖能力，2026-07-26 已补一批本机安全负例 smoke，2026-07-28 又补 `service_guard`、`file_watch` 和 `script_runner` 生产边界。`dump` 可显式确认采集 minidump 到 ArtifactStore，dump artifact 标记高敏并裁剪 TTL；`service_guard` 可查询/确认 start-stop-ensure 本机 SCM 服务，现已默认拒绝受保护 SCM 服务、支持持久化 mutation allowlist、受保护服务额外 opt-in，并写 mutation/policy 审计事件；`file_watch` 可登记/检测文件变化并发本机事件，现已限制最多 64 条规则、只接受本机绝对盘符路径，并拒绝 UNC/device/ADS/Windows 系统目录/System Volume Information/Recycle Bin 路径，doctor 也会展示策略；`policy` 可保存/应用 guard policy 模板；`remote_agent` 暴露本机 heartbeat/guard metadata 且不开 listener；`update` 可验证本地 release manifest 的 `files` hash；`script_runner` 默认禁用且只允许登记服务数据目录下脚本，登记/运行都做 final-path 校验，登记时 pin SHA-256，run 前重验 hash，run 需 `confirm=1` 并写审计事件。Qt 可通过通用 module invoke 入口调用这些模块，Web 仍偏基础入口。
+- 未完成原因：目前是首版功能面，Web/Qt 还没有为 7 个新模块做结构化专用页面；doctor 已有 ArtifactStore、service_guard、file_watch 和 script_runner 摘要，但还没有逐模块完整安全摘要；dump 权限失败/进程不存在/超限、script 目录 ACL/签名/remote RBAC 等生产化负例还没全部专项自动化。服务 mutation 无确认/受保护服务拒绝/allowlist set-clear、file-watch unreadable/系统路径拒绝、update hash tamper、script-runner 默认禁用/路径越界/无确认 run/hash tamper 已进入 smoke。
+- 下一步方案：优先给 `service_guard`、`policy` 做结构化 UI 和高风险提示；给 `dump` 和 `script_runner` 保持高风险提示；`file_watch` 后续补 UI 风险提示和更细 allow/deny 配置；`update` 在代码签名前仍只保留 verify，不实现下载/安装。
+- 测试方式：已覆盖 build、MSYS build、runtime smoke、release smoke 和 installer metadata；2026-07-28 smoke 增加 doctor `service_guard`/`file_watch`/`script_runner` 策略字段、`service-guard policy` 确认门槛和 set/clear、`EventLog` confirmed mutation protected-service 拒绝与 `service_guard.mutation-denied` 审计、file-watch status 策略字段和 Windows 系统路径拒绝、script-runner 登记返回 `sha256`、篡改后 run hash mismatch 和 `script_runner.run-denied` 审计；2026-07-26 smoke 增加 dump 无确认、service mutation 无确认、file-watch unreadable、update tamper、script-runner 禁用/路径/确认门槛。后续补每个模块的剩余负例脚本和 UI smoke。
 - 相关入口：`modules/`、`docs/MODULE_ECOSYSTEM.md`、`docs/schemas/module.manifest.schema.json`。
 - 优先级：P1
 

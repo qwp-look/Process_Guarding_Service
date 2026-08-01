@@ -353,7 +353,7 @@ copy /Y modules\update\module.manifest.json "%BUILD_DIR%\modules\update\module.m
 REM Script runner module: disabled-by-default restricted local script runner.
 echo [25/26] Building pgs_script_runner_module.dll...
 if not exist "%BUILD_DIR%\modules\script_runner" mkdir "%BUILD_DIR%\modules\script_runner"
-"%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\script_runner\pgs_script_runner_module.dll" modules\script_runner\pgs_script_runner_module.cpp -I %INCLUDE_DIR%
+"%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\script_runner\pgs_script_runner_module.dll" modules\script_runner\pgs_script_runner_module.cpp -I %INCLUDE_DIR% -lbcrypt
 if errorlevel 1 (
     echo Failed: modules\script_runner\pgs_script_runner_module.cpp
     popd

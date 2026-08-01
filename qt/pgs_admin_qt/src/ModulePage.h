@@ -100,6 +100,8 @@ private:
     QPushButton *m_btnArtifactMeta = nullptr;
     QPushButton *m_btnArtifactDownload = nullptr;
     QLineEdit *m_artifactTtlEdit = nullptr;
+    QLineEdit *m_artifactMaxBytesEdit = nullptr;
+    QLineEdit *m_artifactMaxTotalBytesEdit = nullptr;
     QCheckBox *m_artifactAutoCleanupCheck = nullptr;
     QCheckBox *m_artifactVerifyStatusCheck = nullptr;
     QPushButton *m_btnArtifactStatus = nullptr;

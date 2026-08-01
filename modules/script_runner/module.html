@@ -1,5 +1,5 @@
 <h3>Script Runner</h3>
-<p>Restricted local script runner. Default is disabled; scripts must be registered under the module data scripts directory and run with confirm=1.</p>
+<p>Restricted local script runner. Default is disabled; scripts must resolve under the module data scripts directory, are pinned by SHA-256 at registration, and run with confirm=1.</p>
 <pre>op=status
 op=config;enabled=1
 op=add;id=job;path_b64=...;args_b64=...

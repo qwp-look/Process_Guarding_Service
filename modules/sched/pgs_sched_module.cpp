@@ -620,7 +620,18 @@ namespace
             return "";
         std::wstring w(path);
         std::size_t slash = w.find_last_of(L"\\/");
-        return (slash == std::wstring::npos) ? std::string(".") : std::string(w.begin(), w.begin() + slash);
+        if (slash == std::wstring::npos)
+            return std::string(".");
+        const std::wstring dir = w.substr(0, slash);
+        const int needed = WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (needed <= 0)
+            return "";
+        std::string out(static_cast<std::size_t>(needed), '\0');
+        if (WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, out.data(), needed, nullptr, nullptr) <= 0)
+            return "";
+        if (!out.empty() && out.back() == '\0')
+            out.pop_back();
+        return out;
     }
 } // namespace
 

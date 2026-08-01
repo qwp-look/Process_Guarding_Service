@@ -12,11 +12,11 @@
 
 2026-07-19 Web/模块锁安全收口补充：本地 Web 控制台已改为 HttpOnly `pgs_local_session` cookie + `X-PGS-CSRF`，页面不再嵌入可读 bearer token；`modules.lock` 现在在存在但损坏时会 fail-closed，不再退回 name-only allowlist。
 
-2026-07-20 Artifact/Doctor 安全补充：ArtifactStore 已补 operator-facing `status/policy`、Web/Qt 基础控件和 doctor `artifact_store` 检查；metadata id 与请求 id 不一致、metadata 文件名 stem 与 metadata `id` 不一致会按 corrupt/fail-closed 处理；`cleanup --all` 或 `cleanup --verify` 可移除坏 metadata。Guard 状态已到 v5，`last_failure_code` 已进入 `list/get --json`；Qt 守护表格已补隔离/失败码/健康字段和 retry/clear-quarantine 操作。剩余是失败码分类、failure history、处理建议和专项负例。
+2026-07-28 Artifact/file_watch 安全补充：ArtifactStore policy 已支持受限可配置 `max_artifact_bytes` / `max_total_bytes`，默认仍为 16MB/256MB，允许范围分别为 64KB..64MB 和 1MB..1GB，且总量必须不小于单 artifact 上限；CLI/Web/Qt policy 入口和 smoke 已同步覆盖。`file_watch` 现已限制最多 64 条规则，只接受本机绝对盘符路径，并默认拒绝 UNC/device/ADS/Windows 系统目录/System Volume Information/Recycle Bin 路径；doctor 暴露 `file_watch` 状态和路径策略，smoke 覆盖敏感路径拒绝。Guard 状态已到 v5，`last_failure_code` 已进入 `list/get --json`；Qt 守护表格已补隔离/失败码/健康字段和 retry/clear-quarantine 操作。剩余是失败码分类、failure history、处理建议和专项负例。
 
 2026-07-20 Qt 可见性补充：Qt 已新增 Doctor / Repair 页，直接渲染 CLI doctor JSON，并暴露 state ACL、modules ACL、modules.lock 修复按钮；Qt 守护表格已显示隔离、失败码、健康状态并可对选中 guard 执行 retry / clear-quarantine。安全剩余项调整为 failure taxonomy、failure history、专项负例和 repair schema 完整性，而不是 Qt 完全缺入口。
 
-2026-07-20 Qt Health / Cluster/Web 交互补充：Qt 守护表格页已补 Health policy 表单，可配置 process/tcp/http 探针并执行 health-check set/get/clear；Web 已补 Structured Result 区域，结构化渲染 module/scheduler/report/artifact 等响应且首页 smoke 确认不含 `window.PGS_API_TOKEN`；Cluster Dashboard 已补节点 edit/test、凭据替换/清空和 guard 隔离/健康/失败码详情。TCP closed 和 HTTP unexpected status 已进入 smoke 负例；Cluster add/list/edit/test/clear/remove 已进入本地 HTTP API smoke 和 VM acceptance 扩展，且覆盖凭据不回显/不明文落盘断言。安全剩余项调整为真实 remote gateway 验收、Cluster mutation 审计策略、浏览器 DOM/UI 自动化覆盖、health timeout/DNS 负例以及 health restart/quarantine 动作 E2E。
+2026-07-20 Qt Health / Cluster/Web 交互补充：Qt 守护表格页已补 Health policy 表单，可配置 process/tcp/http 探针并执行 health-check set/get/clear；Web 已补 Structured Result 区域，结构化渲染 module/scheduler/report/artifact 等响应且首页 smoke 确认不含 `window.PGS_API_TOKEN`；Cluster Dashboard 已补节点 edit/test、凭据替换/清空和 guard 隔离/健康/失败码详情。TCP closed、TCP DNS failure、HTTP unexpected status 和 HTTP timeout 已进入 smoke 负例；Cluster add/list/edit/test/clear/remove 已进入本地 HTTP API smoke 和 VM acceptance 扩展，且覆盖凭据不回显/不明文落盘断言。安全剩余项调整为真实 remote gateway 验收、Cluster mutation 审计策略、浏览器 DOM/UI 自动化覆盖以及 health failure action 审计/处理建议。
 
 ## P0-01 Web 本地页面嵌入 API token
 
@@ -53,11 +53,11 @@
 ## P0-04 bootstrap token 文件 ACL 仍需 fail-closed
 
 - 影响组件：服务首次启动 token 生成
-- 当前行为：首次无归档时生成 token 并写入 `pgs_initial_token.txt`，目录 ACL 设计为 SYSTEM + Administrators，但 ACL 写入失败时需要进一步确认是否严格失败。
-- 风险/攻击面：初始 token 若落入宽权限目录，普通本机用户可读取管理 token。
-- 建议修复：初始 token 文件写入前后检查 DACL；ACL 设置失败时服务拒绝启动并要求管理员修复目录；提供 `pgs_service repair-state-acl`。
+- 当前行为：首次无归档时生成 token 并写入 `pgs_initial_token.txt`，目录 ACL 设计为 SYSTEM + Administrators + 当前运行身份。2026-07-28 已改为 fail-closed：写入前若无法保护 state 目录 ACL 会拒绝启动；写入后若无法保护 token 文件 ACL，会删除 token 文件并拒绝启动。
+- 风险/攻击面：初始 token 若落入宽权限目录，普通本机用户可读取管理 token；fail-closed 已覆盖服务自身写入路径，剩余是人为复制/备份 token 文件和异常 ProgramData 权限的专项验证。
+- 建议修复：保留 `pgs_bless doctor repair-state-acl` 作为管理员修复入口；后续补模拟 ACL 失败的专项测试和 doctor 对现有 token 文件 ACL 的只读诊断。
 - 涉及入口：`src/service/PGS.cpp` 的 `writeInitialTokenFile()`、`initialize()`，`docs/SERVICE_MODE_GUIDE.md`。
-- 验证方式：模拟 ProgramData state 目录宽权限/ACL 设置失败，服务应 fail-closed；正常目录首次启动仍写 token。
+- 验证方式：正常目录首次启动仍写 token；模拟 ProgramData state 目录宽权限/ACL 设置失败时服务应 fail-closed；现有 token 文件 ACL 由 doctor/repair 检查修复。
 - 是否阻塞功能版 release：否。阻塞安全版 release。
 
 ## P1-05 `--allow-all-modules` 生命周期和撤销
@@ -88,7 +88,7 @@
 - 建议修复：继续补全 failure code taxonomy / failure history；UI 增加“需要人工处理”视图；对可恢复与不可恢复失败给出不同 retry-after 策略；专项负例固定 hash mismatch / file missing / access denied / Session token / WinApp activation 失败。
 - 涉及入口：`src/service/PGS.cpp` 的 restore/restart failure 分支、`src/service/PGSProtocol.cpp` 的 guard summary/guard retry、`tools/pgs_bless.cpp`。
 - 验证方式：已用显式 MSYS2/MinGW 环境变量运行 `tools\build_pgs.bat`、`tools\test_core_units.bat` 和 `tools\smoke_test_pgs.sh`，smoke 覆盖重启窗口耗尽后 quarantine 可见与 clear-quarantine。后续还需 hash mismatch / access denied / Session 失败专项负例。
-- 2026-07-20 追加验证：`tools\smoke_test_pgs.sh` 已补 TCP closed / HTTP 500 unexpected status 的 health negative smoke；后续仍需 health action `restart` / `quarantine` 显式 E2E、timeout/DNS 负例和 failure action 审计。
+- 2026-07-28 追加验证：`tools\smoke_test_pgs.sh` 已覆盖 TCP closed、TCP DNS resolve failed、HTTP 500 unexpected status、HTTP timeout 的 health negative smoke，并新增 health action `restart` / `quarantine` E2E；后续仍需 failure action 审计和按 failure code 分组的 UI 处理建议。
 - 是否阻塞功能版 release：否。隔离保留和初步 failure code 已缓解主风险，剩余是安全可观测性增强。
 
 ## P1-08 Job Object 权限/竞态的完整安全审计
@@ -164,11 +164,11 @@
 ## P2-14 ArtifactStore 留存策略与审计
 
 - 影响组件：`PGSProtocol` ArtifactStore、report 模块、CLI/Web/Qt artifact 下载。
-- 当前行为：ArtifactStore 已限制单 artifact 16MB、总量 256MB；metadata 记录 size/SHA-256、`sensitive`、`sensitivity`；CLI `module artifact get --out` 下载后会核对 size、chunk total 和 SHA-256；服务端 `module artifact chunk` 返回前会重新计算落盘 size/SHA-256，不匹配则拒绝并记录 `artifact.integrity-failed`；chunk 下载还会记录 start/complete/expired/invalid 审计事件；`module artifact cleanup [--expired|--all] [--verify]`、`module artifact status [--verify]`、`module artifact policy` 已有 operator-facing 命令；Web/Qt 有基础 status/policy 控件；doctor JSON 已包含 `artifact_store` 检查和敏感计数。策略持久化到 state 目录下 `artifact_policy.cfg`，包含 `ttl_ms`、`auto_cleanup`、`verify_on_status`。metadata id 与请求 id 或 metadata 文件名 stem 不一致会按 corrupt/fail-closed 处理。health loop 会按 5 分钟节流执行过期清理。
-- 风险/攻击面：本地管理员或磁盘损坏篡改 artifact 内容时，服务端和 CLI 均可发现，status/doctor 也能暴露基础健康状态；剩余风险是配额仍为编译期常量、远程下载场景缺更严格访问审计，Web/Qt 下载前敏感提示还不够完整。
-- 建议修复：已完成周期性 cleanup、下载审计、敏感分类、dump/report TTL 裁剪和 doctor 敏感计数。剩余是 Web/Qt 下载前显示 size/sha256 和敏感类型提示、把 max artifact bytes/max total bytes 做成受限可配置策略并纳入 doctor、远程访问审计策略。
+- 当前行为：ArtifactStore 默认限制单 artifact 16MB、总量 256MB，并可通过 `module artifact policy --max-artifact-bytes N --max-total-bytes N` 在受限范围内调整；metadata 记录 size/SHA-256、`sensitive`、`sensitivity`；CLI `module artifact get --out` 下载后会核对 size、chunk total 和 SHA-256；服务端 `module artifact chunk` 返回前会重新计算落盘 size/SHA-256，不匹配则拒绝并记录 `artifact.integrity-failed`；chunk 下载还会记录 start/complete/expired/invalid 审计事件；`module artifact cleanup [--expired|--all] [--verify]`、`module artifact status [--verify]`、`module artifact policy` 已有 operator-facing 命令；Web/Qt 有基础 status/policy 控件；doctor JSON 已包含 `artifact_store` 检查和敏感计数。策略持久化到 state 目录下 `artifact_policy.cfg`，包含 `ttl_ms`、`auto_cleanup`、`verify_on_status`、`max_artifact_bytes`、`max_total_bytes`。metadata id 与请求 id 或 metadata 文件名 stem 不一致会按 corrupt/fail-closed 处理。health loop 会按 5 分钟节流执行过期清理。
+- 风险/攻击面：本地管理员或磁盘损坏篡改 artifact 内容时，服务端和 CLI 均可发现，status/doctor 也能暴露基础健康状态；剩余风险是远程下载场景缺更严格访问审计，Web/Qt 下载前敏感提示还不够完整。
+- 建议修复：已完成周期性 cleanup、下载审计、敏感分类、dump/report TTL 裁剪、doctor 敏感计数和受限配额策略。剩余是 Web/Qt 下载前显示 size/sha256 和敏感类型提示，以及远程访问审计策略。
 - 涉及入口：`src/service/PGSProtocol.cpp`、`tools/pgs_bless.cpp`、`qt/pgs_admin_web/src/WebServer.cpp`、`qt/pgs_admin_qt/src/ModulePage.cpp`。
-- 验证方式：2026-07-26 MSYS smoke 覆盖 artifact metadata `sensitive/sensitivity`、status `sensitive` 计数、下载后 `artifact.download-complete` 事件；既有 smoke 覆盖下载 SHA-256、policy/status、cleanup。后续补总量上限和远程下载审计专项。
+- 验证方式：2026-07-28 MSYS smoke 覆盖 policy/status JSON 中的 `max_artifact_bytes` / `max_total_bytes`；2026-07-26 MSYS smoke 覆盖 artifact metadata `sensitive/sensitivity`、status `sensitive` 计数、下载后 `artifact.download-complete` 事件；既有 smoke 覆盖下载 SHA-256、policy/status、cleanup。后续补远程下载审计专项。
 - 是否阻塞功能版 release：否。建议在公开远程 artifact 下载前完成。
 
 ## P2-15 JSON/manifest/lockfile 解析需要结构化收口
@@ -194,20 +194,21 @@
 ## P1-17 Script runner 必须继续默认禁用并强化执行边界
 
 - 影响组件：`modules/script_runner`、module capability policy、服务数据目录 ACL。
-- 当前行为：`script_runner` 默认禁用；必须 `script-runner config --enable`，登记服务数据目录 `modules\script_runner\scripts` 下的脚本，且 `script-runner run --id <id> --confirm` 才会执行。模块不提供远程 shell，不接 webhook/chat，不联网。
-- 风险/攻击面：一旦启用，本质上是本机命令执行能力；如果脚本目录 ACL、path confinement、参数校验或远程 Web RBAC 不够严格，可能被滥用为提权/横向入口。
-- 建议修复：生产版保持禁用并在 UI 高风险标红；脚本登记加入 hash/signature；执行前记录审计事件、caller、args hash；Web/remote RBAC 默认禁止 script run；doctor 检查脚本目录 ACL。
+- 当前行为：`script_runner` 默认禁用；必须 `script-runner config --enable`，登记服务数据目录 `modules\script_runner\scripts` 下的脚本，且 `script-runner run --id <id> --confirm` 才会执行。模块不提供远程 shell，不接 webhook/chat，不联网。2026-07-28 已补 final-path 检查：登记和运行都会通过文件句柄解析最终路径，确认脚本真实落在 module data scripts 目录下；登记时记录 SHA-256，运行前重新 hash，不一致则 fail-closed；config/add/run deny/attempt/result 会发 `script_runner.*` 审计事件，事件包含 caller、脚本 id、hash 和 args hash。
+- 风险/攻击面：一旦启用，本质上是本机命令执行能力；final-path、hash-on-run 和审计已降低路径绕过/篡改风险，但脚本目录 ACL、签名策略和远程 Web RBAC 仍决定生产安全边界。
+- 建议修复：生产版保持禁用并在 UI 高风险标红；脚本登记继续增加签名/publisher policy；Web/remote RBAC 默认禁止 script run；doctor 后续检查脚本目录 ACL 和旧无 hash 条目；必要时用受限 token/job 执行脚本。
 - 涉及入口：`modules/script_runner/pgs_script_runner_module.cpp`、`tools/pgs_bless.cpp`、Web RBAC。
-- 验证方式：默认 run 失败；无 `--confirm` 失败；目录外脚本 add 失败；脚本目录宽 ACL 被 doctor 报告；remote viewer/operator 无权运行。
+- 验证方式：默认 run 失败；无 `--confirm` 失败；目录外脚本 add 失败；脚本篡改后 `run --confirm` 因 hash mismatch 失败并出现 `script_runner.run-denied` 事件；脚本目录宽 ACL 被 doctor 报告；remote viewer/operator 无权运行。
 - 2026-07-26 验证补充：MSYS smoke 覆盖默认禁用 run 失败、目录外 add 失败、登记受限目录内脚本、启用后无 confirm run 失败。
+- 2026-07-28 验证补充：MSYS smoke 覆盖 doctor/status 的 `path_policy=final-path-under-data-scripts`、`hash_on_run=1`、登记返回 `sha256`、篡改脚本后 run 拒绝和 `script_runner.run-denied` 审计事件。
 - 是否阻塞功能版 release：否。阻塞任何“远程脚本执行”生产承诺。
 
 ## P1-18 Service guard / file watch / update 模块的生产化边界
 
 - 影响组件：`modules/service_guard`、`modules/file_watch`、`modules/update`、notify/event pipeline。
-- 当前行为：`service_guard` 本机 SCM mutation 需要 `confirm=1`；`file_watch` 是 demand-driven check，不开后台 watcher；`update` 只验证本地 release manifest 的 `files` hash，不下载、不安装，并已修正为读取 manifest `release_root` 且忽略 artifacts 绝对路径。
-- 风险/攻击面：服务 start/stop 是高影响操作；file_watch 可能被配置到敏感文件并产生事件噪音；update 验证若未来扩展到下载/安装，必须先完成签名、回滚和 fail-closed。
-- 建议修复：service mutation 增加 allow policy 和审计；file_watch 增加规则上限、路径 allow/deny、doctor 展示；update 在代码签名和 release manifest 强制验证前不要实现网络更新或安装。
+- 当前行为：`service_guard` 本机 SCM mutation 需要 `confirm=1`，默认拒绝 `EventLog`、`WinDefend`、`MpsSvc`、`Schedule`、`RpcSs` 等受保护服务；可通过持久化 `service_guard` policy 配置 mutation allowlist，只有额外设置 `allow_protected=1` 且服务显式在 allowlist 内时才允许触碰受保护服务；mutation 和 policy 更新都会发 PGS 审计事件，doctor/status 会展示 `mutation_policy`、allowlist 状态和受保护服务数量。`file_watch` 是 demand-driven check，不开后台 watcher，最多 64 条规则，只允许本机绝对盘符路径，并拒绝 UNC/device/ADS/Windows 系统目录/System Volume Information/Recycle Bin 路径，doctor 会展示规则数、上限和路径策略；`update` 只验证本地 release manifest 的 `files` hash，不下载、不安装，并已修正为读取 manifest `release_root` 且忽略 artifacts 绝对路径。
+- 风险/攻击面：服务 start/stop 仍是高影响操作；`service_guard` 已有确认门槛、受保护服务默认拒绝、allowlist 和内存审计，但 Web/Qt 专用 UI 与远程 RBAC 还需要按高风险操作处理。file_watch 已有基础路径策略和规则上限，但仍可能产生事件噪音或被配置到业务敏感文件；update 验证若未来扩展到下载/安装，必须先完成签名、回滚和 fail-closed。
+- 建议修复：service_guard 后续补结构化 UI 风险提示、远程 RBAC 默认禁止 mutation、持久化/防篡改审计；file_watch 后续可增加更细的 operator allowlist/denylist 配置和 UI 风险提示；update 在代码签名和 release manifest 强制验证前不要实现网络更新或安装。
 - 涉及入口：`modules/service_guard/pgs_service_guard_module.cpp`、`modules/file_watch/pgs_file_watch_module.cpp`、`modules/update/pgs_update_module.cpp`。
-- 验证方式：2026-07-26 MSYS smoke 覆盖服务 mutation 无 confirm 失败、file_watch unreadable add 失败、篡改 payload 后 `update verify` hash mismatch 失败；既有 smoke 覆盖 remove/check 正向和 `artifacts` 数组绝对路径不影响 release tree verify。
+- 验证方式：2026-07-28 smoke 覆盖 doctor `service_guard`/`file_watch` 策略字段、`service-guard policy` 确认门槛、allowlist set/clear、带 confirm 操作 `EventLog` 被 `protected-service` 拒绝并出现 `service_guard.mutation-denied` 审计事件、`file-watch status` 的 `max_rules/path_policy` 和 Windows 系统路径拒绝；2026-07-26 MSYS smoke 覆盖服务 mutation 无 confirm 失败、file_watch unreadable add 失败、篡改 payload 后 `update verify` hash mismatch 失败；既有 smoke 覆盖 remove/check 正向和 `artifacts` 数组绝对路径不影响 release tree verify。
 - 是否阻塞功能版 release：否。阻塞自动更新和远程服务控制生产化。

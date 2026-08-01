@@ -79,8 +79,12 @@ constexpr std::int64_t kDefaultOperationTtlMs = 24LL * 60LL * 60LL * 1000LL;
 constexpr std::int64_t kMinArtifactRetentionTtlMs = 60LL * 1000LL;
 constexpr std::int64_t kMaxArtifactRetentionTtlMs = 7LL * 24LL * 60LL * 60LL * 1000LL;
 constexpr std::size_t kMaxOperations = 1024;
-constexpr std::uint64_t kMaxArtifactBytes = 16ull * 1024ull * 1024ull;
-constexpr std::uint64_t kMaxArtifactTotalBytes = 256ull * 1024ull * 1024ull;
+constexpr std::uint64_t kDefaultArtifactBytes = 16ull * 1024ull * 1024ull;
+constexpr std::uint64_t kDefaultArtifactTotalBytes = 256ull * 1024ull * 1024ull;
+constexpr std::uint64_t kMinArtifactBytes = 64ull * 1024ull;
+constexpr std::uint64_t kMaxArtifactBytesLimit = 64ull * 1024ull * 1024ull;
+constexpr std::uint64_t kMinArtifactTotalBytes = 1024ull * 1024ull;
+constexpr std::uint64_t kMaxArtifactTotalBytesLimit = 1024ull * 1024ull * 1024ull;
 constexpr std::uint64_t kMaxArtifactChunkBytes = 32768ull;
 
 bool isOpaqueId(const std::string &id, const std::string &prefix)
@@ -309,28 +313,32 @@ void appendCleanupDetail(std::string &detail, const std::string &item)
     detail += item;
 }
 
-std::string artifactPolicySummaryValues(std::int64_t ttlMs, bool autoCleanup, bool verifyOnStatus)
+std::string artifactPolicySummaryValues(std::int64_t ttlMs, bool autoCleanup, bool verifyOnStatus,
+                                        std::uint64_t maxArtifactBytes, std::uint64_t maxTotalBytes)
 {
     return "ttl_ms=" + std::to_string(ttlMs) +
            ";auto_cleanup=" + (autoCleanup ? std::string("1") : std::string("0")) +
            ";verify_on_status=" + (verifyOnStatus ? std::string("1") : std::string("0")) +
-           ";max_artifact_bytes=" + std::to_string(kMaxArtifactBytes) +
-           ";max_total_bytes=" + std::to_string(kMaxArtifactTotalBytes);
+           ";max_artifact_bytes=" + std::to_string(maxArtifactBytes) +
+           ";max_total_bytes=" + std::to_string(maxTotalBytes);
 }
 
-std::string artifactPolicyJson(std::int64_t ttlMs, bool autoCleanup, bool verifyOnStatus)
+std::string artifactPolicyJson(std::int64_t ttlMs, bool autoCleanup, bool verifyOnStatus,
+                               std::uint64_t maxArtifactBytes, std::uint64_t maxTotalBytes)
 {
     return "{\"ttl_ms\":" + std::to_string(ttlMs) +
            ",\"auto_cleanup\":" + std::string(autoCleanup ? "true" : "false") +
            ",\"verify_on_status\":" + std::string(verifyOnStatus ? "true" : "false") +
-           ",\"max_artifact_bytes\":" + std::to_string(kMaxArtifactBytes) +
-           ",\"max_total_bytes\":" + std::to_string(kMaxArtifactTotalBytes) + "}";
+           ",\"max_artifact_bytes\":" + std::to_string(maxArtifactBytes) +
+           ",\"max_total_bytes\":" + std::to_string(maxTotalBytes) + "}";
 }
 
 std::string artifactStatusJson(const PGS::ArtifactStoreStatus &status,
                                std::int64_t ttlMs,
                                bool autoCleanup,
-                               bool verifyOnStatus)
+                               bool verifyOnStatus,
+                               std::uint64_t maxArtifactBytes,
+                               std::uint64_t maxTotalBytes)
 {
     return "{\"store_exists\":" + std::string(status.storeExists ? "true" : "false") +
            ",\"root_secured\":" + std::string(status.rootSecured ? "true" : "false") +
@@ -344,8 +352,8 @@ std::string artifactStatusJson(const PGS::ArtifactStoreStatus &status,
            ",\"ttl_ms\":" + std::to_string(ttlMs) +
            ",\"auto_cleanup\":" + std::string(autoCleanup ? "true" : "false") +
            ",\"verify_on_status\":" + std::string(verifyOnStatus ? "true" : "false") +
-           ",\"max_artifact_bytes\":" + std::to_string(kMaxArtifactBytes) +
-           ",\"max_total_bytes\":" + std::to_string(kMaxArtifactTotalBytes) + "}";
+           ",\"max_artifact_bytes\":" + std::to_string(maxArtifactBytes) +
+           ",\"max_total_bytes\":" + std::to_string(maxTotalBytes) + "}";
 }
 
 bool isTerminalOperationStatus(const std::string &status)
@@ -391,6 +399,30 @@ bool parseArtifactBoolText(const std::string &text, bool &out)
         return true;
     }
     return false;
+}
+
+bool parseArtifactSizeText(const std::string &text, std::uint64_t minValue, std::uint64_t maxValue, std::uint64_t &out)
+{
+    const std::string value = trim(text);
+    if (value.empty())
+    {
+        return false;
+    }
+    try
+    {
+        std::size_t used = 0;
+        const unsigned long long parsed = std::stoull(value, &used, 10);
+        if (used != value.size() || parsed < minValue || parsed > maxValue)
+        {
+            return false;
+        }
+        out = static_cast<std::uint64_t>(parsed);
+        return true;
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
 }
 
 std::string clampMessage(std::string text)
@@ -518,6 +550,30 @@ void closeLaunch(SuspendedLaunch &launch)
     }
 }
 
+bool finalPathFromHandle(HANDLE handle, std::wstring &out, std::string &err)
+{
+    out.clear();
+    std::vector<wchar_t> buffer(32768, L'\0');
+    const DWORD len = GetFinalPathNameByHandleW(
+        handle, buffer.data(), static_cast<DWORD>(buffer.size()),
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (len == 0 || len >= buffer.size())
+    {
+        err = "GetFinalPathNameByHandleW failed: " + win32ErrorText(GetLastError());
+        return false;
+    }
+    out.assign(buffer.data(), len);
+    if (out.rfind(L"\\\\?\\UNC\\", 0) == 0)
+    {
+        out = L"\\\\" + out.substr(8);
+    }
+    else if (out.rfind(L"\\\\?\\", 0) == 0)
+    {
+        out = out.substr(4);
+    }
+    return true;
+}
+
 bool startSuspendedFromPath(const std::string &pathUtf8, const std::string &argsUtf8,
                             SuspendedLaunch &out, std::string &err)
 {
@@ -542,7 +598,30 @@ bool startSuspendedFromPath(const std::string &pathUtf8, const std::string &args
         err = "target executable is not a file: " + wideToUtf8(fullPath);
         return false;
     }
-    std::wstring command = quoteArgW(fullPath);
+    HANDLE file = CreateFileW(fullPath.c_str(), GENERIC_READ | FILE_READ_ATTRIBUTES,
+                              FILE_SHARE_READ | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        err = "target executable cannot be opened: " + win32ErrorText(GetLastError());
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION fileInfo{};
+    if (!GetFileInformationByHandle(file, &fileInfo) ||
+        (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        err = "target executable is not a file: " + wideToUtf8(fullPath);
+        CloseHandle(file);
+        return false;
+    }
+    std::wstring finalPath;
+    if (!finalPathFromHandle(file, finalPath, err))
+    {
+        CloseHandle(file);
+        return false;
+    }
+    CloseHandle(file);
+    std::wstring command = quoteArgW(finalPath);
     const std::wstring argsW = utf8ToWide(argsUtf8);
     if (!argsW.empty())
     {
@@ -554,8 +633,8 @@ bool startSuspendedFromPath(const std::string &pathUtf8, const std::string &args
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    const std::wstring workDir = std::filesystem::path(fullPath).parent_path().wstring();
-    if (!CreateProcessW(nullptr, writable.data(), nullptr, nullptr, FALSE,
+    const std::wstring workDir = std::filesystem::path(finalPath).parent_path().wstring();
+    if (!CreateProcessW(finalPath.c_str(), writable.data(), nullptr, nullptr, FALSE,
                         CREATE_NEW_CONSOLE | CREATE_SUSPENDED, nullptr,
                         workDir.empty() ? nullptr : workDir.c_str(), &si, &pi))
     {
@@ -563,7 +642,7 @@ bool startSuspendedFromPath(const std::string &pathUtf8, const std::string &args
         return false;
     }
     out.pid = pi.dwProcessId;
-    out.pathUtf8 = wideToUtf8(fullPath);
+    out.pathUtf8 = wideToUtf8(finalPath);
     out.process = pi.hProcess;
     out.thread = pi.hThread;
     return true;
@@ -1478,12 +1557,12 @@ std::string PGS::handleList()
 {
     std::lock_guard<std::mutex> lock(m_guardsMutex);
     std::ostringstream oss;
-    std::vector<std::uint64_t> activeGuardIds;
+    std::unordered_set<std::uint64_t> activeGuardIds;
     activeGuardIds.reserve(m_guards.size());
     std::size_t extraArchived = 0;
     for (const auto &entry : m_guards)
     {
-        activeGuardIds.push_back(entry.second.guardId);
+        activeGuardIds.insert(entry.second.guardId);
     }
     for (const auto &entry : m_persistedGuards)
     {
@@ -1491,7 +1570,7 @@ std::string PGS::handleList()
         {
             continue;
         }
-        if (std::find(activeGuardIds.begin(), activeGuardIds.end(), entry.first) == activeGuardIds.end())
+        if (activeGuardIds.find(entry.first) == activeGuardIds.end())
         {
             ++extraArchived;
         }
@@ -2346,16 +2425,20 @@ std::string PGS::handleCoreJsonRpc(const std::string &requestJson)
             return jsonRpcError(id, "CALLER_REQUIRED", "artifact.put must be called by a module");
         }
         const std::string content = base64Decode(jsonStringValueLocal(params, "content_b64"));
-        if (content.size() > kMaxArtifactBytes)
-        {
-            return jsonRpcError(id, "ARTIFACT_TOO_LARGE", "artifact exceeds max size");
-        }
         std::int64_t policyTtlMs = kDefaultOperationTtlMs;
+        std::uint64_t maxArtifactBytes = kDefaultArtifactBytes;
+        std::uint64_t maxTotalBytes = kDefaultArtifactTotalBytes;
         bool autoCleanup = true;
         {
             std::lock_guard<std::mutex> lock(m_artifactMutex);
             policyTtlMs = m_artifactRetentionTtlMs;
+            maxArtifactBytes = m_artifactMaxBytes;
+            maxTotalBytes = m_artifactMaxTotalBytes;
             autoCleanup = m_artifactAutoCleanup;
+        }
+        if (content.size() > maxArtifactBytes)
+        {
+            return jsonRpcError(id, "ARTIFACT_TOO_LARGE", "artifact exceeds max size");
         }
         ArtifactRecord rec;
         rec.id = makeOpaqueId("art_");
@@ -2429,7 +2512,7 @@ std::string PGS::handleCoreJsonRpc(const std::string &requestJson)
                 totalBytes += static_cast<std::uint64_t>(entry.file_size(ec));
             }
         }
-        if (totalBytes + rec.size > kMaxArtifactTotalBytes)
+        if (totalBytes + rec.size > maxTotalBytes)
         {
             return jsonRpcError(id, "ARTIFACT_STORE_FULL", "artifact store total size limit reached");
         }
@@ -2589,6 +2672,8 @@ PGS::ArtifactStoreStatus PGS::artifactStoreStatusLocked(bool verifyContentHash, 
 void PGS::loadArtifactPolicyLocked()
 {
     m_artifactRetentionTtlMs = kDefaultOperationTtlMs;
+    m_artifactMaxBytes = kDefaultArtifactBytes;
+    m_artifactMaxTotalBytes = kDefaultArtifactTotalBytes;
     m_artifactAutoCleanup = true;
     m_artifactVerifyOnStatus = false;
     std::string body;
@@ -2634,6 +2719,26 @@ void PGS::loadArtifactPolicyLocked()
                 m_artifactVerifyOnStatus = parsed;
             }
         }
+        else if (key == "max_artifact_bytes")
+        {
+            std::uint64_t parsed = 0;
+            if (parseArtifactSizeText(value, kMinArtifactBytes, kMaxArtifactBytesLimit, parsed))
+            {
+                m_artifactMaxBytes = parsed;
+            }
+        }
+        else if (key == "max_total_bytes")
+        {
+            std::uint64_t parsed = 0;
+            if (parseArtifactSizeText(value, kMinArtifactTotalBytes, kMaxArtifactTotalBytesLimit, parsed))
+            {
+                m_artifactMaxTotalBytes = parsed;
+            }
+        }
+    }
+    if (m_artifactMaxTotalBytes < m_artifactMaxBytes)
+    {
+        m_artifactMaxTotalBytes = m_artifactMaxBytes;
     }
 }
 
@@ -2653,7 +2758,9 @@ bool PGS::saveArtifactPolicyLocked(std::string &error) const
     }
     const std::string body = "ttl_ms=" + std::to_string(m_artifactRetentionTtlMs) + "\n" +
                              "auto_cleanup=" + std::string(m_artifactAutoCleanup ? "1" : "0") + "\n" +
-                             "verify_on_status=" + std::string(m_artifactVerifyOnStatus ? "1" : "0") + "\n";
+                             "verify_on_status=" + std::string(m_artifactVerifyOnStatus ? "1" : "0") + "\n" +
+                             "max_artifact_bytes=" + std::to_string(m_artifactMaxBytes) + "\n" +
+                             "max_total_bytes=" + std::to_string(m_artifactMaxTotalBytes) + "\n";
     if (!writeWholeFile(policyPath, body))
     {
         error = "failed to write artifact policy";
@@ -2665,7 +2772,9 @@ bool PGS::saveArtifactPolicyLocked(std::string &error) const
 
 std::string PGS::artifactPolicySummaryLocked() const
 {
-    return artifactPolicySummaryValues(m_artifactRetentionTtlMs, m_artifactAutoCleanup, m_artifactVerifyOnStatus);
+    return artifactPolicySummaryValues(m_artifactRetentionTtlMs, m_artifactAutoCleanup,
+                                       m_artifactVerifyOnStatus, m_artifactMaxBytes,
+                                       m_artifactMaxTotalBytes);
 }
 
 PGS::ArtifactCleanupResult PGS::cleanupArtifactsLocked(bool removeExpired, bool removeAll, bool verifyContentHash, std::string &detail)
@@ -2887,6 +2996,8 @@ std::string PGS::handleArtifactStatusCommand(const std::string &args)
     std::int64_t ttlMs = kDefaultOperationTtlMs;
     bool autoCleanup = true;
     bool verifyOnStatus = false;
+    std::uint64_t maxArtifactBytes = kDefaultArtifactBytes;
+    std::uint64_t maxTotalBytes = kDefaultArtifactTotalBytes;
     {
         std::lock_guard<std::mutex> lock(m_artifactMutex);
         const bool effectiveVerify = verifyContentHash || m_artifactVerifyOnStatus;
@@ -2894,8 +3005,11 @@ std::string PGS::handleArtifactStatusCommand(const std::string &args)
         ttlMs = m_artifactRetentionTtlMs;
         autoCleanup = m_artifactAutoCleanup;
         verifyOnStatus = m_artifactVerifyOnStatus;
+        maxArtifactBytes = m_artifactMaxBytes;
+        maxTotalBytes = m_artifactMaxTotalBytes;
     }
-    const std::string statusJson = artifactStatusJson(status, ttlMs, autoCleanup, verifyOnStatus);
+    const std::string statusJson = artifactStatusJson(status, ttlMs, autoCleanup, verifyOnStatus,
+                                                      maxArtifactBytes, maxTotalBytes);
     std::ostringstream out;
     out << "OK artifact status store_exists=" << (status.storeExists ? "1" : "0")
         << ";root_secured=" << (status.rootSecured ? "1" : "0")
@@ -2909,6 +3023,8 @@ std::string PGS::handleArtifactStatusCommand(const std::string &args)
         << ";ttl_ms=" << ttlMs
         << ";auto_cleanup=" << (autoCleanup ? "1" : "0")
         << ";verify_on_status=" << (verifyOnStatus ? "1" : "0")
+        << ";max_artifact_bytes=" << maxArtifactBytes
+        << ";max_total_bytes=" << maxTotalBytes
         << ";artifact_status_json_b64=" << base64Encode(statusJson);
     if (!detail.empty())
     {
@@ -2925,6 +3041,10 @@ std::string PGS::handleArtifactPolicyCommand(const std::string &args)
     bool hasAutoCleanup = false;
     bool verifyOnStatus = false;
     bool hasVerifyOnStatus = false;
+    std::uint64_t maxArtifactBytes = 0;
+    bool hasMaxArtifactBytes = false;
+    std::uint64_t maxTotalBytes = 0;
+    bool hasMaxTotalBytes = false;
     const std::vector<std::string> parts = splitByChar(trim(args), ' ');
     for (std::size_t i = 0; i < parts.size(); ++i)
     {
@@ -2966,9 +3086,27 @@ std::string PGS::handleArtifactPolicyCommand(const std::string &args)
             hasVerifyOnStatus = true;
             continue;
         }
+        if (opt == "--max-artifact-bytes")
+        {
+            if (i + 1 >= parts.size() || !parseArtifactSizeText(parts[++i], kMinArtifactBytes, kMaxArtifactBytesLimit, maxArtifactBytes))
+            {
+                return "ERR artifact policy --max-artifact-bytes must be 65536..67108864";
+            }
+            hasMaxArtifactBytes = true;
+            continue;
+        }
+        if (opt == "--max-total-bytes")
+        {
+            if (i + 1 >= parts.size() || !parseArtifactSizeText(parts[++i], kMinArtifactTotalBytes, kMaxArtifactTotalBytesLimit, maxTotalBytes))
+            {
+                return "ERR artifact policy --max-total-bytes must be 1048576..1073741824";
+            }
+            hasMaxTotalBytes = true;
+            continue;
+        }
         if (opt == "--help")
         {
-            return "OK artifact policy options: --ttl-ms N --auto-cleanup --no-auto-cleanup --verify-on-status --no-verify-on-status";
+            return "OK artifact policy options: --ttl-ms N --max-artifact-bytes N --max-total-bytes N --auto-cleanup --no-auto-cleanup --verify-on-status --no-verify-on-status";
         }
         return "ERR unknown artifact policy option";
     }
@@ -2976,6 +3114,12 @@ std::string PGS::handleArtifactPolicyCommand(const std::string &args)
     std::string policyJson;
     {
         std::lock_guard<std::mutex> lock(m_artifactMutex);
+        const std::uint64_t finalMaxArtifactBytes = hasMaxArtifactBytes ? maxArtifactBytes : m_artifactMaxBytes;
+        const std::uint64_t finalMaxTotalBytes = hasMaxTotalBytes ? maxTotalBytes : m_artifactMaxTotalBytes;
+        if (finalMaxTotalBytes < finalMaxArtifactBytes)
+        {
+            return "ERR artifact policy max-total-bytes must be greater than or equal to max-artifact-bytes";
+        }
         if (hasTtl)
         {
             m_artifactRetentionTtlMs = ttlMs;
@@ -2988,7 +3132,15 @@ std::string PGS::handleArtifactPolicyCommand(const std::string &args)
         {
             m_artifactVerifyOnStatus = verifyOnStatus;
         }
-        if (hasTtl || hasAutoCleanup || hasVerifyOnStatus)
+        if (hasMaxArtifactBytes)
+        {
+            m_artifactMaxBytes = finalMaxArtifactBytes;
+        }
+        if (hasMaxTotalBytes)
+        {
+            m_artifactMaxTotalBytes = finalMaxTotalBytes;
+        }
+        if (hasTtl || hasAutoCleanup || hasVerifyOnStatus || hasMaxArtifactBytes || hasMaxTotalBytes)
         {
             std::string error;
             if (!saveArtifactPolicyLocked(error))
@@ -2997,9 +3149,11 @@ std::string PGS::handleArtifactPolicyCommand(const std::string &args)
             }
         }
         policySummary = artifactPolicySummaryLocked();
-        policyJson = artifactPolicyJson(m_artifactRetentionTtlMs, m_artifactAutoCleanup, m_artifactVerifyOnStatus);
+        policyJson = artifactPolicyJson(m_artifactRetentionTtlMs, m_artifactAutoCleanup,
+                                        m_artifactVerifyOnStatus, m_artifactMaxBytes,
+                                        m_artifactMaxTotalBytes);
     }
-    if (hasTtl || hasAutoCleanup || hasVerifyOnStatus)
+    if (hasTtl || hasAutoCleanup || hasVerifyOnStatus || hasMaxArtifactBytes || hasMaxTotalBytes)
     {
         recordEvent("artifact.policy", policySummary);
     }

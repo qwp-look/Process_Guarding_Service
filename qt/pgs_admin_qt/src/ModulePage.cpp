@@ -198,6 +198,10 @@ void ModulePage::setupUi()
         m_artifactOutEdit->setPlaceholderText(QStringLiteral("C:/temp/report.json"));
         m_artifactTtlEdit = new QLineEdit(m_reportBox);
         m_artifactTtlEdit->setPlaceholderText(QStringLiteral("86400000"));
+        m_artifactMaxBytesEdit = new QLineEdit(m_reportBox);
+        m_artifactMaxBytesEdit->setPlaceholderText(QStringLiteral("16777216"));
+        m_artifactMaxTotalBytesEdit = new QLineEdit(m_reportBox);
+        m_artifactMaxTotalBytesEdit->setPlaceholderText(QStringLiteral("268435456"));
         m_artifactAutoCleanupCheck = new QCheckBox(m_reportBox);
         m_artifactAutoCleanupCheck->setChecked(true);
         m_artifactVerifyStatusCheck = new QCheckBox(m_reportBox);
@@ -214,6 +218,8 @@ void ModulePage::setupUi()
         row->addWidget(m_artifactIdEdit);
         row->addWidget(m_artifactOutEdit, 1);
         row->addWidget(m_artifactTtlEdit);
+        row->addWidget(m_artifactMaxBytesEdit);
+        row->addWidget(m_artifactMaxTotalBytesEdit);
         row->addWidget(m_artifactAutoCleanupCheck);
         row->addWidget(m_artifactVerifyStatusCheck);
         row->addWidget(m_btnReportSnapshot);
@@ -470,6 +476,10 @@ void ModulePage::setupUi()
             QStringList args{"module", "artifact", "policy", "--json"};
             const QString ttl = textOf(m_artifactTtlEdit);
             if (!ttl.isEmpty()) args << "--ttl-ms" << ttl;
+            const QString maxArtifactBytes = textOf(m_artifactMaxBytesEdit);
+            if (!maxArtifactBytes.isEmpty()) args << "--max-artifact-bytes" << maxArtifactBytes;
+            const QString maxTotalBytes = textOf(m_artifactMaxTotalBytesEdit);
+            if (!maxTotalBytes.isEmpty()) args << "--max-total-bytes" << maxTotalBytes;
             args << ((m_artifactAutoCleanupCheck && m_artifactAutoCleanupCheck->isChecked()) ? "--auto-cleanup" : "--no-auto-cleanup");
             args << ((m_artifactVerifyStatusCheck && m_artifactVerifyStatusCheck->isChecked()) ? "--verify-on-status" : "--no-verify-on-status");
             runCommand(args);

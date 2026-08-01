@@ -35,7 +35,9 @@ or:
 {"jsonrpc":"2.0","id":"...","error":{"code":"ERR_CODE","message":"..."}}
 ```
 
-Limits: default request/response payload is 64 KB. Long tasks should return `{ "accepted": true, "operation_id": "..." }`; large binary data should return an artifact id instead of embedding bytes. The service now includes a shared in-memory OperationStore with TTL cleanup and an ArtifactStore under the service state directory. `module op-status` queries operation records, while `module artifact get --json` returns metadata and `module artifact get --out <path>` downloads content by chunks with client-side size/SHA-256 verification. Service chunk reads also recompute artifact size/SHA-256 before returning bytes. Operators can use `module artifact cleanup [--expired|--all] [--verify]`, `module artifact status [--verify]`, and `module artifact policy` for retention and health visibility.
+Limits: default request/response payload is 64 KB. Long tasks should return `{ "accepted": true, "operation_id": "..." }`; large binary data should return an artifact id instead of embedding bytes. The service now includes a shared in-memory OperationStore with TTL cleanup and an ArtifactStore under the service state directory. `module op-status` queries operation records, while `module artifact get --json` returns metadata and `module artifact get --out <path>` downloads content by chunks with client-side size/SHA-256 verification. Service chunk reads also recompute artifact size/SHA-256 before returning bytes. Operators can use `module artifact cleanup [--expired|--all] [--verify]`, `module artifact status [--verify]`, and `module artifact policy` for retention, bounded byte quota, and health visibility.
+
+ArtifactStore defaults to a 24-hour TTL, 16 MB per artifact, and 256 MB total store bytes. `module artifact policy` can change TTL within 60 seconds..7 days, `max_artifact_bytes` within 64 KB..64 MB, and `max_total_bytes` within 1 MB..1 GB; the total limit must be at least the single-artifact limit. The effective policy is persisted in `artifact_policy.cfg` and is returned by status/policy/doctor surfaces.
 
 Artifact metadata includes `sensitive` and `sensitivity`; dump/minidump artifacts default to high sensitivity with a 6-hour TTL cap, backup-like artifacts default to medium with a 24-hour cap, and status/doctor expose sensitive counts. Chunk download start/complete/expired/invalid events are recorded in `events list`.
 
@@ -49,7 +51,7 @@ int PG_InvokeJson(const char *requestJson, char *responseJson, size_t responseJs
 
 PGS probes this export dynamically. If it is missing, `module invoke` falls back to a KV shim with `op=<method-suffix>;method=<full-method>;params_json_b64=<envelope>` so older modules can continue working while they migrate.
 
-`PGS_ServicesV3` adds `call_json`, `emit_event`, `get_data_dir`, and `log` after the v2-compatible fields. The first fields mirror `PGS_Services`, so existing modules that only read v2 fields continue to work.
+`PGS_ServicesV3` adds `call_json`, `emit_event`, `get_data_dir`, and `log` after the v2-compatible fields. The first fields mirror `PGS_Services`, so existing modules that only read v2 fields continue to work. Module `emit_event` JSON may include a safe `type` field; the core records that type directly in `events list` and stores the raw JSON as base64 detail, falling back to `module.event` for unsafe or missing types.
 
 ## Trust Files
 
@@ -113,18 +115,20 @@ PGS itself should only download to `modules_staging/` and never load a community
 - `pgs_bless module artifact get <id> [--json|--out <path>]`
 - `pgs_bless module artifact cleanup [--expired|--all] [--verify]`
 - `pgs_bless module artifact status [--verify] [--json]`
-- `pgs_bless module artifact policy [--ttl-ms N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]`
+- `pgs_bless module artifact policy [--ttl-ms N] [--max-artifact-bytes N] [--max-total-bytes N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]`
 - `pgs_bless notify status|config [--eventlog|--no-eventlog] [--popup|--no-popup]`
 - `pgs_bless metrics summary|json|prometheus`
 - `pgs_bless backup status|snapshot [--artifact] [--max-bytes N]`
 - `pgs_bless eventlog status|recent [--limit N] [--source <name>]`
 - `pgs_bless dump status|collect --pid <pid> [--type normal|with-data] [--confirm]`
 - `pgs_bless service-guard status|query|start|stop|ensure --name <service> [--state running|stopped] [--confirm]`
+- `pgs_bless service-guard policy [--allow <svc1,svc2>] [--allow-protected|--no-allow-protected] [--confirm]`
+- `pgs_bless service-guard policy-clear --confirm`
 - `pgs_bless file-watch status|add|list|check|remove --path <file> [--id <id>] [--action event|none]`
 - `pgs_bless policy-template status|set|list|remove|apply --name <template> [--pid <pid>]`
 - `pgs_bless remote-agent status|heartbeat|guards`
 - `pgs_bless update status|verify --path <release-manifest.json>`
-- `pgs_bless script-runner status|config|add|list|run [--enable|--disable] [--confirm]`
+- `pgs_bless script-runner status|config|add|list|run [--id <id>] [--path <script>] [--start-args "..."] [--enable|--disable] [--confirm]`
 - `pgs_bless ppl set|get|clear` as compatibility sugar through module invocation
 
 `module call` and `module.manifest` remain supported for ABI v2 modules.
@@ -145,7 +149,7 @@ Modules that call back into these commands through `PGS_ServicesV3.call_json` ne
 
 ## Bundled Module Set
 
-The release build currently writes 16 bundled modules into `modules.lock`: `sched`, `health`, `profile`, `report`, `notify`, `metrics`, `backup`, `eventlog`, `dump`, `service_guard`, `file_watch`, `policy`, `remote_agent`, `update`, `script_runner`, and `ppl`. The newer operational modules are deliberately narrow first passes: no chat/webhook/mail integrations, no update downloader/installer, no remote listener in `remote_agent`, and script execution is disabled until explicitly enabled and confirmed.
+The release build currently writes 16 bundled modules into `modules.lock`: `sched`, `health`, `profile`, `report`, `notify`, `metrics`, `backup`, `eventlog`, `dump`, `service_guard`, `file_watch`, `policy`, `remote_agent`, `update`, `script_runner`, and `ppl`. The newer operational modules are deliberately narrow first passes: no chat/webhook/mail integrations, no update downloader/installer, no remote listener in `remote_agent`, and script execution is disabled until explicitly enabled and confirmed. `script_runner` additionally requires scripts to resolve under the service data scripts directory by final path, pins SHA-256 at registration, re-hashes before run, and emits config/add/run audit events. `service_guard` is bounded by confirm-required mutations, default-deny protected services, an optional persisted allowlist, and mutation/policy audit events. `file_watch` is similarly bounded: at most 64 rules, local absolute drive paths only, and default denies for UNC/device/ADS/Windows system paths.
 
 ## Module Registry
 

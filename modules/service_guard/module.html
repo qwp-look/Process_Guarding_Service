@@ -1,5 +1,6 @@
 <h3>Service Guard</h3>
-<p>Queries and explicitly starts/stops local Windows services through SCM. Mutations require confirm=1.</p>
+<p>Queries and explicitly starts/stops local Windows services through SCM. Mutations require confirm=1, protected services are denied by default, and an optional allowlist can narrow mutations further.</p>
 <pre>op=status
 op=query;name=Spooler
+op=policy;action=set;allow=Spooler;confirm=1
 op=ensure;name=Spooler;state=running;confirm=1</pre>

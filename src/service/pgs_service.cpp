@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
@@ -148,54 +149,76 @@ private:
 
     bool installService(const ParsedArgs &args)
     {
-        SC_HANDLE scm = OpenSCManagerA(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
+        SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
         if (!scm)
         {
             std::cerr << "OpenSCManager failed: " << GetLastError() << "\n";
             return false;
         }
 
-        char exePath[MAX_PATH]{};
-        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-        std::string binPath = "\"" + std::string(exePath) + "\" --service";
+        std::vector<wchar_t> exePath(32768, L'\0');
+        const DWORD exeLen = GetModuleFileNameW(nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+        if (exeLen == 0 || exeLen >= exePath.size())
+        {
+            std::cerr << "GetModuleFileNameW failed: " << GetLastError() << "\n";
+            CloseServiceHandle(scm);
+            return false;
+        }
+        std::wstring binPath = L"\"" + std::wstring(exePath.data(), exeLen) + L"\" --service";
         // v3 G: persist the chosen listen port into the service command line so
         // SCM-started instances bind the same port without needing --port again.
         if (args.port > 0)
         {
-            binPath += " --port " + std::to_string(args.port);
+            binPath += L" --port " + std::to_wstring(args.port);
         }
         if (args.enableModules)
         {
-            binPath += " --enable-modules";
+            binPath += L" --enable-modules";
         }
         if (args.enablePpl)
         {
-            binPath += " --enable-ppl";
+            binPath += L" --enable-ppl";
         }
         if (args.enableKernelModules)
         {
-            binPath += " --enable-kernel-modules";
+            binPath += L" --enable-kernel-modules";
         }
         if (args.allowAllModules)
         {
-            binPath += " --allow-all-modules";
+            binPath += L" --allow-all-modules";
         }
 
         // v3 G: optional low-privilege service account. LocalSystem (nullptr)
         // is the default and is REQUIRED for full cross-session
         // restartGuardInSession() — a non-LocalSystem account will lose that
         // ability and the fallback launches guarded processes in Session 0.
-        const char *account = args.serviceAccount.empty() ? nullptr : args.serviceAccount.c_str();
-        const char *password = args.servicePassword.empty() ? nullptr : args.servicePassword.c_str();
+        const std::wstring accountW = ProcessGuard::util::narrowToWideBestEffort(args.serviceAccount);
+        const std::wstring passwordW = ProcessGuard::util::narrowToWideBestEffort(args.servicePassword);
+        if ((!args.serviceAccount.empty() && accountW.empty()) ||
+            (!args.servicePassword.empty() && passwordW.empty()))
+        {
+            std::cerr << "Failed to convert service account credentials to UTF-16\n";
+            CloseServiceHandle(scm);
+            return false;
+        }
+        const wchar_t *account = args.serviceAccount.empty() ? nullptr : accountW.c_str();
+        const wchar_t *password = args.servicePassword.empty() ? nullptr : passwordW.c_str();
         if (account)
         {
             std::cout << "WARNING: installing with a non-LocalSystem account; cross-session guard restart will be limited to the Session-0 fallback.\n";
         }
 
-        SC_HANDLE service = CreateServiceA(
+        const std::wstring serviceNameW = ProcessGuard::util::narrowToWideBestEffort(m_serviceName);
+        if (serviceNameW.empty())
+        {
+            std::cerr << "Failed to convert service name to UTF-16\n";
+            CloseServiceHandle(scm);
+            return false;
+        }
+        SC_HANDLE service = CreateServiceW(
             scm,
-            m_serviceName.c_str(),
-            "ProcessGuard Service",
+            serviceNameW.c_str(),
+            L"ProcessGuard Service",
             SERVICE_ALL_ACCESS,
             SERVICE_WIN32_OWN_PROCESS,
             SERVICE_AUTO_START,
@@ -214,9 +237,9 @@ private:
             return false;
         }
 
-        SERVICE_DESCRIPTIONA description{};
-        description.lpDescription = const_cast<char *>("ProcessGuard service mode");
-        ChangeServiceConfig2A(service, SERVICE_CONFIG_DESCRIPTION, &description);
+        SERVICE_DESCRIPTIONW description{};
+        description.lpDescription = const_cast<LPWSTR>(L"ProcessGuard service mode");
+        ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &description);
 
         // Service self-guard is delegated to Windows SCM recovery instead of
         // trying to let the service "watch itself". A crashed process cannot

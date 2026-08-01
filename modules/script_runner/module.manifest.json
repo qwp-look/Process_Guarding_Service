@@ -5,7 +5,7 @@
   "abi": 3,
   "summary": "Restricted local script runner.",
   "risk": "high",
-  "capabilities": ["script.run"],
+  "capabilities": ["script.run", "event.emit"],
   "methods": [
     {"name": "script_runner.status", "risk": "low", "sync": true, "required_capabilities": ["script.run"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
     {"name": "script_runner.run", "risk": "high", "sync": true, "required_capabilities": ["script.run"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}

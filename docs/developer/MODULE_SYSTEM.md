@@ -29,12 +29,12 @@ ABI v2 的 `PG_Init` 会收到 `PGS_Services`，模块可通过 callback 调回 
 - `backup`：服务数据目录本地状态快照，可输出到 ArtifactStore；不会导出明文 token、artifact payload 或临时文件。
 - `eventlog`：读取本机 Windows Application Event Log，支持 source 过滤。
 - `dump`：显式确认后采集本机 minidump 到 ArtifactStore，不暴露临时路径。
-- `service_guard`：本机 Windows SCM 查询/start/stop/ensure，mutation 需要 confirm。
-- `file_watch`：按需检测本地文件变化并发本机 PGS event。
+- `service_guard`：本机 Windows SCM 查询/start/stop/ensure，mutation 需要 confirm，默认拒绝受保护 SCM 服务，可配置持久化 allowlist，并记录 mutation/policy 审计事件。
+- `file_watch`：按需检测本地文件变化并发本机 PGS event；最多 64 条规则，只接受本机绝对盘符路径，并拒绝 UNC/device/ADS/Windows 系统目录/System Volume Information/Recycle Bin 路径。
 - `policy`：命名 guard policy 模板，可应用到已有 guard。
 - `remote_agent`：本机节点 heartbeat/guard metadata，不开 listener。
 - `update`：本地 release manifest hash verifier，不联网不安装。
-- `script_runner`：默认禁用的受限本机脚本 runner，run 需要 confirm。
+- `script_runner`：默认禁用的受限本机脚本 runner，脚本必须 final-path 落在服务数据 scripts 目录内，登记时 pin SHA-256，run 前重验 hash，run 需要 confirm 并记录审计事件。
 - `ppl`：PPL opt-in 模块，复用 Sirius 驱动。
 
 常用调用示例：
@@ -47,10 +47,11 @@ pgs_bless.exe report snapshot --limit 20 --token your-token
 pgs_bless.exe metrics prometheus --token your-token
 pgs_bless.exe backup snapshot --artifact --token your-token
 pgs_bless.exe module artifact status --json --token your-token
-pgs_bless.exe module artifact policy --ttl-ms 86400000 --auto-cleanup --token your-token
+pgs_bless.exe module artifact policy --ttl-ms 86400000 --max-artifact-bytes 16777216 --max-total-bytes 268435456 --auto-cleanup --token your-token
 pgs_bless.exe eventlog recent --limit 20 --source ProcessGuardService --token your-token
 pgs_bless.exe dump status --token your-token
 pgs_bless.exe service-guard query --name EventLog --token your-token
+pgs_bless.exe service-guard policy --allow Spooler --confirm --token your-token
 pgs_bless.exe file-watch status --token your-token
 pgs_bless.exe policy-template list --token your-token
 pgs_bless.exe remote-agent status --token your-token
@@ -101,7 +102,11 @@ pgs_bless.exe module trust --path modules\ppl\pgs_ppl_module.dll --hash auto
 
 ## 运行态状态
 
-ArtifactStore 写入服务 state 目录下的 `artifacts` 子目录，默认 TTL 为 24 小时，可通过 `module artifact policy` 在 60 秒到 7 天之间调整。`auto_cleanup=1` 时新 artifact 写入前和后台 health loop 会清理过期项，`verify_on_status=1` 时 status 查询会做 hash 校验。metadata id 与文件名不一致会按损坏处理。metadata 包含 `sensitive` / `sensitivity`；dump/minidump 默认高敏并限制到 6 小时 TTL，backup 类默认中敏并限制到 24 小时 TTL；status/doctor 会显示敏感 artifact 数量。
+ArtifactStore 写入服务 state 目录下的 `artifacts` 子目录，默认 TTL 为 24 小时、单 artifact 16MB、总量 256MB，可通过 `module artifact policy` 调整；TTL 范围是 60 秒到 7 天，`max_artifact_bytes` 范围是 64KB 到 64MB，`max_total_bytes` 范围是 1MB 到 1GB，且总量不能小于单 artifact 上限。`auto_cleanup=1` 时新 artifact 写入前和后台 health loop 会清理过期项，`verify_on_status=1` 时 status 查询会做 hash 校验。metadata id 与文件名不一致会按损坏处理。metadata 包含 `sensitive` / `sensitivity`；dump/minidump 默认高敏并限制到 6 小时 TTL，backup 类默认中敏并限制到 24 小时 TTL；status/doctor 会显示敏感 artifact 数量和有效配额策略。
+
+`service_guard` policy 写入服务 state 目录下的 `modules\service_guard\service_guard_policy.cfg`。空 allowlist 表示兼容模式：仍需 `confirm=1`，并默认拒绝受保护服务；配置 allowlist 后，mutation 还必须命中 allowlist。`allow_protected=1` 只在 allowlist 非空时允许设置，并且只解除显式 allowlist 内受保护服务的默认拒绝。
+
+`script_runner` 的脚本 DB 写入服务 state 目录下的 `modules\script_runner\scripts.db`。`add` 会创建/使用 `modules\script_runner\scripts` 作为唯一允许目录，通过文件句柄 final path 判断真实目标是否在该目录下，并记录 `sha256`；`run` 会再次 final-path 校验并重算 hash，旧的无 hash 条目或被篡改脚本会拒绝执行，要求重新登记。
 
 `profile` / `sched` 现在按服务数据目录写运行态 DB，默认落到 `C:\ProgramData\ProcessGuard\state\modules\<name>\` 或等价受保护目录；旧 DB 会做一次兼容复制。release smoke 和 installer 继续检查产物中不应泄漏旧模块 DB。
 

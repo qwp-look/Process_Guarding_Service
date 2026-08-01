@@ -41,16 +41,18 @@ CLI 用户通常通过 `pgs_bless.exe` 间接调用协议：
 - `eventlog status|recent [--limit N] [--source <name>]`
 - `dump status|collect --pid <pid> [--type normal|with-data] [--confirm]`
 - `service-guard status|query|start|stop|ensure --name <service> [--state running|stopped] [--confirm]`
+- `service-guard policy [--allow <svc1,svc2>] [--allow-protected|--no-allow-protected] [--confirm]`
+- `service-guard policy-clear --confirm`
 - `file-watch status|add|list|check|remove --path <file> [--id <id>] [--action event|none]`
 - `policy-template status|set|list|remove|apply --name <template> [--pid <pid>]`
 - `remote-agent status|heartbeat|guards`
 - `update status|verify --path <release-manifest.json>`
-- `script-runner status|config|add|list|run [--enable|--disable] [--confirm]`
+- `script-runner status|config|add|list|run [--id <id>] [--path <script>] [--start-args "..."] [--enable|--disable] [--confirm]`
 - `module op-status <operation-id>`
 - `module artifact get <artifact-id> [--json|--out <path>]`
 - `module artifact cleanup [--expired|--all] [--verify]`
 - `module artifact status [--verify] [--json]`
-- `module artifact policy [--ttl-ms N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]`
+- `module artifact policy [--ttl-ms N] [--max-artifact-bytes N] [--max-total-bytes N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]`
 
 `bless` / `unbless` 是协议层别名，兼容旧 `register` / `unregister` 语义。
 
@@ -158,10 +160,10 @@ CLI 对应：`pgs_bless.exe guard retry --id <guard-id>` 和 `pgs_bless.exe guar
 module call <name> <request>
 ```
 
-OperationStore / ArtifactStore 已由服务端提供：模块可通过 ABI v3 `call_json` 调 `pgs.operation.create/get/update/finish/fail` 和 `pgs.artifact.put/get_meta`；CLI 可用 `module op-status <op_id> --json` 查询操作，用 `module artifact get <art_id> --json` 查元数据，用 `module artifact get <art_id> --out <path>` 分块下载。下载完成后 CLI 会按元数据核对 size 和 SHA-256；服务端 chunk 返回前也会重新计算落盘 size/SHA-256，不匹配时返回 `ERR artifact content hash mismatch`。`module artifact cleanup [--expired|--all] [--verify]` 可清理过期/全部 artifact，并可校验后移除损坏内容；`module artifact status [--verify] --json` 返回 store health、敏感 artifact 数量和有效策略；`module artifact policy --ttl-ms N --auto-cleanup --verify-on-status --json` 读取或写入保留策略。Artifact metadata 包含 `sensitive` / `sensitivity`，高敏 artifact TTL 会被裁剪；artifact chunk 下载会记录开始/完成/过期/非法事件。`pgs_bless doctor --json` 也包含 `artifact_store` 检查。
+OperationStore / ArtifactStore 已由服务端提供：模块可通过 ABI v3 `call_json` 调 `pgs.operation.create/get/update/finish/fail` 和 `pgs.artifact.put/get_meta`；模块也可通过 `emit_event` 发送 JSON 事件，若 JSON 内 `type` 是安全事件名，核心会在 `events list` 中直接记录该 `TYPE`，并把原始 JSON 放到 base64 detail，缺失或不安全时回退为 `module.event`。CLI 可用 `module op-status <op_id> --json` 查询操作，用 `module artifact get <art_id> --json` 查元数据，用 `module artifact get <art_id> --out <path>` 分块下载。下载完成后 CLI 会按元数据核对 size 和 SHA-256；服务端 chunk 返回前也会重新计算落盘 size/SHA-256，不匹配时返回 `ERR artifact content hash mismatch`。`module artifact cleanup [--expired|--all] [--verify]` 可清理过期/全部 artifact，并可校验后移除损坏内容；`module artifact status [--verify] --json` 返回 store health、敏感 artifact 数量和有效策略；`module artifact policy --ttl-ms N --max-artifact-bytes N --max-total-bytes N --auto-cleanup --verify-on-status --json` 读取或写入保留策略。`max_artifact_bytes` 受限为 64KB 到 64MB，`max_total_bytes` 受限为 1MB 到 1GB，且总量不能小于单个 artifact 上限。Artifact metadata 包含 `sensitive` / `sensitivity`，高敏 artifact TTL 会被裁剪；artifact chunk 下载会记录开始/完成/过期/非法事件。`pgs_bless doctor --json` 也包含 `artifact_store` 检查。
 
 高层 CLI 会提供便利命令，如 `sched`、`health`、`profile`、`report`。模块 capability 目前主要用于展示和后续策略规划，尚未作为完整运行时授权边界。
 
-当前 bundled 模块便利命令还包括 `notify`、`metrics`、`backup`、`eventlog`、`dump`、`service-guard`、`file-watch`、`policy-template`、`remote-agent`、`update`、`script-runner`。其中 `notify` 只使用 Windows 本机 Event Log/可选弹窗；`metrics json/prometheus` 和 `backup snapshot` 会在 CLI 端解码 base64 文本，便于脚本直接消费；`eventlog --source` 会拒绝分号、控制字符和超长值。`dump collect`、服务 mutation、`script-runner run` 需要 `--confirm`；`script-runner` 默认禁用；`update` 只校验本地 release manifest，不下载或安装。`module permissive status|on|off` 可显示、确认开启或关闭开发用 permissive 模式，`on` 需要 `--confirm` 并记录审计事件。
+当前 bundled 模块便利命令还包括 `notify`、`metrics`、`backup`、`eventlog`、`dump`、`service-guard`、`file-watch`、`policy-template`、`remote-agent`、`update`、`script-runner`。其中 `notify` 只使用 Windows 本机 Event Log/可选弹窗；`metrics json/prometheus` 和 `backup snapshot` 会在 CLI 端解码 base64 文本，便于脚本直接消费；`eventlog --source` 会拒绝分号、控制字符和超长值。`service-guard status` 返回 `mutation_policy/allowlist_mode/allow_count/allow_protected/protected_services`；mutation 需要 `--confirm`，默认拒绝受保护 SCM 服务，可用 `service-guard policy --allow <svc1,svc2> --confirm` 持久化白名单，受保护服务还需要额外 `--allow-protected`。mutation/policy 会记录 `service_guard.*` 审计事件。`file-watch status` 返回 `rules/max_rules/mode/actions/path_policy`，`add` 最多保留 64 条规则，只接受本机绝对盘符路径，并拒绝 UNC/device/ADS/Windows 系统目录/System Volume Information/Recycle Bin 路径。`script-runner status` 返回 `path_policy=final-path-under-data-scripts/hash_on_run/audit`；`add` 会记录脚本 SHA-256，`run` 前重验 hash，不一致返回 `ERR script hash mismatch`，并记录 `script_runner.*` 事件。`dump collect`、服务 mutation、`script-runner run` 需要 `--confirm`；`script-runner` 默认禁用；`update` 只校验本地 release manifest，不下载或安装。`module permissive status|on|off` 可显示、确认开启或关闭开发用 permissive 模式，`on` 需要 `--confirm` 并记录审计事件。
 
 Scheduler 的 action 是服务端 wire command，不是 CLI 命令。允许的首词当前包括 `bless`/`register`、`unbless`/`unregister`、`policy`/`set-policy`、`intentional`、`list`、`get`、`ping`；`token-set`、服务安装卸载、模块 load/unload、模块 call、PPL 等不会被 Scheduler 执行。

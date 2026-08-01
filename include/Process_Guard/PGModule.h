@@ -111,6 +111,8 @@ struct PGS_ServicesV3
     long long (*now_ms)(void *context);
     int (*call_json)(void *context, const char *request_json, char *response_json, size_t response_size);
     int (*emit_event)(void *context, const char *event_json);
+    /* Returns the UTF-8 service data directory. The returned pointer is owned by
+     * the host and remains valid until PG_Shutdown; modules must not free it. */
     const char *(*get_data_dir)(void *context);
     void (*log)(void *context, int level, const char *message);
 };

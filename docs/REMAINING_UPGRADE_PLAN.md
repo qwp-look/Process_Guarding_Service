@@ -20,18 +20,20 @@ Completed in the current repository state:
 - Metrics/backup/eventlog modules: bundled first pass is implemented, covered by build/smoke, and exposed through CLI plus Web/Qt convenience surfaces.
 - Remaining candidate modules implemented as bundled first pass: `dump`, `service_guard`, `file_watch`, `policy`, `remote_agent`, `update`, and `script_runner` now build into `modules.lock`, ship in release packaging, and have high-level CLI wrappers plus smoke status/function checks.
 - Release metadata first pass: `tools/write_release_manifest.ps1` generates `release-manifest.json`, `SHA256SUMS.txt`, and first-party `sbom.spdx.json`; `build_installer.bat` writes them beside installer/zip; publish workflow uploads them and requests GitHub artifact attestation.
+- GitHub Actions `build` and `publish-release` workflows are temporarily manual-only (`workflow_dispatch`) while backlog items are pushed in small batches.
 
 Known intentionally incomplete areas:
 
 - `restart-hook` only stores structured config and returns `execution=disabled`; no script or module action execution is enabled.
 - Code signing is still not configured. Release manifest/SBOM/checksum generation is implemented locally and wired into publish workflow, but a live GitHub Release run must still confirm repository attestation permissions and final asset upload behavior.
-- New higher-risk bundled modules are intentionally conservative: `dump collect`, service start/stop/ensure, and `script_runner run` require `--confirm`; `script_runner` is disabled by default and only accepts scripts registered under the service data directory; `update` only verifies local manifests and does not download or install anything.
+- Automatic GitHub CI/CD triggers are temporarily disabled; push/tag validation depends on local MSYS2/MinGW64 verification until workflows are re-enabled.
+- New higher-risk bundled modules are intentionally conservative: `dump collect`, service start/stop/ensure, and `script_runner run` require `--confirm`; `script_runner` is disabled by default, accepts only scripts whose final path resolves under the service data scripts directory, pins SHA-256 at registration, re-hashes before run, and emits audit events; `update` only verifies local manifests and does not download or install anything.
 - VM-level E2E checks for LocalSystem, low-privilege service accounts, real PPL/test-signing, remote TLS, and clean installers still need dedicated environment runs.
 - Local Web loopback mode now uses an HttpOnly `pgs_local_session` cookie plus `X-PGS-CSRF`; the page no longer embeds a Web API bearer. This still needs live VM/browser validation before a security release.
 - `ModuleManager` / protocol JSON parsing still uses lightweight string extraction in several security-relevant paths. It is acceptable for bundled fixtures but should be replaced or explicitly constrained before opening community modules.
 - Release versioning is now sourced from root `VERSION` for local packaging and the publish workflow; README/download snippets still need review whenever the public version string changes.
 - `PGSClient::sendCommand()` now owns its Winsock runtime setup, so fresh shared-library callers do not need hidden `WSAStartup()` boilerplate.
-- Artifact download verifies downloaded size and SHA-256 client-side; service-side chunk reads recompute size/SHA-256 before serving; `module artifact cleanup/status/policy` exist; doctor reports ArtifactStore health. Periodic cleanup, download audit events, and first-pass sensitive-artifact metadata/reporting are now implemented; remaining artifact work is configurable byte quotas, stronger remote-download auditing/UI prompts, and operation persistence decisions if durable long tasks become required.
+- Artifact download verifies downloaded size and SHA-256 client-side; service-side chunk reads recompute size/SHA-256 before serving; `module artifact cleanup/status/policy` exist; doctor reports ArtifactStore health. Periodic cleanup, download audit events, first-pass sensitive-artifact metadata/reporting, and configurable bounded byte quotas are now implemented; remaining artifact work is stronger remote-download auditing/UI prompts and operation persistence decisions if durable long tasks become required.
 
 ## Workstream A: Global Operation Store
 
@@ -121,7 +123,7 @@ Acceptance criteria:
 
 ## Workstream B: Global Artifact Store
 
-Status: implemented first functional pass plus retention, integrity cleanup, download audit, and sensitive-artifact metadata. Modules can put artifacts through `pgs.artifact.put`; operators can inspect metadata with `module artifact get <id> --json`, download chunks with `--out`, clean the store with `module artifact cleanup [--expired|--all] [--verify]`, inspect health with `module artifact status [--verify]`, and configure policy with `module artifact policy`. Client downloads verify size/SHA-256, service chunk reads recompute size/SHA-256 before serving, metadata id/file-name mismatches fail closed, doctor reports ArtifactStore health including sensitive counts, and the health loop periodically removes expired artifacts when auto-cleanup is enabled. Remaining work is configurable quota policy, richer remote/UI prompts, and durability polish.
+Status: implemented first functional pass plus retention, integrity cleanup, download audit, sensitive-artifact metadata, and bounded byte quota policy. Modules can put artifacts through `pgs.artifact.put`; operators can inspect metadata with `module artifact get <id> --json`, download chunks with `--out`, clean the store with `module artifact cleanup [--expired|--all] [--verify]`, inspect health with `module artifact status [--verify]`, and configure policy with `module artifact policy`. Client downloads verify size/SHA-256, service chunk reads recompute size/SHA-256 before serving, metadata id/file-name mismatches fail closed, doctor reports ArtifactStore health including sensitive counts, and the health loop periodically removes expired artifacts when auto-cleanup is enabled. Remaining work is richer remote/UI prompts, remote-download audit policy, and durability polish.
 
 ### Design
 
@@ -148,8 +150,8 @@ Metadata fields:
 
 Default policy:
 
-- max artifact size: start with 16 MB unless a config value already exists.
-- max total artifact bytes: start with 256 MB under ProgramData.
+- max artifact size: defaults to 16 MB and is configurable through `module artifact policy --max-artifact-bytes`, bounded to 64 KB..64 MB.
+- max total artifact bytes: defaults to 256 MB and is configurable through `module artifact policy --max-total-bytes`, bounded to 1 MB..1 GB and never below the single-artifact limit.
 - default TTL: 24 hours for transient artifacts; configurable through `module artifact policy --ttl-ms` with a bounded range of 60 seconds to 7 days.
 - sensitive TTL clamp: `high` artifacts are capped at 6 hours and `medium` artifacts at 24 hours even when the global policy is longer.
 - no direct path exposure in protocol responses.
@@ -169,7 +171,7 @@ CLI/protocol:
 - `module artifact get <id> --json` returns metadata only, not raw bytes.
 - `pgs_bless module artifact get <id> --out <path>` downloads by chunks and verifies size/SHA-256.
 - `module artifact status [--verify] [--json]` reports `store_exists`, `root_secured`, count/bytes, expired/corrupt/orphaned counts, and effective policy.
-- `module artifact policy [--ttl-ms N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]` reads or updates the retention policy.
+- `module artifact policy [--ttl-ms N] [--max-artifact-bytes N] [--max-total-bytes N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]` reads or updates the retention and quota policy.
 
 ### Security Rules
 
@@ -195,7 +197,8 @@ CLI/protocol:
 10. Done 2026-07-20: expose store health through CLI `module artifact status`, Web `/api/artifact/status`, Qt report controls, and doctor `artifact_store` check.
 11. Done 2026-07-20: fail closed on artifact metadata id/file-name mismatch and cover status/policy/doctor paths in smoke.
 12. Done 2026-07-26: add periodic/background cleanup from the health loop, explicit artifact download audit events, `sensitive`/`sensitivity` metadata, dump high-sensitivity TTL, sensitive counts in status/doctor, and smoke coverage for audit/sensitive fields.
-13. Remaining: make max artifact bytes/max total bytes configurable within safe bounds and add stronger remote/Web/Qt download prompts/audit policy.
+13. Done 2026-07-28: make max artifact bytes/max total bytes configurable within safe bounds, expose them through CLI/Web/Qt policy controls, persist them in `artifact_policy.cfg`, and cover them in smoke policy/status JSON checks.
+14. Remaining: add stronger remote/Web/Qt download prompts and remote-download audit policy.
 
 ### Tests
 
@@ -415,14 +418,14 @@ Implemented bundled first pass:
 2. `backup`: local service-state snapshot export with token/artifact/temp exclusions and optional ArtifactStore output. Import/restore is intentionally not implemented yet.
 3. `eventlog`: read local Windows Application Event Log entries with source filtering; notify remains the writer for PGS-origin events.
 4. `dump`: explicit opt-in local minidump collection into ArtifactStore. Collection requires `confirm=1`, caps artifacts at 16 MB, and does not expose raw dump paths.
-5. `service_guard`: local Windows SCM query/start/stop/ensure helper. Mutations require `confirm=1`.
-6. `file_watch`: demand-driven local file change detector. Rules persist under the service data directory, `check` emits local PGS events for changed files, and no background watcher thread or remote notification channel is opened.
+5. `service_guard`: local Windows SCM query/start/stop/ensure helper. Mutations require `confirm=1`, default-deny protected SCM services, support a persisted mutation allowlist, and emit audit events for policy changes and mutation denial/attempt/result.
+6. `file_watch`: demand-driven local file change detector. Rules persist under the service data directory, `check` emits local PGS events for changed files, no background watcher thread or remote notification channel is opened, and rules are capped at 64 local absolute drive paths with UNC/device/ADS/Windows system-path denies.
 7. `policy`: named guard-policy templates with optional apply through the service callback surface.
 8. `remote_agent`: local node heartbeat/guard metadata surface for future cluster integration. It opens no listener and provides no chat/webhook integration.
 9. `update`: local `release-manifest.json` verifier. It reads manifest `release_root`, verifies only the release tree `files` array, ignores artifact absolute paths for tree verification, and performs no network download or install.
-10. `script_runner`: disabled-by-default restricted local runner. Operators must enable it, register scripts under `modules\script_runner\scripts` in the service data directory, and pass `confirm=1` to run.
+10. `script_runner`: disabled-by-default restricted local runner. Operators must enable it, register scripts whose final path resolves under `modules\script_runner\scripts` in the service data directory, keep the registered SHA-256 unchanged, and pass `confirm=1` to run. Config/add/run denial/attempt/result emits local audit events.
 
-Every bundled module now ships with manifest files, `modules.lock` capability/risk metadata, build script integration, release packaging, and smoke coverage. A first batch of high-risk negative tests now covers confirmation gates, script-runner path/default-disable boundaries, file-watch unreadable paths, update tampering, artifact sensitivity, and download audit. Remaining work is production hardening: structured UI for the new modules, doctor visibility, stronger capability enforcement, signing/hash fail-closed policy, and deeper environment-specific negative tests.
+Every bundled module now ships with manifest files, `modules.lock` capability/risk metadata, build script integration, release packaging, and smoke coverage. A first batch of high-risk negative tests now covers confirmation gates, service_guard protected-service/allowlist boundaries and mutation denial audit, script-runner path/default-disable/final-path/hash-tamper boundaries and run denial audit, file-watch unreadable and system-path denial paths, update tampering, artifact sensitivity, and download audit. Remaining work is production hardening: structured UI for the new modules, broader doctor visibility, stronger capability enforcement, signing/hash fail-closed policy, and deeper environment-specific negative tests.
 
 ## Workstream H: Local Transport And Client Runtime
 
@@ -502,11 +505,11 @@ Tests:
 
 1. Verify the Web loopback session-cookie change in a live VM/browser run before claiming the security release.
 2. Add code signing and run one live GitHub release to validate metadata upload plus provenance attestation.
-3. Decide whether OperationStore needs durable snapshots; add configurable artifact byte quotas and stronger Web/Qt/remote artifact download prompts/audit policy if artifacts become long-lived or remotely exposed.
-4. Add deterministic quarantine reason codes and negative E2E coverage for missing exe, access denied, hash mismatch, session token failure, health timeout/DNS failures, health restart/quarantine actions, and retry-after-fix.
+3. Decide whether OperationStore needs durable snapshots; add stronger Web/Qt/remote artifact download prompts/audit policy if artifacts become long-lived or remotely exposed.
+4. Add deterministic quarantine reason codes and negative E2E coverage for missing exe, access denied, hash mismatch, session token failure, health timeout/DNS failures, and retry-after-fix; health restart/quarantine action E2E is now covered in smoke.
 5. Productize UI responses further: add Web browser DOM automation, grouped error guidance, field-level validation, and Cluster browser automation for add/edit/test/remove.
 6. Build out Doctor/Repair schema hardening and additional repair actions on top of the current shared CLI/Qt/Web doctor surface.
-7. Productize the newly bundled modules: add structured Web/Qt views, doctor checks, and the remaining negative tests for dump size/permission/process-missing failures, file-watch rule/path policy, script-runner ACL/RBAC, and update signing-ready rollback boundaries.
+7. Productize the newly bundled modules: add structured Web/Qt views, doctor checks, and the remaining negative tests for dump size/permission/process-missing failures, file-watch rule/path policy, script-runner ACL/signature/RBAC, and update signing-ready rollback boundaries.
 8. Run VM E2E last for the release candidate, after protocol and release surfaces stop changing.
 
 Expected effort:

@@ -342,6 +342,8 @@ namespace ProcessGuard
         mutable std::mutex m_artifactMutex;
         std::unordered_map<std::string, ArtifactRecord> m_artifacts;
         std::int64_t m_artifactRetentionTtlMs = 24LL * 60LL * 60LL * 1000LL;
+        std::uint64_t m_artifactMaxBytes = 16ull * 1024ull * 1024ull;
+        std::uint64_t m_artifactMaxTotalBytes = 256ull * 1024ull * 1024ull;
         bool m_artifactAutoCleanup = true;
         bool m_artifactVerifyOnStatus = false;
         std::int64_t m_lastArtifactMaintenanceMs = 0;
@@ -358,6 +360,7 @@ namespace ProcessGuard
         bool m_pplEnabled{false}; // legacy alias for kernel/PPL module opt-in
         bool m_modulesEnabled{false};
         bool m_kernelModulesEnabled{false};
+        std::string m_dataDirCache;
         // When false (default), ModuleManager refuses any DLL not listed in
         // <exe>\modules\modules.allow. When true, the legacy permissive load-all
         // behaviour is restored for development. Persisted as MODULES_PERMISSIVE.

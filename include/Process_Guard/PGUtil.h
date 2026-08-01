@@ -133,7 +133,7 @@ namespace ProcessGuard
             {
                 return acp;
             }
-            return std::wstring(input.begin(), input.end());
+            return std::wstring();
         }
 
         inline std::string base64Encode(const std::string &input)

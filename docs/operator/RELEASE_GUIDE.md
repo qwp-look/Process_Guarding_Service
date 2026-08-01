@@ -2,6 +2,10 @@
 
 本文面向维护者。开发构建细节见 [构建指南](../developer/BUILD.md)。
 
+## 当前 CI/CD 状态
+
+GitHub Actions 的 `build` 和 `publish-release` workflow 当前临时改为仅支持手动 `workflow_dispatch`。推送到 `master`、`main`、`release/**` 或版本 tag 不会自动触发 CI/CD；每次本地完成任务后需要先在 MSYS2/MinGW64 环境跑完对应验证，再直接推送到 GitHub。
+
 ## 一键打包 release 目录
 
 ```bat
@@ -61,6 +65,6 @@ release smoke 会验证：
 - 代码签名证书和签名验证。
 - live GitHub Release 上的 metadata/provenance 资产确认。
 - release allowlist fail-closed 和签名策略强制。
-- 新增高风险模块的生产化安全策略：dump artifact 留存/审计、script_runner 签名/ACL/远程 RBAC、service_guard mutation 审计、update 自动安装前的签名和回滚。
+- 新增高风险模块的生产化安全策略：dump artifact 持久化审计、script_runner 签名/ACL/远程 RBAC（final-path、hash-on-run 和本机审计基础版已落地）、service_guard 结构化 UI/RBAC 与持久化审计、update 自动安装前的签名和回滚。
 
 这些属于安全专项，见 [安全收口交接](../SECURITY_HARDENING_BACKLOG.md)。

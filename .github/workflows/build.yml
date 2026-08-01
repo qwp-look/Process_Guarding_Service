@@ -1,12 +1,7 @@
 ﻿name: build
 
 on:
-  push:
-    branches: [master, main, release/**, codex/roadmap-sched-remote-cluster]
-    tags:
-      - 'Personal_Version_V*'
-  pull_request:
-    branches: [master, main, release/**, codex/roadmap-sched-remote-cluster]
+  workflow_dispatch:
 
 jobs:
   mingw-build:

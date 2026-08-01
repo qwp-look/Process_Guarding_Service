@@ -18,6 +18,8 @@ Windows `cmd` / `.bat`：
 ```bat
 set MINGW_ROOT=C:\msys64\mingw64
 set MINGW_BIN=%MINGW_ROOT%\bin
+set MSYSTEM=MINGW64
+set CHERE_INVOKING=1
 set CXX=%MINGW_ROOT%\bin\g++.exe
 set CMAKE=%MINGW_ROOT%\bin\cmake.exe
 set MSYS2_BASH=C:\msys64\usr\bin\bash.exe
@@ -29,6 +31,8 @@ PowerShell：
 ```powershell
 $env:MINGW_ROOT='C:\msys64\mingw64'
 $env:MINGW_BIN="$env:MINGW_ROOT\bin"
+$env:MSYSTEM='MINGW64'
+$env:CHERE_INVOKING='1'
 $env:CXX="$env:MINGW_BIN\g++.exe"
 $env:CMAKE="$env:MINGW_BIN\cmake.exe"
 $env:MSYS2_BASH='C:\msys64\usr\bin\bash.exe'
@@ -39,10 +43,14 @@ MSYS2 bash：
 
 ```bash
 export MINGW_ROOT=/mingw64
+export MSYSTEM=MINGW64
+export CHERE_INVOKING=1
 export GXX=$MINGW_ROOT/bin/g++.exe
 export CMAKE=$MINGW_ROOT/bin/cmake.exe
 export PATH=$MINGW_ROOT/bin:$PATH
 ```
+
+Qt/CMake 配置如果出现 `Cannot create temporary file` 或 `can't open ?cc*.s`，把 `TMP`、`TEMP`、`TMPDIR` 显式设到 Windows 用户临时目录再重跑，例如 PowerShell 中设为 `C:\Users\<user>\AppData\Local\Temp`，MSYS2 bash 中设为 `/c/Users/<user>/AppData/Local/Temp`。
 
 ## 日常验证
 

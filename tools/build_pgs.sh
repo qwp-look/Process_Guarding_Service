@@ -97,7 +97,7 @@ write_modules_lock() {
           ;;
         service_guard)
           risk="medium"
-          caps='["service.query","service.start","service.stop"]'
+          caps='["service.query","service.start","service.stop","service.policy","event.emit"]'
           ;;
         file_watch)
           risk="medium"
@@ -117,7 +117,7 @@ write_modules_lock() {
           ;;
         script_runner)
           risk="high"
-          caps='["script.run"]'
+          caps='["script.run","event.emit"]'
           ;;
         ppl)
           risk="critical"
@@ -182,7 +182,7 @@ build_module 21 file_watch pgs_file_watch_module "modules/file_watch/pgs_file_wa
 build_module 22 policy pgs_policy_module "modules/policy/pgs_policy_module.cpp"
 build_module 23 remote_agent pgs_remote_agent_module "modules/remote_agent/pgs_remote_agent_module.cpp"
 build_module 24 update pgs_update_module "modules/update/pgs_update_module.cpp" "-lbcrypt"
-build_module 25 script_runner pgs_script_runner_module "modules/script_runner/pgs_script_runner_module.cpp"
+build_module 25 script_runner pgs_script_runner_module "modules/script_runner/pgs_script_runner_module.cpp" "-lbcrypt"
 
 # PPL module: built as a separate shared DLL. Per-folder layout
 # build/modules/<name>/<name>.dll + module.html + assets. The folder name MUST

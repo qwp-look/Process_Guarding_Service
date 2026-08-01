@@ -114,6 +114,7 @@ pgs_module(pgs_remote_agent_module remote_agent pgs_remote_agent_module modules/
 pgs_module(pgs_update_module update pgs_update_module modules/update/pgs_update_module.cpp)
 target_link_libraries(pgs_update_module PRIVATE bcrypt)
 pgs_module(pgs_script_runner_module script_runner pgs_script_runner_module modules/script_runner/pgs_script_runner_module.cpp)
+target_link_libraries(pgs_script_runner_module PRIVATE bcrypt)
 pgs_module(pgs_ppl_module ppl pgs_ppl_module modules/ppl/pgs_ppl_module.cpp)
 target_link_libraries(pgs_ppl_module PRIVATE advapi32)
 pgs_copy_if_exists(pgs_ppl_module "${PGS_ROOT}/modules/ppl/Sirius.sys" "${PGS_BUILD_DIR}/modules/ppl")

@@ -1006,6 +1006,11 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     }
 
     m_stateFilePath = defaultStateFilePath(logFilePath);
+    m_dataDirCache = std::filesystem::path(m_stateFilePath).parent_path().string();
+    if (m_dataDirCache.empty())
+    {
+        m_dataDirCache = ".";
+    }
     if (!loadPersistedState())
     {
         Logger::warning("PGS: failed to load persisted state, continuing with empty archive");
@@ -1051,7 +1056,10 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
             }
             else
             {
-                Logger::warning("PGS: auth enabled (random token generated; FAILED to write bootstrap token file)");
+                Logger::error("PGS: refusing to start because bootstrap token file could not be written with a protected ACL");
+                m_authTokenHash.clear();
+                WSACleanup();
+                return false;
             }
         }
         else
@@ -2468,7 +2476,10 @@ void PGS::monitorLoop()
                 }
                 else
                 {
-                    ++policy.restartCount;
+                    if (policy.restartCount < std::numeric_limits<int>::max())
+                    {
+                        ++policy.restartCount;
+                    }
                 }
                 currentRestarts = windowed ? static_cast<int>(policy.recentRestartMs.size()) : policy.restartCount;
             }
@@ -3307,25 +3318,25 @@ int PGS::emitEventThunk(void *context, const char *eventJson)
     {
         return 1;
     }
-    self->recordEvent("module.event", std::string("json_b64=") + util::base64Encode(eventJson ? eventJson : ""));
+    const std::string json = eventJson ? eventJson : "";
+    const std::string requestedType = jsonStringValue(json, "type");
+    const bool safeType = !requestedType.empty() && requestedType.size() <= 96 &&
+        std::all_of(requestedType.begin(), requestedType.end(), [](unsigned char ch) {
+            return std::isalnum(ch) || ch == '.' || ch == '_' || ch == '-';
+        });
+    self->recordEvent(safeType ? requestedType : std::string("module.event"),
+                      std::string("json_b64=") + util::base64Encode(json));
     return 0;
 }
 
 const char *PGS::getDataDirThunk(void *context)
 {
     PGS *self = static_cast<PGS *>(context);
-    static thread_local std::string dir;
     if (!self)
     {
-        dir.clear();
-        return dir.c_str();
+        return "";
     }
-    dir = std::filesystem::path(self->m_stateFilePath).parent_path().string();
-    if (dir.empty())
-    {
-        dir = ".";
-    }
-    return dir.c_str();
+    return self->m_dataDirCache.c_str();
 }
 
 void PGS::logThunk(void * /*context*/, int level, const char *message)
@@ -3416,7 +3427,8 @@ bool PGS::writeInitialTokenFile(const std::string &stateDir, const std::string &
     {
         if (!util::secureCreateDirectory(stateDir))
         {
-            Logger::warning("PGS: failed to secure bootstrap token directory ACL: " + stateDir);
+            Logger::error("PGS: failed to secure bootstrap token directory ACL: " + stateDir);
+            return false;
         }
     }
     std::ofstream out(filePath, std::ios::out | std::ios::binary | std::ios::trunc);
@@ -3427,12 +3439,21 @@ bool PGS::writeInitialTokenFile(const std::string &stateDir, const std::string &
     }
     out << token;
     out.flush();
+    if (!out.good())
+    {
+        Logger::error("PGS: failed to write bootstrap token file: " + filePath.string());
+        out.close();
+        DeleteFileW(filePath.wstring().c_str());
+        return false;
+    }
     out.close();
 
     // Apply the same protected DACL to the file as the state directory.
     if (!util::secureApplyDacl(filePath.string(), false))
     {
-        Logger::warning("PGS: failed to secure bootstrap token file ACL: " + filePath.string());
+        Logger::error("PGS: failed to secure bootstrap token file ACL: " + filePath.string());
+        DeleteFileW(filePath.wstring().c_str());
+        return false;
     }
     return true;
 }
@@ -3896,7 +3917,10 @@ int PGS::recordRestartAndEffectiveCount(std::uint64_t /*guardId*/, RestartPolicy
         policy.restartCount = static_cast<int>(policy.recentRestartMs.size());
         return policy.restartCount;
     }
-    ++policy.restartCount;
+    if (policy.restartCount < std::numeric_limits<int>::max())
+    {
+        ++policy.restartCount;
+    }
     return policy.restartCount;
 }
 } // namespace ProcessGuard

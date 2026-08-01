@@ -1375,11 +1375,73 @@ int runDoctor(const std::string &host, unsigned short port, const std::string &t
             ";sensitive=" + field("sensitive") +
             ";ttl_ms=" + field("ttl_ms") +
             ";auto_cleanup=" + field("auto_cleanup") +
-            ";verify_on_status=" + field("verify_on_status"));
+            ";verify_on_status=" + field("verify_on_status") +
+            ";max_artifact_bytes=" + field("max_artifact_bytes") +
+            ";max_total_bytes=" + field("max_total_bytes"));
     }
     else
     {
         add("artifact_store", "warn", response.empty() ? "artifact status unavailable" : response);
+    }
+
+    response.clear();
+    if (sendToPGS(host, port, ProcessGuard::client::withAuthToken(token, "module call file_watch op=status"), response) && response.rfind("OK ", 0) == 0)
+    {
+        ParsedSummary summary = parseSummaryLine(response.substr(3));
+        auto field = [&](const std::string &key, const std::string &fallback = "") -> std::string {
+            const auto it = summary.kv.find(key);
+            return (it == summary.kv.end() || it->second.empty()) ? fallback : it->second;
+        };
+        add("file_watch", "ok", "rules=" + field("rules", "0") +
+            ";max_rules=" + field("max_rules", "0") +
+            ";mode=" + field("mode", "unknown") +
+            ";actions=" + field("actions", "") +
+            ";path_policy=" + field("path_policy", "unknown"));
+    }
+    else
+    {
+        add("file_watch", "warn", response.empty() ? "file_watch status unavailable" : response);
+    }
+
+    response.clear();
+    if (sendToPGS(host, port, ProcessGuard::client::withAuthToken(token, "module call service_guard op=status"), response) && response.rfind("OK ", 0) == 0)
+    {
+        ParsedSummary summary = parseSummaryLine(response.substr(3));
+        auto field = [&](const std::string &key, const std::string &fallback = "") -> std::string {
+            const auto it = summary.kv.find(key);
+            return (it == summary.kv.end() || it->second.empty()) ? fallback : it->second;
+        };
+        add("service_guard", "ok", "scm=" + field("scm", "unknown") +
+            ";mutations_require_confirm=" + field("mutations_require_confirm", "1") +
+            ";mutation_policy=" + field("mutation_policy", "unknown") +
+            ";allowlist_mode=" + field("allowlist_mode", "unknown") +
+            ";allow_count=" + field("allow_count", "0") +
+            ";allow_protected=" + field("allow_protected", "0") +
+            ";protected_services=" + field("protected_services", "0"));
+    }
+    else
+    {
+        add("service_guard", "warn", response.empty() ? "service_guard status unavailable" : response);
+    }
+
+    response.clear();
+    if (sendToPGS(host, port, ProcessGuard::client::withAuthToken(token, "module call script_runner op=status"), response) && response.rfind("OK ", 0) == 0)
+    {
+        ParsedSummary summary = parseSummaryLine(response.substr(3));
+        auto field = [&](const std::string &key, const std::string &fallback = "") -> std::string {
+            const auto it = summary.kv.find(key);
+            return (it == summary.kv.end() || it->second.empty()) ? fallback : it->second;
+        };
+        add("script_runner", field("enabled", "0") == "1" ? "warn" : "ok",
+            "enabled=" + field("enabled", "0") +
+            ";scripts=" + field("scripts", "0") +
+            ";path_policy=" + field("path_policy", "unknown") +
+            ";hash_on_run=" + field("hash_on_run", "0") +
+            ";audit=" + field("audit", "0"));
+    }
+    else
+    {
+        add("script_runner", "warn", response.empty() ? "script_runner status unavailable" : response);
     }
 
     if (jsonOutput)
@@ -1791,7 +1853,7 @@ void showUsage(const char *exe)
         << "  " << exe << " module artifact get <id> [--out <path>]\n"
         << "  " << exe << " module artifact cleanup [--expired|--all] [--verify]\n"
         << "  " << exe << " module artifact status [--verify] [--json]\n"
-        << "  " << exe << " module artifact policy [--ttl-ms N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]\n"
+        << "  " << exe << " module artifact policy [--ttl-ms N] [--max-artifact-bytes N] [--max-total-bytes N] [--auto-cleanup|--no-auto-cleanup] [--verify-on-status|--no-verify-on-status] [--json]\n"
         << "  " << exe << " health-check set|get|clear --pid <pid> [--config-json <json>]\n"
         << "  " << exe << " restart-hook set|get|clear --pid <pid> [--config-json <json>]\n"
         << "  " << exe << " guard retry --id <guard-id>\n"
@@ -1817,6 +1879,8 @@ void showUsage(const char *exe)
         << "  " << exe << " notify status|config [--eventlog|--no-eventlog] [--popup|--no-popup]\n"
         << "  " << exe << " dump status|collect --pid <pid> [--type normal|with-data] [--confirm]\n"
         << "  " << exe << " service-guard status|query|start|stop|ensure --name <service> [--state running|stopped] [--confirm]\n"
+        << "  " << exe << " service-guard policy [--allow <svc1,svc2>] [--allow-protected|--no-allow-protected] [--confirm]\n"
+        << "  " << exe << " service-guard policy-clear --confirm\n"
         << "  " << exe << " file-watch status|add|list|check|remove --path <file> [--id <id>] [--action event|none]\n"
         << "  " << exe << " policy-template status|set|list|remove|apply --name <template> [--pid <pid>] [advanced-policy]\n"
         << "  " << exe << " remote-agent status|heartbeat|guards\n"
@@ -1842,6 +1906,8 @@ void showUsage(const char *exe)
         << "  --all               module artifact cleanup removes all artifacts\n"
         << "  --verify            module artifact cleanup verifies hashes before removing corrupt artifacts\n"
         << "  --ttl-ms <N>        artifact retention TTL in milliseconds (60000..604800000)\n"
+        << "  --max-artifact-bytes <N> artifact per-file limit in bytes (65536..67108864)\n"
+        << "  --max-total-bytes <N> artifact store total limit in bytes (1048576..1073741824)\n"
         << "  --auto-cleanup      artifact policy removes expired entries before new writes\n"
         << "  --no-auto-cleanup   artifact policy disables automatic expired cleanup\n"
         << "  --verify-on-status  artifact policy verifies content hashes during status\n"
@@ -1850,6 +1916,9 @@ void showUsage(const char *exe)
         << "  --max-bytes <N>     backup snapshot maximum encoded output bytes\n"
         << "  --source <name>     eventlog recent source filter\n"
         << "  --state <value>     target state for service-guard ensure\n"
+        << "  --allow <svc1,svc2> service-guard mutation allowlist\n"
+        << "  --allow-protected   service-guard policy may mutate protected services that are explicitly allowlisted\n"
+        << "  --no-allow-protected deny protected services even when allowlisted\n"
         << "  --action <value>    schedule action or file-watch action\n"
         << "  --confirm          confirm high-risk local operations and module permissive on\n"
         << "  --enable/--disable script-runner config switch\n"
@@ -1986,6 +2055,10 @@ int main()
     bool artifactCleanupVerify = false;
     std::string artifactTtlMs;
     bool hasArtifactTtlMs = false;
+    std::string artifactMaxBytes;
+    bool hasArtifactMaxBytes = false;
+    std::string artifactMaxTotalBytes;
+    bool hasArtifactMaxTotalBytes = false;
     bool artifactAutoCleanup = false;
     bool hasArtifactAutoCleanup = false;
     bool artifactVerifyOnStatus = false;
@@ -2007,6 +2080,10 @@ int main()
     bool hasConfigEnabled = false;
     std::string serviceState;
     bool hasServiceState = false;
+    std::string serviceGuardAllow;
+    bool hasServiceGuardAllow = false;
+    bool serviceGuardAllowProtected = false;
+    bool hasServiceGuardAllowProtected = false;
     std::string fileWatchAction;
     bool hasFileWatchAction = false;
     std::string dumpType;
@@ -2352,6 +2429,26 @@ int main()
             hasArtifactTtlMs = true;
             continue;
         }
+        if (arg == "--max-artifact-bytes")
+        {
+            artifactMaxBytes = needValue("--max-artifact-bytes");
+            if (artifactMaxBytes.empty())
+            {
+                return 1;
+            }
+            hasArtifactMaxBytes = true;
+            continue;
+        }
+        if (arg == "--max-total-bytes")
+        {
+            artifactMaxTotalBytes = needValue("--max-total-bytes");
+            if (artifactMaxTotalBytes.empty())
+            {
+                return 1;
+            }
+            hasArtifactMaxTotalBytes = true;
+            continue;
+        }
         if (arg == "--auto-cleanup")
         {
             artifactAutoCleanup = true;
@@ -2426,6 +2523,24 @@ int main()
         {
             serviceState = needValue("--state");
             hasServiceState = true;
+            continue;
+        }
+        if (arg == "--allow")
+        {
+            serviceGuardAllow = needValue("--allow");
+            hasServiceGuardAllow = true;
+            continue;
+        }
+        if (arg == "--allow-protected")
+        {
+            serviceGuardAllowProtected = true;
+            hasServiceGuardAllowProtected = true;
+            continue;
+        }
+        if (arg == "--no-allow-protected")
+        {
+            serviceGuardAllowProtected = false;
+            hasServiceGuardAllowProtected = true;
             continue;
         }
         if (arg == "--type")
@@ -3154,6 +3269,8 @@ int main()
             {
                 wireCommand = "module artifact policy";
                 if (hasArtifactTtlMs) wireCommand += " --ttl-ms " + artifactTtlMs;
+                if (hasArtifactMaxBytes) wireCommand += " --max-artifact-bytes " + artifactMaxBytes;
+                if (hasArtifactMaxTotalBytes) wireCommand += " --max-total-bytes " + artifactMaxTotalBytes;
                 if (hasArtifactAutoCleanup) wireCommand += artifactAutoCleanup ? " --auto-cleanup" : " --no-auto-cleanup";
                 if (hasArtifactVerifyOnStatus) wireCommand += artifactVerifyOnStatus ? " --verify-on-status" : " --no-verify-on-status";
             }
@@ -3508,6 +3625,32 @@ int main()
         if (sub == "status")
         {
             wireCommand = "module call service_guard op=status";
+        }
+        else if (sub == "policy")
+        {
+            wireCommand = "module call service_guard op=policy;action=set";
+            if (hasServiceGuardAllow)
+            {
+                wireCommand += ";allow_b64=" + base64Encode(serviceGuardAllow);
+            }
+            if (hasServiceGuardAllowProtected)
+            {
+                wireCommand += std::string(";allow_protected=") + (serviceGuardAllowProtected ? "1" : "0");
+            }
+            if (confirmOperation) wireCommand += ";confirm=1";
+            if (!hasServiceGuardAllow && !hasServiceGuardAllowProtected && !confirmOperation)
+            {
+                wireCommand = "module call service_guard op=policy;action=status";
+            }
+        }
+        else if (sub == "policy-clear" || sub == "policy_clear")
+        {
+            wireCommand = "module call service_guard op=policy;action=clear";
+            if (confirmOperation) wireCommand += ";confirm=1";
+        }
+        else if (sub == "protected")
+        {
+            wireCommand = "module call service_guard op=protected";
         }
         else if (sub == "query" || sub == "start" || sub == "stop" || sub == "ensure")
         {

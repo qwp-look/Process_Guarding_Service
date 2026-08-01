@@ -1,12 +1,6 @@
 name: publish-release
 
 on:
-  push:
-    branches:
-      - release/**
-      - codex/roadmap-sched-remote-cluster
-    tags:
-      - 'Personal_Version_V*'
   workflow_dispatch:
     inputs:
       tag_name:

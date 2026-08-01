@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cwctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +31,7 @@ namespace
     PGS_ServicesV3 g_services{};
     bool g_servicesReady = false;
     std::mutex g_mutex;
+    constexpr std::size_t kMaxRules = 64;
 
     struct Rule
     {
@@ -188,6 +190,83 @@ namespace
         return true;
     }
 
+    std::wstring lowerWide(std::wstring value)
+    {
+        std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+        return value;
+    }
+
+    void normalizeSeparators(std::wstring &value)
+    {
+        std::replace(value.begin(), value.end(), L'/', L'\\');
+        while (value.size() > 3 && value.back() == L'\\') value.pop_back();
+    }
+
+    bool pathHasPrefix(const std::filesystem::path &path, const std::filesystem::path &root)
+    {
+        std::error_code ec;
+        std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(path, ec);
+        if (ec) return false;
+        std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(root, ec);
+        if (ec) return false;
+        std::wstring p = lowerWide(canonicalPath.wstring());
+        std::wstring r = lowerWide(canonicalRoot.wstring());
+        normalizeSeparators(p);
+        normalizeSeparators(r);
+        return p == r || (p.size() > r.size() && p.compare(0, r.size(), r) == 0 && p[r.size()] == L'\\');
+    }
+
+    bool hasAlternateDataStreamSyntax(const std::wstring &value)
+    {
+        const std::size_t driveColon = (value.size() >= 2 && std::iswalpha(value[0]) && value[1] == L':') ? 1 : std::wstring::npos;
+        for (std::size_t i = 0; i < value.size(); ++i)
+        {
+            if (value[i] == L':' && i != driveColon) return true;
+        }
+        return false;
+    }
+
+    bool validateWatchPathPolicy(const std::string &pathText, std::string &reason)
+    {
+        reason.clear();
+        const std::filesystem::path path(pathText);
+        const std::wstring raw = path.wstring();
+        if (raw.rfind(L"\\\\", 0) == 0)
+        {
+            reason = "UNC or device paths are denied by policy";
+            return false;
+        }
+        if (!path.is_absolute() || raw.size() < 3 || !std::iswalpha(raw[0]) || raw[1] != L':' || (raw[2] != L'\\' && raw[2] != L'/'))
+        {
+            reason = "watch path must be an absolute local drive path";
+            return false;
+        }
+        if (hasAlternateDataStreamSyntax(raw))
+        {
+            reason = "alternate data stream paths are denied by policy";
+            return false;
+        }
+
+        wchar_t windowsDir[MAX_PATH] = {0};
+        if (GetWindowsDirectoryW(windowsDir, MAX_PATH) > 0 && pathHasPrefix(path, std::filesystem::path(windowsDir)))
+        {
+            reason = "Windows system paths are denied by policy";
+            return false;
+        }
+        std::filesystem::path root = path.root_path();
+        if (!root.empty())
+        {
+            if (pathHasPrefix(path, root / L"System Volume Information") || pathHasPrefix(path, root / L"$Recycle.Bin"))
+            {
+                reason = "protected system paths are denied by policy";
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::int64_t fileTimeMs(const std::filesystem::path &path)
     {
         std::error_code ec;
@@ -263,7 +342,11 @@ namespace
             r.hash = requestValue(line, "sha256");
             parseUnsigned(requestValue(line, "size"), r.size);
             parseInt64(requestValue(line, "write_time"), r.writeTime);
-            if (safeId(r.id) && !r.path.empty() && safeAction(r.action)) rules.push_back(std::move(r));
+            std::string policyReason;
+            if (safeId(r.id) && !r.path.empty() && safeAction(r.action) && validateWatchPathPolicy(r.path, policyReason))
+            {
+                rules.push_back(std::move(r));
+            }
         }
         return rules;
     }
@@ -295,6 +378,11 @@ namespace
         std::ostringstream out;
         out << "fw_" << std::hex << h;
         return out.str();
+    }
+
+    std::string pathPolicySummary()
+    {
+        return "local_absolute_deny_unc_device_ads_windows_system-volume_recycle-bin";
     }
 
     void emitChangedEvent(const Rule &r)
@@ -356,7 +444,9 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
     if (op == "status")
     {
         const std::vector<Rule> rules = loadRules();
-        setResponse(responseBuf, responseBufSize, "OK rules=" + std::to_string(rules.size()) + ";mode=demand;actions=event,none");
+        setResponse(responseBuf, responseBufSize, "OK rules=" + std::to_string(rules.size()) +
+            ";max_rules=" + std::to_string(kMaxRules) +
+            ";mode=demand;actions=event,none;path_policy=" + pathPolicySummary());
         return 0;
     }
     if (op == "add")
@@ -373,13 +463,25 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
             setResponse(responseBuf, responseBufSize, "ERR invalid file_watch rule");
             return 1;
         }
+        std::string policyReason;
+        if (!validateWatchPathPolicy(r.path, policyReason))
+        {
+            setResponse(responseBuf, responseBufSize, "ERR file_watch path is denied by policy: " + policyReason);
+            return 1;
+        }
         if (!snapshotFile(r.path, r.size, r.writeTime, r.hash))
         {
             setResponse(responseBuf, responseBufSize, "ERR watched file is not readable");
             return 1;
         }
         std::vector<Rule> rules = loadRules();
+        const std::size_t beforeErase = rules.size();
         rules.erase(std::remove_if(rules.begin(), rules.end(), [&](const Rule &existing) { return existing.id == r.id; }), rules.end());
+        if (rules.size() == beforeErase && rules.size() >= kMaxRules)
+        {
+            setResponse(responseBuf, responseBufSize, "ERR file_watch rule limit reached");
+            return 1;
+        }
         rules.push_back(r);
         if (!saveRules(rules))
         {
