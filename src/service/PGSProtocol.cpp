@@ -1976,6 +1976,26 @@ std::string PGS::handleModuleCommand(const std::string &args)
         // explicitly enabled, but a direct module load must still honor the
         // same fail-closed allowlist gate.
         m_modules.ensureAllowlistLoaded(m_modulesDir);
+
+        // P0-03: refuse (or warn in permissive mode) when modules tree ACL is insecure.
+        {
+            const util::ModulesAclAuditResult acl = util::auditModulesAcl(m_modulesDir);
+            if (!acl.ok)
+            {
+                const std::string firstBad = acl.badPaths.empty() ? m_modulesDir : acl.badPaths.front();
+                const std::string detail = "module.acl-insecure;reason=" + acl.reason +
+                    ";bad_count=" + std::to_string(acl.badPaths.size()) +
+                    ";path=" + firstBad;
+                if (!m_modulesPermissive.load())
+                {
+                    Logger::error("PGS: rejected module load: " + detail);
+                    recordEvent("module.load-failed", "path=" + path + ";name=" + allowKey + ";error=" + detail);
+                    return "ERR " + detail;
+                }
+                Logger::warning("PGS: module load ACL warning (permissive): " + detail);
+            }
+        }
+
         std::string err;
         if (m_modules.load(path, err))
         {

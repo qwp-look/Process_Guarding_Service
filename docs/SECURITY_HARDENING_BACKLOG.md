@@ -42,23 +42,35 @@
 
 ## P0-03 模块目录 ACL 需要 fail-closed 递归验证
 
-- 影响组件：PGS 服务启动、模块加载、PPL opt-in
-- 当前行为：PPL opt-in 时会递归加固 modules tree；部分 ACL 失败路径仍偏日志/告警，未形成统一的 release 前检查。
-- 风险/攻击面：模块目录或子目录可被非管理员写入时，模块加载边界失效。
-- 建议修复：启动时对 modules 根、子目录、DLL、manifest 做 owner/DACL 检查；生产模式任一失败则拒绝模块加载；添加 `pgs_bless module audit-acl` 或 release smoke ACL 检查。
-- 涉及入口：`src/service/PGS.cpp` 的 `secureModulesTree()`、`ModuleManager::load()`、`tools/release_smoke.ps1`。
-- 验证方式：给 Users 写权限后模块加载失败；修正 ACL 后恢复；日志包含具体路径和 ACE 诊断。
-- 是否阻塞功能版 release：否。阻塞安全版 release。
+> 2026-08-01 验收修正已落地；补充 fail-closed 枚举：
+> 1) `enumerateModulesAclPaths` 真递归，返回 `ModulesAclEnumerateResult{paths,ok,reason,errorPath}`；**禁止** `skip_permission_denied`，构造/类型查询/increment 任一步 `ec` 都记失败（`modules-tree-enumeration-failed` / `modules-entry-unreadable`）；
+> 2) `auditModulesAcl` / `secureModulesAclTree` 在枚举失败时必须 `ok=false` / 返回 false，不得静默跳过不可读子树后报 ok；
+> 3) `PGS::initialize()` **只 audit、不自动修复**；生产失败拒绝加载并记 `module.acl-insecure`；permissive 可降级 warning；
+> 4) 仅 `doctor repair-modules-acl` 修 owner+DACL 再 re-audit；`test_modules_acl.ps1` 用 `icacls /grant *S-1-5-32-545:(W)` 制造 Users 写权限负例。
+- 影响组件：PGS 服务启动、模块加载、PPL opt-in、doctor/repair
+- 当前行为：启动 audit-only fail-closed；显式 repair 修 owner+DACL；doctor 暴露 `modules_acl_recursive`。
+- 风险/攻击面（历史）：模块目录或深层子路径可被非管理员写入时，模块加载边界失效。
+- 建议修复：核心语义已收口。剩余是安装态/VM 非管理员负例与 release 安装包默认 ACL 断言。
+- 涉及入口：`include/Process_Guard/PGUtil.h`、`src/service/PGS.cpp`、`src/service/PGSProtocol.cpp`、`tools/pgs_bless.cpp`。
+- 验证方式：嵌套 `evil.dll` Users 写权限 → audit/doctor 失败且 `module load` 拒绝；`repair-modules-acl` 后 ok；启动路径不得静默自愈 ACL。
+- 是否阻塞功能版 release：否。阻塞安全版 release 的剩余项转为安装态/VM 验证。
 
-## P0-04 bootstrap token 文件 ACL 仍需 fail-closed
+## P0-04 bootstrap token 文件 ACL fail-closed（核心已完成）
 
-- 影响组件：服务首次启动 token 生成
-- 当前行为：首次无归档时生成 token 并写入 `pgs_initial_token.txt`，目录 ACL 设计为 SYSTEM + Administrators + 当前运行身份。2026-07-28 已改为 fail-closed：写入前若无法保护 state 目录 ACL 会拒绝启动；写入后若无法保护 token 文件 ACL，会删除 token 文件并拒绝启动。
-- 风险/攻击面：初始 token 若落入宽权限目录，普通本机用户可读取管理 token；fail-closed 已覆盖服务自身写入路径，剩余是人为复制/备份 token 文件和异常 ProgramData 权限的专项验证。
-- 建议修复：保留 `pgs_bless doctor repair-state-acl` 作为管理员修复入口；后续补模拟 ACL 失败的专项测试和 doctor 对现有 token 文件 ACL 的只读诊断。
-- 涉及入口：`src/service/PGS.cpp` 的 `writeInitialTokenFile()`、`initialize()`，`docs/SERVICE_MODE_GUIDE.md`。
-- 验证方式：正常目录首次启动仍写 token；模拟 ProgramData state 目录宽权限/ACL 设置失败时服务应 fail-closed；现有 token 文件 ACL 由 doctor/repair 检查修复。
-- 是否阻塞功能版 release：否。阻塞安全版 release。
+> 2026-08-01 更新：**P0-04 核心实现已完成**。
+> 1) 服务首次写入：`writeInitialTokenFile` 经 `secureBootstrapTokenAcl` 保护 token 文件；ACL 失败则删除 token 并拒绝启动（state 目录仍用 `secureCreateDirectory`）。
+> 2) Token 专用边界：`OWNER` 尽量为 Administrators，DACL 为 **SY+BA only**（`secureBootstrapTokenDaclSddl`），**不**注入交互/doctor 用户 ACE（避免 repair 加宽 LocalSystem 写出的 secret）。
+> 3) Doctor：`doctor --json` 增加 `bootstrap_token_acl` 只读 owner/DACL 诊断；缺失 → `info`（`missing/not-generated`）；Users/Everyone 等读或写 → `error`（如 `non-admin-token-access-ace`）；无法读 SD → `warn`（`acl-read-access-denied`），不假报 `ok`。
+> 4) Repair：`doctor repair-state-acl` 在修 state 目录后对既有 `pgs_initial_token.txt` 调用 `secureBootstrapTokenAcl` 再 re-audit；不创建、不改写 token 内容。
+> 5) 单测：`test_pgs_core` 覆盖 missing / Users 读/写 / SY+BA-only / 坏 owner fail-closed / 幂等 repair（`163 checks, 0 failures`）；`tools/test_bootstrap_token_acl.ps1` 为提升权限 ProgramData 负例脚本。
+> 剩余延期：提升权限下的 ProgramData/icacls 专项 E2E、异常 ProgramData 权限与备份还原场景的 VM 验证。
+- 影响组件：服务首次启动 token 生成、doctor/repair
+- 当前行为：写入路径 fail-closed + token 专用 SY+BA ACL；doctor 诊断既有文件；`repair-state-acl` 修复既有 token 文件 ACL 并 re-audit。
+- 风险/攻击面（历史）：初始 token 若落入宽权限目录，普通本机用户可读取管理 token。核心路径已收口；剩余是提升权限/安装态专项验证。
+- 建议修复：核心语义已收口。保留 `pgs_bless doctor repair-state-acl` 作为管理员修复入口；延期项为 elevated `test_bootstrap_token_acl.ps1` / VM 验收。
+- 涉及入口：`include/Process_Guard/PGUtil.h`（`auditBootstrapTokenAcl` / `secureBootstrapTokenAcl`）、`src/service/PGS.cpp`（`writeInitialTokenFile` / `initialize`）、`tools/pgs_bless.cpp`（doctor / `repair-state-acl`）、`tools/test_bootstrap_token_acl.ps1`。
+- 验证方式：单测 163/0；非管理员 doctor 对不可读 SD 报 `warn` 而非 `ok`；提升权限下 Users:(R) → doctor `error`，repair 后 `ok`；服务 ACL 失败仍删 token 并拒启动。
+- 是否阻塞功能版 release：否。阻塞安全版 release 的剩余项转为提升权限/VM 专项验证。
 
 ## P1-05 `--allow-all-modules` 生命周期和撤销
 

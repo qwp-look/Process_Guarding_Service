@@ -1336,7 +1336,58 @@ int runDoctor(const std::string &host, unsigned short port, const std::string &t
     const std::filesystem::path stateDir = programData / L"state";
     add("programdata_acl", canWriteProbe(programData) ? "ok" : "warn", wideToUtf8(programData.wstring()));
     add("state_acl", canWriteProbe(stateDir) ? "ok" : "warn", wideToUtf8(stateDir.wstring()));
+    {
+        // P0-04: read-only owner/DACL audit of existing bootstrap token file.
+        // Missing file is info (not generated / already removed), not an error.
+        // ACCESS_DENIED while reading the SD is warn (need elevation), not a hard
+        // ACL verdict — real non-admin read/write ACEs remain error.
+        const std::filesystem::path tokenPath = stateDir / L"pgs_initial_token.txt";
+        const std::string tokenUtf8 = wideToUtf8(tokenPath.wstring());
+        const ProcessGuard::util::BootstrapTokenAclAuditResult tokenAcl =
+            ProcessGuard::util::auditBootstrapTokenAcl(tokenUtf8);
+        std::string status;
+        if (!tokenAcl.present)
+        {
+            status = "info";
+        }
+        else if (tokenAcl.ok)
+        {
+            status = "ok";
+        }
+        else if (tokenAcl.reason == "acl-read-access-denied")
+        {
+            status = "warn";
+        }
+        else
+        {
+            status = "error";
+        }
+        const std::string message =
+            "status=" + status +
+            ";present=" + std::string(tokenAcl.present ? "1" : "0") +
+            ";path=" + tokenUtf8 +
+            ";reason=" + (tokenAcl.reason.empty()
+                ? std::string(tokenAcl.present ? (tokenAcl.ok ? "ok" : "acl-insecure")
+                                               : "missing/not-generated")
+                : tokenAcl.reason);
+        add("bootstrap_token_acl", status, message);
+    }
     add("modules_acl", canWriteProbe(modules) ? "ok" : "warn", wideToUtf8(modules.wstring()));
+    {
+        // P0-03: recursive owner/DACL audit of modules trust boundary.
+        const std::string modulesUtf8 = wideToUtf8(modules.wstring());
+        const ProcessGuard::util::ModulesAclAuditResult acl =
+            ProcessGuard::util::auditModulesAcl(modulesUtf8);
+        const std::string firstBad = acl.badPaths.empty() ? std::string() : acl.badPaths.front();
+        const std::string firstBadB64 = firstBad.empty() ? std::string() : base64Encode(firstBad);
+        const std::string status = acl.ok ? "ok" : "error";
+        const std::string message =
+            "status=" + status +
+            ";bad_count=" + std::to_string(acl.badPaths.size()) +
+            ";first_bad_path_b64=" + firstBadB64 +
+            ";reason=" + (acl.reason.empty() ? std::string(acl.ok ? "ok" : "acl-insecure") : acl.reason);
+        add("modules_acl_recursive", status, message);
+    }
     add("modules_staging", canWriteProbe(exeDir / L"modules_staging") ? "ok" : "warn", wideToUtf8((exeDir / L"modules_staging").wstring()));
     add("modules_allow", std::filesystem::exists(modules / L"modules.allow") ? "ok" : "warn", wideToUtf8((modules / L"modules.allow").wstring()));
     add("modules_lock", std::filesystem::exists(modules / L"modules.lock") ? "ok" : "warn", wideToUtf8((modules / L"modules.lock").wstring()));
@@ -1671,21 +1722,82 @@ int runDoctorRepair(const std::string &action, const std::string &modulesDir, bo
         {
             if (!ProcessGuard::util::secureCreateDirectory(wideToUtf8(dir.wstring()))) ok = false;
         }
-        message = wideToUtf8((pgsRoot / L"state").wstring());
+        // P0-04: also re-protect an existing bootstrap token file. Never create it.
+        const std::filesystem::path tokenPath = pgsRoot / L"state" / L"pgs_initial_token.txt";
+        const std::string tokenUtf8 = wideToUtf8(tokenPath.wstring());
+        std::error_code tokenEc;
+        const bool tokenExists = std::filesystem::is_regular_file(tokenPath, tokenEc) && !tokenEc;
+        bool tokenRepaired = false;
+        bool tokenAuditOk = true;
+        std::string tokenReason = "missing/not-generated";
+        if (tokenExists)
+        {
+            tokenRepaired = ProcessGuard::util::secureBootstrapTokenAcl(tokenUtf8);
+            if (!tokenRepaired)
+            {
+                ok = false;
+            }
+            const ProcessGuard::util::BootstrapTokenAclAuditResult tokenAcl =
+                ProcessGuard::util::auditBootstrapTokenAcl(tokenUtf8);
+            tokenAuditOk = tokenAcl.ok && tokenAcl.present;
+            tokenReason = tokenAcl.reason.empty()
+                ? std::string(tokenAcl.ok ? "ok" : "acl-insecure")
+                : tokenAcl.reason;
+            if (!tokenAuditOk)
+            {
+                ok = false;
+            }
+        }
+        message = wideToUtf8((pgsRoot / L"state").wstring()) +
+            ";bootstrap_token_present=" + std::string(tokenExists ? "1" : "0") +
+            ";bootstrap_token_repaired=" + std::string(tokenExists ? (tokenRepaired ? "1" : "0") : "0") +
+            ";bootstrap_token_audit_ok=" + std::string(tokenExists ? (tokenAuditOk ? "1" : "0") : "1") +
+            ";bootstrap_token_reason=" + tokenReason;
     }
     else if (action == "repair-modules-acl")
     {
-        ok = ProcessGuard::util::secureCreateDirectory(wideToUtf8(moduleRoot.wstring()));
+        // Reuse the same path enumeration as auditModulesAcl (root, module dirs,
+        // DLLs, manifests, modules.lock) and re-audit after repair.
+        const std::string rootUtf8 = wideToUtf8(moduleRoot.wstring());
         std::size_t repaired = 0;
         std::size_t failed = 0;
-        std::error_code ec;
-        for (const auto &entry : std::filesystem::recursive_directory_iterator(moduleRoot, ec))
+        ok = ProcessGuard::util::secureModulesAclTree(rootUtf8);
+        const ProcessGuard::util::ModulesAclEnumerateResult enumerated =
+            ProcessGuard::util::enumerateModulesAclPaths(rootUtf8);
+        if (!enumerated.ok)
         {
-            const bool container = entry.is_directory(ec);
-            if (ProcessGuard::util::secureApplyDacl(wideToUtf8(entry.path().wstring()), container)) ++repaired;
+            ok = false;
+            ++failed;
+        }
+        for (const auto &entry : enumerated.paths)
+        {
+            if (ProcessGuard::util::secureApplyModulesDacl(entry.path, entry.container)) ++repaired;
             else { ++failed; ok = false; }
         }
-        message = "modules=" + wideToUtf8(moduleRoot.wstring()) + ";repaired=" + std::to_string(repaired) + ";failed=" + std::to_string(failed);
+        const ProcessGuard::util::ModulesAclAuditResult acl =
+            ProcessGuard::util::auditModulesAcl(rootUtf8);
+        if (!acl.ok)
+        {
+            ok = false;
+        }
+        message = "modules=" + rootUtf8 +
+            ";repaired=" + std::to_string(repaired) +
+            ";failed=" + std::to_string(failed) +
+            ";paths=" + std::to_string(enumerated.paths.size()) +
+            ";enum_ok=" + std::string(enumerated.ok ? "1" : "0") +
+            ";audit_ok=" + std::string(acl.ok ? "1" : "0") +
+            ";bad_count=" + std::to_string(acl.badPaths.size()) +
+            ";reason=" + (acl.reason.empty()
+                ? std::string(acl.ok ? "ok" : (enumerated.ok ? "acl-insecure" : enumerated.reason))
+                : acl.reason);
+        if (!enumerated.ok && !enumerated.errorPath.empty())
+        {
+            message += ";enum_error_path_b64=" + base64Encode(enumerated.errorPath);
+        }
+        if (!acl.ok && !acl.badPaths.empty())
+        {
+            message += ";first_bad_path_b64=" + base64Encode(acl.badPaths.front());
+        }
     }
     else if (action == "repair-modules-lock")
     {

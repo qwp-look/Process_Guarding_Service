@@ -383,7 +383,8 @@ Diagnostics should cover:
 - service install/running status and SCM recovery configuration.
 - PGS token state, bootstrap token file location, and state directory ACL.
 - listen port occupancy and PGS protocol reachability.
-- modules root ACL, `modules.lock` hash coverage, PPL gate state, and permissive mode.
+- modules root ACL, recursive modules trust-boundary ACL (`modules_acl_recursive`), `modules.lock` hash coverage, PPL gate state, and permissive mode.
+- Done 2026-08-01 (acceptance fix): true recursive path enumeration; startup audit-only fail-closed (no auto-repair); explicit `repair-modules-acl` sets owner+DACL; nested-path unit tests; smoke runs explicit repair before `--enable-modules`; `test_modules_acl.ps1` hard-fails on successful load under insecure ACL.
 - Qt/OpenSSL/MinGW runtime closure for release trees.
 - ProgramData state/module data directories and runtime DB migration status.
 - release version consistency across workflow, installer, docs, and generated artifact names.

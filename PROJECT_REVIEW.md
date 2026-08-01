@@ -132,18 +132,19 @@ PGS（Process Guarding Service）是一个 Windows 进程守护工具，以 Wind
 | permissive 模式无撤销路径 | 新增 `module permissive status/on/off`，开启需 `--confirm` |
 | dump artifact 敏感度 | 标记 `sensitive=high`，TTL 裁剪到 6 小时 |
 | script_runner 默认开放 | 默认禁用，run 需 `--confirm`，final-path 限制到服务数据目录，登记 hash 并运行前重验 |
+| bootstrap token 文件 ACL（P0-04） | 写入/repair 用 `secureBootstrapTokenAcl`（SY+BA，无交互用户 ACE）；`doctor` 的 `bootstrap_token_acl` 只读诊断既有文件；单测 163/0 |
 
 ### 5.2 仍存在的安全风险
 
 **P0 级（应优先处理）**：
 
 - **管理协议是裸 loopback TCP + token**（P1-06）。token 泄露后同机任意用户可调用管理 API。Named Pipe + ACL 是更彻底的解法，但迁移成本不低。短期缓解：确保 state 目录 ACL 为 SYSTEM + Administrators。
-- **bootstrap token 文件 ACL fail-closed 仍需专项验证**（P0-04）。服务自身首次写入路径已在 2026-07-28 改为 ACL 失败即拒绝启动；剩余是模拟 ACL 失败、异常 ProgramData 权限和既有 token 文件只读诊断。
 
 **P1 级（下一轮安全专项）**：
 
 - **代码签名未配置**（P1-10）。用户无法验证下载物来源，installer/exe/dll/sys 均未签名。这是公开发行前必须完成的。
-- **模块目录 ACL 未做 fail-closed 递归验证**（P0-03）。启动时需要检查 modules 根、子目录、DLL、manifest 的 owner/DACL，任何一项失败就拒绝加载。
+- **模块目录 ACL 递归 fail-closed 已按验收修正落地**（P0-03）。真递归枚举、启动只 audit 不自动 repair、显式 repair 修 owner+DACL、嵌套路径单测与 smoke 显式 repair。剩余安装态/VM 非管理员负例。
+- **bootstrap token ACL 提升权限/VM 专项验证**（P0-04 核心已完成）。剩余 elevated `test_bootstrap_token_acl.ps1` / 异常 ProgramData 与备份还原场景。
 - **审计日志完整性**（P2-11）。当前 PGS events 是内存环，服务重启后丢失；Web remote audit 是 append 文本，可被本地管理员篡改。
 
 **P2 级（加固/完善）**：
@@ -232,9 +233,9 @@ checkout → 缓存 MinGW64 工具链 → 构建 C++ 核心+CLI →
 |--------|------|
 | P0 | 代码签名配置 |
 | P0 | 在真实管理员 VM 运行完整 `vm_acceptance.ps1` |
-| P1 | bootstrap token 文件 ACL fail-closed 专项验证 |
+| P1 | bootstrap token ACL 提升权限/VM 专项验证（核心 P0-04 已完成） |
 | P1 | 压力/长稳测试基线（`-Iterations 500`，`-Minutes 240`）|
-| P1 | 模块目录 ACL 递归验证 + fail-closed |
+| P1 | 模块目录 ACL 递归验证安装态/VM 负例（核心 fail-closed 已完成） |
 | P1 | Named Pipe 传输层（替代或并行裸 TCP）|
 | P1 | PGS.cpp 核心拆分（ArtifactStore、HealthEngine 抽出）|
 | P2 | Playwright/DOM smoke（Web + Cluster UI）|

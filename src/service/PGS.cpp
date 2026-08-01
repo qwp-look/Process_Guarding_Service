@@ -646,58 +646,6 @@ bool runHealthProbe(const HealthTask &task, const HealthCheckConfig &cfg, std::s
     return false;
 }
 
-bool secureModulesTree(const std::string &modulesDir)
-{
-    if (modulesDir.empty() || !ProcessGuard::util::secureCreateDirectory(modulesDir))
-    {
-        return false;
-    }
-
-    std::error_code ec;
-    std::filesystem::recursive_directory_iterator it(
-        modulesDir,
-        std::filesystem::directory_options::none,
-        ec);
-    if (ec)
-    {
-        return false;
-    }
-    const std::filesystem::recursive_directory_iterator end;
-    for (; it != end;)
-    {
-        const std::filesystem::path path = it->path();
-        std::error_code typeEc;
-        if (it->is_directory(typeEc))
-        {
-            if (!ProcessGuard::util::secureCreateDirectory(path.string()))
-            {
-                return false;
-            }
-        }
-        else if (it->is_regular_file(typeEc))
-        {
-            if (!ProcessGuard::util::secureApplyDacl(path.string(), false))
-            {
-                return false;
-            }
-        }
-        else if (typeEc)
-        {
-            return false;
-        }
-        else
-        {
-            return false;
-        }
-        it.increment(ec);
-        if (ec)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
 // Enable a named privilege on the current process token (best-effort: ok if the
 // privilege is absent, only fail if it cannot be enabled when present). Returns
 // true if the privilege is enabled afterwards.
@@ -1071,14 +1019,50 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     // Prepare <exe>\modules before marking the service initialised. Module
     // loading is now a general opt-in; kernel/PPL modules require the separate
     // high-risk switch. Compatibility --enable-ppl sets both.
+    //
+    // P0-03 fail-closed: startup only *audits* the modules tree. It must NOT
+    // auto-repair ACLs (that would hide an insecure install). Explicit repair
+    // is `pgs_bless doctor repair-modules-acl` only.
     m_modulesDir = moduleDirectoryOfSelf();
     const bool highRiskModulesEnabled = m_kernelModulesEnabled || m_pplEnabled;
-    const bool modulesDirSecured = !m_modulesDir.empty() &&
-        ((m_modulesEnabled || highRiskModulesEnabled) ? secureModulesTree(m_modulesDir) : util::secureCreateDirectory(m_modulesDir));
-    if (!modulesDirSecured)
+    const bool wantModules = m_modulesEnabled || m_modulesPermissive.load() || highRiskModulesEnabled;
+    if (!m_modulesDir.empty())
     {
-        Logger::warning("PGS: modules directory ACL hardening failed or directory unavailable: " + m_modulesDir);
+        // Create the directory if missing so doctor/load paths have a root, but
+        // do not mutate owner/DACL here.
+        std::error_code ec;
+        std::filesystem::create_directories(m_modulesDir, ec);
     }
+
+    util::ModulesAclAuditResult modulesAclAudit{};
+    bool modulesAclOk = false;
+    if (wantModules && !m_modulesDir.empty())
+    {
+        modulesAclAudit = util::auditModulesAcl(m_modulesDir);
+        modulesAclOk = modulesAclAudit.ok;
+        if (!modulesAclAudit.ok)
+        {
+            const std::string firstBad = modulesAclAudit.badPaths.empty()
+                ? m_modulesDir
+                : modulesAclAudit.badPaths.front();
+            const std::string detail = "module.acl-insecure;reason=" + modulesAclAudit.reason +
+                ";bad_count=" + std::to_string(modulesAclAudit.badPaths.size()) +
+                ";path=" + firstBad;
+            if (m_modulesPermissive.load())
+            {
+                Logger::warning("PGS: " + detail + " (permissive mode: continuing with warning; run doctor repair-modules-acl)");
+            }
+            else
+            {
+                Logger::error("PGS: " + detail + " (refusing module load; run doctor repair-modules-acl)");
+            }
+        }
+    }
+    else if (wantModules && m_modulesDir.empty())
+    {
+        Logger::error("PGS: module.acl-insecure;reason=modules-root-empty (refusing module load)");
+    }
+
     // v3: gate the allowlist. m_modulesPermissive was restored from the archive
     // above (MODULES_PERMISSIVE) or left false; push it to the registry so the
     // permissive escape hatch applies during this loadFromDirectory() scan.
@@ -1102,8 +1086,15 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         std::vector<std::string>{"*"} : std::vector<std::string>{"*", "!ppl"};
     m_modules.setEnabledModules(enabledModules);
     {
-        if ((m_modulesEnabled || m_modulesPermissive.load()) && modulesDirSecured)
+        const bool permissive = m_modulesPermissive.load();
+        // Production: require clean ACL audit. Permissive: allow load with warning.
+        const bool mayLoad = modulesAclOk || permissive;
+        if ((m_modulesEnabled || permissive) && mayLoad && !m_modulesDir.empty())
         {
+            if (!modulesAclOk && permissive)
+            {
+                Logger::warning("PGS: loading modules under permissive mode despite ACL audit failure");
+            }
             const int loaded = m_modules.loadFromDirectory(m_modulesDir);
             if (loaded > 0)
             {
@@ -1114,9 +1105,9 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
                 Logger::warning("PGS: no modules loaded from " + m_modulesDir);
             }
         }
-        else if (m_modulesEnabled || m_modulesPermissive.load())
+        else if (m_modulesEnabled || permissive)
         {
-            Logger::error("PGS: module loading refused because modules directory is not secured");
+            Logger::error("PGS: module loading refused because modules directory ACL audit failed (module.acl-insecure)");
         }
         else
         {
@@ -3448,8 +3439,10 @@ bool PGS::writeInitialTokenFile(const std::string &stateDir, const std::string &
     }
     out.close();
 
-    // Apply the same protected DACL to the file as the state directory.
-    if (!util::secureApplyDacl(filePath.string(), false))
+    // Token file uses a stricter boundary than the state directory: OWNER=BA and
+    // SY+BA-only protected DACL (no interactive/runtime user ACE). Matches doctor
+    // repair via secureBootstrapTokenAcl so first-write and repair stay aligned.
+    if (!util::secureBootstrapTokenAcl(filePath.string()))
     {
         Logger::error("PGS: failed to secure bootstrap token file ACL: " + filePath.string());
         DeleteFileW(filePath.wstring().c_str());

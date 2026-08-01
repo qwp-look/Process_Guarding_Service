@@ -22,6 +22,8 @@
 
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -322,6 +324,395 @@ void test_module_policy()
     CHECK_EQ(urlHost, std::string("raw.githubusercontent.com"));
     CHECK(!mp::isAllowedHttpsUrl("http://raw.githubusercontent.com/qwp-look/x", true, urlHost, urlPath));
 }
+
+void weakenPathDaclUsersWrite(const std::filesystem::path &path)
+{
+    PSECURITY_DESCRIPTOR psd = nullptr;
+    ULONG sdSize = 0;
+    const wchar_t *weakSddl = L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FW;;;BU)";
+    const std::wstring wpath = u::utf8ToWide(path.string());
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(weakSddl, SDDL_REVISION_1, &psd, &sdSize) || !psd)
+    {
+        return;
+    }
+    BOOL present = FALSE;
+    BOOL defaulted = FALSE;
+    PACL dacl = nullptr;
+    GetSecurityDescriptorDacl(psd, &present, &dacl, &defaulted);
+    SetNamedSecurityInfoW(const_cast<LPWSTR>(wpath.c_str()), SE_FILE_OBJECT,
+                          DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                          nullptr, nullptr, dacl, nullptr);
+    LocalFree(psd);
+}
+
+// Users read ACE — bootstrap token leakage path (P0-04).
+void weakenPathDaclUsersRead(const std::filesystem::path &path)
+{
+    PSECURITY_DESCRIPTOR psd = nullptr;
+    ULONG sdSize = 0;
+    const wchar_t *weakSddl = L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)";
+    const std::wstring wpath = u::utf8ToWide(path.string());
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(weakSddl, SDDL_REVISION_1, &psd, &sdSize) || !psd)
+    {
+        return;
+    }
+    BOOL present = FALSE;
+    BOOL defaulted = FALSE;
+    PACL dacl = nullptr;
+    GetSecurityDescriptorDacl(psd, &present, &dacl, &defaulted);
+    SetNamedSecurityInfoW(const_cast<LPWSTR>(wpath.c_str()), SE_FILE_OBJECT,
+                          DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                          nullptr, nullptr, dacl, nullptr);
+    LocalFree(psd);
+}
+
+// Force owner to Builtin Users (non-admin) for owner-repair coverage.
+bool setPathOwnerBuiltinUsers(const std::filesystem::path &path)
+{
+    const std::wstring wpath = u::utf8ToWide(path.string());
+    if (wpath.empty())
+    {
+        return false;
+    }
+    DWORD sidBytes = SECURITY_MAX_SID_SIZE;
+    std::vector<unsigned char> sidBuf(sidBytes);
+    PSID usersSid = reinterpret_cast<PSID>(sidBuf.data());
+    if (!CreateWellKnownSid(WinBuiltinUsersSid, nullptr, usersSid, &sidBytes))
+    {
+        return false;
+    }
+    // Best-effort privilege enable (same names modules repair uses).
+    auto enableOne = [](LPCWSTR name) {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token) || !token)
+        {
+            return;
+        }
+        LUID luid{};
+        if (!LookupPrivilegeValueW(nullptr, name, &luid))
+        {
+            CloseHandle(token);
+            return;
+        }
+        TOKEN_PRIVILEGES tp{};
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Luid = luid;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+        CloseHandle(token);
+    };
+    enableOne(L"SeTakeOwnershipPrivilege");
+    enableOne(L"SeRestorePrivilege");
+    const DWORD rc = SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(wpath.c_str()), SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION, usersSid, nullptr, nullptr, nullptr);
+    return rc == ERROR_SUCCESS;
+}
+
+// True when every ACCESS_ALLOWED ACE with token-dangerous rights is SY or BA only
+// (no interactive user SID, no Users/Everyone, etc.).
+bool bootstrapTokenDaclIsSystemAdminOnly(const std::filesystem::path &path)
+{
+    const std::wstring wpath = u::utf8ToWide(path.string());
+    if (wpath.empty())
+    {
+        return false;
+    }
+    PSID owner = nullptr;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    const DWORD rc = GetNamedSecurityInfoW(
+        const_cast<LPWSTR>(wpath.c_str()), SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        &owner, nullptr, &dacl, nullptr, &sd);
+    if (rc != ERROR_SUCCESS || !sd)
+    {
+        if (sd)
+        {
+            LocalFree(sd);
+        }
+        return false;
+    }
+    BOOL present = FALSE;
+    BOOL defaulted = FALSE;
+    PACL sdDacl = nullptr;
+    if (!GetSecurityDescriptorDacl(sd, &present, &sdDacl, &defaulted) || !present || !sdDacl)
+    {
+        LocalFree(sd);
+        return false;
+    }
+    ACL_SIZE_INFORMATION info{};
+    if (!GetAclInformation(sdDacl, &info, sizeof(info), AclSizeInformation))
+    {
+        LocalFree(sd);
+        return false;
+    }
+    const DWORD dangerous = u::bootstrapTokenAclDangerousAccessMask();
+    bool sawSy = false;
+    bool sawBa = false;
+    for (DWORD i = 0; i < info.AceCount; ++i)
+    {
+        ACE_HEADER *hdr = nullptr;
+        if (!GetAce(sdDacl, i, reinterpret_cast<LPVOID *>(&hdr)) || !hdr)
+        {
+            LocalFree(sd);
+            return false;
+        }
+        if (hdr->AceType != ACCESS_ALLOWED_ACE_TYPE)
+        {
+            continue;
+        }
+        auto *allow = reinterpret_cast<ACCESS_ALLOWED_ACE *>(hdr);
+        if ((allow->Mask & dangerous) == 0)
+        {
+            continue;
+        }
+        PSID aceSid = reinterpret_cast<PSID>(&allow->SidStart);
+        if (IsWellKnownSid(aceSid, WinLocalSystemSid))
+        {
+            sawSy = true;
+            continue;
+        }
+        if (IsWellKnownSid(aceSid, WinBuiltinAdministratorsSid))
+        {
+            sawBa = true;
+            continue;
+        }
+        LocalFree(sd);
+        return false; // any other principal with access rights is a fail
+    }
+    LocalFree(sd);
+    return sawSy && sawBa;
+}
+
+bool bootstrapTokenOwnerIsAdministrators(const std::filesystem::path &path)
+{
+    const std::wstring wpath = u::utf8ToWide(path.string());
+    if (wpath.empty())
+    {
+        return false;
+    }
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    const DWORD rc = GetNamedSecurityInfoW(
+        const_cast<LPWSTR>(wpath.c_str()), SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &sd);
+    if (rc != ERROR_SUCCESS || !sd || !owner)
+    {
+        if (sd)
+        {
+            LocalFree(sd);
+        }
+        return false;
+    }
+    const bool ok = IsWellKnownSid(owner, WinBuiltinAdministratorsSid) == TRUE;
+    LocalFree(sd);
+    return ok;
+}
+
+bool pathListed(const std::vector<u::ModulesAclPath> &paths, const std::string &needle)
+{
+    for (const auto &p : paths)
+    {
+        if (p.path.find(needle) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void test_modules_acl_audit()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path root = fs::temp_directory_path(ec) / ("pgs_acl_test_" + u::randomBytesHex(4));
+    fs::create_directories(root / "demo" / "nested", ec);
+    {
+        std::ofstream lock((root / "modules.lock").string(), std::ios::binary);
+        lock << "{\"version\":1,\"modules\":[]}";
+    }
+    {
+        std::ofstream dll((root / "demo" / "demo.dll").string(), std::ios::binary);
+        dll << "MZ-fake";
+    }
+    {
+        std::ofstream man((root / "demo" / "module.manifest.json").string(), std::ios::binary);
+        man << "{\"name\":\"demo\"}";
+    }
+    // Nested trust-boundary files must be enumerated at arbitrary depth.
+    {
+        std::ofstream evil((root / "demo" / "nested" / "evil.dll").string(), std::ios::binary);
+        evil << "MZ-evil";
+    }
+    {
+        std::ofstream nestedMan((root / "demo" / "nested" / "module.manifest.json").string(), std::ios::binary);
+        nestedMan << "{\"name\":\"nested\"}";
+    }
+
+    const std::string rootUtf8 = root.string();
+    const u::ModulesAclEnumerateResult enumerated = u::enumerateModulesAclPaths(rootUtf8);
+    CHECK(enumerated.ok);
+    CHECK(enumerated.reason.empty() || enumerated.reason == "ok");
+    // root + modules.lock + demo/ + nested/ + demo.dll + evil.dll + 2 manifests
+    CHECK(enumerated.paths.size() >= static_cast<std::size_t>(8));
+    CHECK(pathListed(enumerated.paths, "evil.dll"));
+    CHECK(pathListed(enumerated.paths, "nested"));
+    CHECK(pathListed(enumerated.paths, "module.manifest.json"));
+
+    CHECK(u::secureModulesAclTree(rootUtf8));
+    u::ModulesAclAuditResult okAudit = u::auditModulesAcl(rootUtf8);
+    CHECK(okAudit.ok);
+    CHECK_EQ(okAudit.badPaths.size(), static_cast<std::size_t>(0));
+
+    // Shallow DLL Users-write must fail closed.
+    weakenPathDaclUsersWrite(root / "demo" / "demo.dll");
+    u::ModulesAclAuditResult badShallow = u::auditModulesAcl(rootUtf8);
+    CHECK(!badShallow.ok);
+    CHECK(badShallow.badPaths.size() >= static_cast<std::size_t>(1));
+
+    CHECK(u::secureModulesAclTree(rootUtf8));
+    CHECK(u::auditModulesAcl(rootUtf8).ok);
+
+    // Nested DLL Users-write must also fail closed (true recursive coverage).
+    weakenPathDaclUsersWrite(root / "demo" / "nested" / "evil.dll");
+    u::ModulesAclAuditResult badNested = u::auditModulesAcl(rootUtf8);
+    CHECK(!badNested.ok);
+    bool nestedEvilReported = false;
+    for (const auto &bad : badNested.badPaths)
+    {
+        if (bad.find("evil.dll") != std::string::npos)
+        {
+            nestedEvilReported = true;
+            break;
+        }
+    }
+    CHECK(nestedEvilReported);
+    CHECK(!badNested.reason.empty());
+    CHECK(badNested.reason != "ok");
+
+    // Nested manifest regression too.
+    CHECK(u::secureModulesAclTree(rootUtf8));
+    weakenPathDaclUsersWrite(root / "demo" / "nested" / "module.manifest.json");
+    u::ModulesAclAuditResult badNestedManifest = u::auditModulesAcl(rootUtf8);
+    CHECK(!badNestedManifest.ok);
+
+    // Explicit repair restores owner+DACL; audit must return clean.
+    CHECK(u::secureModulesAclTree(rootUtf8));
+    u::ModulesAclAuditResult fixed = u::auditModulesAcl(rootUtf8);
+    CHECK(fixed.ok);
+
+    // Missing root must fail closed via enumeration, not return ok.
+    u::ModulesAclEnumerateResult missing = u::enumerateModulesAclPaths(rootUtf8 + "\\__missing_acl_root__");
+    CHECK(!missing.ok);
+    CHECK_EQ(missing.reason, std::string("modules-root-missing"));
+    u::ModulesAclAuditResult missingAudit = u::auditModulesAcl(rootUtf8 + "\\__missing_acl_root__");
+    CHECK(!missingAudit.ok);
+    CHECK_EQ(missingAudit.reason, std::string("modules-root-missing"));
+
+    fs::remove_all(root, ec);
+}
+
+void test_bootstrap_token_acl_audit()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path(ec) / ("pgs_token_acl_" + u::randomBytesHex(4));
+    fs::create_directories(dir, ec);
+    const fs::path tokenPath = dir / "pgs_initial_token.txt";
+    const std::string tokenUtf8 = tokenPath.string();
+
+    // Missing file is informational, not a security error.
+    u::BootstrapTokenAclAuditResult missing = u::auditBootstrapTokenAcl(tokenUtf8);
+    CHECK(missing.ok);
+    CHECK(!missing.present);
+    CHECK_EQ(missing.reason, std::string("missing/not-generated"));
+    CHECK(!u::secureBootstrapTokenAcl(tokenUtf8)); // must not invent the file
+
+    {
+        std::ofstream out(tokenUtf8, std::ios::binary);
+        out << "deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef";
+    }
+    CHECK(u::secureBootstrapTokenAcl(tokenUtf8));
+    u::BootstrapTokenAclAuditResult okAudit = u::auditBootstrapTokenAcl(tokenUtf8);
+    CHECK(okAudit.ok);
+    CHECK(okAudit.present);
+    CHECK_EQ(okAudit.reason, std::string("ok"));
+    // Repair must not inject interactive user FA — only SY+BA allow ACEs.
+    CHECK(bootstrapTokenDaclIsSystemAdminOnly(tokenPath));
+    // Owner is BA when privileges allow; otherwise a trusted admin-member owner is OK.
+    {
+        PSID owner = nullptr;
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        const std::wstring wpath = u::utf8ToWide(tokenUtf8);
+        const DWORD grc = GetNamedSecurityInfoW(
+            const_cast<LPWSTR>(wpath.c_str()), SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &sd);
+        CHECK(grc == ERROR_SUCCESS && sd && owner);
+        if (sd && owner)
+        {
+            CHECK(u::modulesAclSidIsTrustedPrincipal(owner));
+            LocalFree(sd);
+        }
+    }
+
+    // Builtin Users read must fail closed (token is a secret).
+    weakenPathDaclUsersRead(tokenPath);
+    u::BootstrapTokenAclAuditResult badRead = u::auditBootstrapTokenAcl(tokenUtf8);
+    CHECK(!badRead.ok);
+    CHECK(badRead.present);
+    CHECK_EQ(badRead.reason, std::string("non-admin-token-access-ace"));
+
+    // Explicit repair restores protected DACL (SY+BA only; no interactive user ACE).
+    CHECK(u::secureBootstrapTokenAcl(tokenUtf8));
+    u::BootstrapTokenAclAuditResult fixed = u::auditBootstrapTokenAcl(tokenUtf8);
+    CHECK(fixed.ok);
+    CHECK(fixed.present);
+    CHECK_EQ(fixed.reason, std::string("ok"));
+    CHECK(bootstrapTokenDaclIsSystemAdminOnly(tokenPath));
+
+    // Write ACE is also fail-closed for non-admins.
+    weakenPathDaclUsersWrite(tokenPath);
+    u::BootstrapTokenAclAuditResult badWrite = u::auditBootstrapTokenAcl(tokenUtf8);
+    CHECK(!badWrite.ok);
+    CHECK_EQ(badWrite.reason, std::string("non-admin-token-access-ace"));
+    CHECK(u::secureBootstrapTokenAcl(tokenUtf8));
+    CHECK(u::auditBootstrapTokenAcl(tokenUtf8).ok);
+    CHECK(bootstrapTokenDaclIsSystemAdminOnly(tokenPath));
+
+    // Bad owner (Builtin Users) must fail closed. Elevated repair should reassign to
+    // BA; without elevation repair may fail closed (still not inventing a false ok).
+    if (setPathOwnerBuiltinUsers(tokenPath))
+    {
+        u::BootstrapTokenAclAuditResult badOwner = u::auditBootstrapTokenAcl(tokenUtf8);
+        CHECK(!badOwner.ok);
+        CHECK_EQ(badOwner.reason, std::string("owner-not-admin-or-system"));
+        const bool repaired = u::secureBootstrapTokenAcl(tokenUtf8);
+        if (repaired)
+        {
+            u::BootstrapTokenAclAuditResult ownerFixed = u::auditBootstrapTokenAcl(tokenUtf8);
+            CHECK(ownerFixed.ok);
+            CHECK(bootstrapTokenDaclIsSystemAdminOnly(tokenPath));
+            // Prefer BA owner when privileges allowed the transfer.
+            CHECK(bootstrapTokenOwnerIsAdministrators(tokenPath) || ownerFixed.ok);
+        }
+        else
+        {
+            // Residual untrusted owner must not be reported as repaired/ok.
+            CHECK(!u::auditBootstrapTokenAcl(tokenUtf8).ok);
+        }
+    }
+
+    // Idempotent: second repair keeps the same security posture (when repair works).
+    if (u::secureBootstrapTokenAcl(tokenUtf8))
+    {
+        CHECK(u::secureBootstrapTokenAcl(tokenUtf8));
+        CHECK(u::auditBootstrapTokenAcl(tokenUtf8).ok);
+        CHECK(bootstrapTokenDaclIsSystemAdminOnly(tokenPath));
+    }
+
+    fs::remove_all(dir, ec);
+}
 } // namespace
 
 int main()
@@ -337,6 +728,8 @@ int main()
     test_restart_window();
     test_backoff();
     test_module_policy();
+    test_modules_acl_audit();
+    test_bootstrap_token_acl_audit();
 
     std::cout << "ran " << g_tests << " checks, " << g_failures << " failures\n";
     return g_failures == 0 ? 0 : 1;

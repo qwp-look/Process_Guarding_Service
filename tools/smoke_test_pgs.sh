@@ -310,6 +310,22 @@ if [[ ! "$pgs_port" =~ ^[0-9]+$ ]]; then
 fi
 echo "[Smoke] using port $pgs_port"
 
+# P0-03: startup is audit-only (no auto-repair). Dev/build trees usually inherit
+# broad ACLs, so explicitly repair the modules trust boundary before any
+# --enable-modules service start. Production installs should ship repaired ACLs
+# or run `doctor repair-modules-acl` once as admin.
+echo "[Smoke] repairing modules ACL (explicit doctor repair, not startup auto-fix)..."
+if ! "$build_dir/pgs_bless.exe" doctor repair-modules-acl --json >/dev/null; then
+  echo "[Smoke] doctor repair-modules-acl failed"
+  exit 1
+fi
+doctor_acl_pre="$("$build_dir/pgs_bless.exe" doctor --json 2>/dev/null || true)"
+if [[ "$doctor_acl_pre" != *'"id":"modules_acl_recursive","status":"ok"'* ]]; then
+  echo "[Smoke] modules_acl_recursive not ok after explicit repair: $doctor_acl_pre"
+  exit 1
+fi
+echo "[Smoke] modules ACL repair ok"
+
 echo "[Smoke] bootstrap token first-start path..."
 run_bootstrap_token_smoke
 echo "[Smoke] bootstrap token first-start path ok"
@@ -349,6 +365,23 @@ fi
 echo "[Smoke] protocol contract ok"
 bless service-guard policy-clear --confirm >/dev/null
 doctor_json="$(bless doctor --json)"
+if [[ "$doctor_json" != *'"id":"modules_acl_recursive","status":"ok"'* ]]; then
+  echo "[Smoke] modules_acl_recursive missing or not ok: $doctor_json"
+  exit 1
+fi
+if [[ "$doctor_json" != *'bad_count='* || "$doctor_json" != *'first_bad_path_b64='* || "$doctor_json" != *'reason='* ]]; then
+  echo "[Smoke] doctor JSON missing modules_acl_recursive fields: $doctor_json"
+  exit 1
+fi
+# P0-04: bootstrap token ACL check is always present (ok|error|info).
+if [[ "$doctor_json" != *'"id":"bootstrap_token_acl"'* ]]; then
+  echo "[Smoke] doctor JSON missing bootstrap_token_acl check: $doctor_json"
+  exit 1
+fi
+if [[ "$doctor_json" != *'present='* || "$doctor_json" != *'reason='* ]]; then
+  echo "[Smoke] doctor JSON missing bootstrap_token_acl fields: $doctor_json"
+  exit 1
+fi
 if [[ "$doctor_json" != *'"id":"artifact_store"'* ]]; then
   echo "[Smoke] doctor JSON missing artifact_store check: $doctor_json"
   exit 1

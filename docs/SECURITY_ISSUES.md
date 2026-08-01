@@ -21,7 +21,7 @@ PGS 作为 Windows 服务以 SYSTEM 或管理员权限运行，持有目标进�
 | 管理协议认证（本地 TCP + token） | 高 | 否，阻塞安全版 |
 | 代码签名缺失 | 高 | 否，阻塞公开发行 |
 | 模块加载链路（allowlist / ACL） | 高 | 否，阻塞安全版 |
-| bootstrap token 文件权限 | 中 | 否，剩余专项验证阻塞安全版 |
+| bootstrap token 文件权限 | 中（核心已完成） | 否；提升权限/VM 专项验证延期，不阻塞功能版 |
 | 输入校验（命令参数/JSON 解析） | 中 | 否 |
 | Web 层凭据与 CSRF | 中（已部分修复） | 否 |
 | 高风险模块执行边界 | 中 | 否，阻塞生产声明 |
@@ -123,32 +123,27 @@ SetEntriesInAcl(2, ea, NULL, &pAcl);
 
 **风险 A：模块目录 ACL 未做递归 fail-closed 验证**
 
-服务启动时未系统检查 `modules/` 目录树的 owner 和 DACL。若普通用户获得了 `modules/<name>/` 的写权限，可替换 DLL，而名称和 SHA-256 都匹配（因为 SHA-256 是用替换后的文件计算的）。
+> 2026-08-01 验收修正已落地：真递归枚举、启动只 audit 不自动 repair、显式 `repair-modules-acl` 同时修 owner+DACL；嵌套路径单测与 smoke 显式 repair 已覆盖。剩余安装态/VM 非管理员负例。
+
+**历史风险**
+
+服务启动时若未系统检查 `modules/` 任意深度目录树的 owner 和 DACL，普通用户获得写权限后可替换深层 DLL/manifest；若同时能改 `modules.lock`，hash 钉扎也会被一起伪造。启动路径若先自动 repair 再 audit，会掩盖本应 fail-closed 的不安全安装态。
 
 ```
 攻击路径：
-1. 普通用户写入 modules/sched/pgs_sched_module.dll（恶意版本）
+1. 普通用户写入 modules/sched/nested/evil.dll 或替换 module.manifest.json
 2. 重新生成 modules.lock（如果有写权限）
 3. 服务加载恶意 DLL，以 SYSTEM 权限执行任意代码
 ```
 
-**修复方案**：
-
-在 `PGS::initialize()` 中，模块加载前对整个 `modules/` 目录树做 DACL 检查：
+**修复方案（已实现）**：
 
 ```cpp
-// 伪代码：检查目录/文件的 owner 必须是 Administrators 或 SYSTEM
-// 检查 DACL 中不能有 non-admin 的 WRITE_DAC / WRITE_OWNER / FILE_WRITE_DATA
-bool secureCheckModulesTree(const std::string& modulesRoot) {
-    for (每个 DLL 和 manifest) {
-        if (!isOwnedByAdminOrSystem(path)) return false;
-        if (hasWritableByNonAdmin(path)) return false;
-    }
-    return true;
-}
+// PGUtil: recursive enumerateModulesAclPaths / auditModulesAcl / secureModulesAclTree
+// PGS::initialize(): audit only -> 生产失败则跳过 loadFromDirectory（不自动 secure）
+// PGSProtocol module load: 非 permissive 时 audit 失败直接 ERR module.acl-insecure
+// pgs_bless doctor repair-modules-acl: owner=Administrators + protected DACL，再 re-audit
 ```
-
-生产模式（非 permissive）下，任何一项检查失败则拒绝加载该模块并记录事件。`pgs_bless doctor` 和 `repair-modules-acl` 已有修复入口，需要与此检查配合。
 
 **风险 B：`--allow-all-modules` 持久化后无视 lock**
 
@@ -163,26 +158,31 @@ bool secureCheckModulesTree(const std::string& modulesRoot) {
 
 ### 3.4 Bootstrap Token 文件权限
 
-**现状**
+**现状（2026-08-01：P0-04 核心实现已完成）**
 
-服务首次启动时，若无归档 token，会生成随机 token 并写入 `C:\ProgramData\ProcessGuard\state\pgs_initial_token.txt`，目录设计为 SYSTEM + Administrators + 当前运行身份 ACL。2026-07-28 已把服务自身写入路径改为 fail-closed：写入前无法保护 state 目录 ACL 会拒绝启动；写入后无法保护 token 文件 ACL 会删除 token 文件并拒绝启动。相关入口：`src/service/PGS.cpp` 的 `writeInitialTokenFile()` 和 `initialize()`。
+服务首次启动时，若无归档 token，会生成随机 token 并写入 `C:\ProgramData\ProcessGuard\state\pgs_initial_token.txt`。State 目录仍用 SYSTEM + Administrators + 当前运行身份 ACL；**token 文件**使用专用边界：尽量 `OWNER=Administrators`，DACL 为 **SY+BA only**（无交互用户 ACE），经 `secureBootstrapTokenAcl` 应用。
+
+写入路径 fail-closed（2026-07-28 起）：写入前无法保护 state 目录 ACL 会拒绝启动；写入后无法保护 token 文件 ACL 会删除 token 并拒绝启动。Doctor 对既有文件做只读 owner/DACL 诊断（`bootstrap_token_acl`）；`repair-state-acl` 会修复既有 token 文件 ACL 并 re-audit。相关入口：`PGUtil.h`、`PGS.cpp` 的 `writeInitialTokenFile()` / `initialize()`、`pgs_bless.cpp` doctor/repair。
 
 **风险**
 
-初始 token 若落入宽权限目录，普通用户可读取管理 token。服务自身首次写入路径已 fail-closed，剩余风险主要是异常 ProgramData/备份还原场景、人工复制 token 文件、以及现有 token 文件 ACL 缺少只读诊断。
+初始 token 若落入宽权限目录，普通用户可读取管理 token。服务写入、doctor 诊断与 repair 核心路径已收口；剩余主要是提升权限 ProgramData/icacls E2E、异常 ProgramData/备份还原场景的 VM 专项验证。
 
 **修复方案**
 
 1. 已完成：写入文件前先保护 state 目录 DACL，失败则拒绝写入并停止服务。
-2. 已完成：写入后保护 token 文件 DACL，失败则删除文件并停止服务。
-3. 保留 `repair-state-acl` 命令（已有）作为管理员修复入口。
-4. 后续补充 ACL 失败模拟测试，以及 doctor 对既有 `pgs_initial_token.txt` 的只读 DACL 诊断。
+2. 已完成：写入后经 `secureBootstrapTokenAcl` 保护 token 文件（SY+BA，无交互用户 ACE），失败则删除文件并停止服务。
+3. 已完成：`doctor --json` 的 `bootstrap_token_acl` 只读诊断；Users/Everyone 等读或写 → `error`；无法读 SD → `warn`（不假报 `ok`）。
+4. 已完成：`repair-state-acl` 修复既有 `pgs_initial_token.txt` ACL（不创建、不改写 token 内容）并 re-audit。
+5. 已完成：`test_pgs_core` 单测证据 `163 checks, 0 failures`；`tools/test_bootstrap_token_acl.ps1` 为提升权限延期专项。
+6. 延期：提升权限下的 ProgramData 负例 / VM 验收。
 
 ```cpp
 // 当前 writeInitialTokenFile 语义：
 // - secureCreateDirectory(stateDir) 失败 -> return false
-// - secureApplyDacl(tokenFilePath) 失败 -> DeleteFile + return false
+// - secureBootstrapTokenAcl(tokenFilePath) 失败 -> DeleteFile + return false
 // 调用方 initialize() 会清空临时 auth hash 并停止启动。
+// doctor: auditBootstrapTokenAcl；repair-state-acl: secureBootstrapTokenAcl + re-audit
 ```
 
 ---
@@ -402,7 +402,7 @@ third_party/
 |------|------|---------|
 | S-01 | 申请代码签名证书，签名 exe/dll | 3.2 |
 | S-02 | 驱动签名（PPL 模块） | 3.2 |
-| S-03 | bootstrap token ACL 失败模拟 + 既有文件 doctor 诊断 | 3.4 |
+| S-03 | bootstrap token ACL 核心已完成；延期 elevated/VM 专项验证 | 3.4 |
 | S-04 | 模块目录 ACL 递归验证 + fail-closed | 3.3 |
 
 ### 第二轮（安全版本专项）
