@@ -8,17 +8,18 @@
 
 #include "Process_Guard/PGSClient.h"
 
+#include <windows.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+
 #include <QBrush>
+#include <QDateTime>
 #include <QColor>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QHBoxLayout>
-#include <QHash>
 #include <QHeaderView>
 #include <QInputDialog>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -33,21 +34,23 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 
 using ProcessGuard::client::ClientOptions;
 using ProcessGuard::client::sendCommand;
 
 namespace
 {
-    constexpr int kColumnCount = 8;
+    constexpr int kColumnCount = 9;
     constexpr int kColName = 0;
     constexpr int kColPid = 1;
     constexpr int kColStatus = 2;
-    constexpr int kColRuntime = 3;
-    constexpr int kColRestarts = 4;
-    constexpr int kColGroup = 5;
-    constexpr int kColHealth = 6;
-    constexpr int kColFailure = 7;
+    constexpr int kColCpu = 3;
+    constexpr int kColMemory = 4;
+    constexpr int kColRuntime = 5;
+    constexpr int kColRestarts = 6;
+    constexpr int kColGroup = 7;
+    constexpr int kColFailure = 8;
 
     QString kvValue(const QString &kv, const QString &key)
     {
@@ -65,19 +68,12 @@ namespace
         return QString::fromUtf8(QByteArray::fromBase64(value.toUtf8()));
     }
 
-    QString baseName(const QString &path)
-    {
-        QString cleaned = path;
-        cleaned.replace(QLatin1Char('/'), QLatin1Char('\\'));
-        const int slash = cleaned.lastIndexOf(QLatin1Char('\\'));
-        return slash >= 0 ? cleaned.mid(slash + 1) : cleaned;
-    }
-
     QColor statusColor(const QString &status)
     {
         if (status == QLatin1String("active")) return QColor(0x39, 0xd3, 0x53);
         if (status == QLatin1String("paused")) return QColor(0xd2, 0x99, 0x22);
         if (status == QLatin1String("quarantined")) return QColor(0xf8, 0x51, 0x49);
+        if (status == QLatin1String("protected")) return QColor(0x39, 0xd3, 0x53);
         return QColor(0x8b, 0x94, 0x9e);
     }
 } // namespace
@@ -101,6 +97,16 @@ void GuardTreePage::setupUi()
     auto *toolbar = new QHBoxLayout();
     m_btnAdd = new QPushButton(this);
     toolbar->addWidget(m_btnAdd);
+
+    m_btnOnlyProtected = new QPushButton(this);
+    m_btnOnlyProtected->setCheckable(true);
+    connect(m_btnOnlyProtected, &QPushButton::toggled, this, [this](bool checked) {
+        m_onlyProtected = checked;
+        retranslateUi();
+        rebuildTree();
+        applyFilter();
+    });
+    toolbar->addWidget(m_btnOnlyProtected);
 
     m_btnPauseRefresh = new QPushButton(this);
     m_btnPauseRefresh->setCheckable(true);
@@ -164,61 +170,69 @@ void GuardTreePage::setupUi()
         const QModelIndex index = m_tree->indexAt(pos);
         if (!index.isValid()) return;
         m_tree->setCurrentIndex(index);
-        QMenu menu(this);
-        menu.addAction(trUi("添加保护", "Add protection"), this, &GuardTreePage::addProtection);
-
-        const QString key = currentGuardKey();
-        if (key.startsWith(QLatin1String("guard:")))
+        const QString key = currentProcKey();
+        if (key.isEmpty()) return;
+        const quint32 pid = key.mid(QString::fromLatin1("proc:").size()).toUInt();
+        const GuardRow *guard = nullptr;
+        for (const GuardRow &row : m_guards)
         {
-            menu.addSeparator();
-            menu.addAction(trUi("关闭保护", "Close protection"), this, &GuardTreePage::closeProtection);
-            menu.addAction(trUi("立即退出并解除", "Intentional exit and unregister"), this, &GuardTreePage::intentionalExit);
-            const quint64 guardId = key.mid(QString::fromLatin1("guard:").size()).toULongLong();
-            for (const GuardRow &row : m_guards)
+            if (row.alive && row.pid == pid)
             {
-                if (row.guardId != guardId) continue;
-                if (row.status == QLatin1String("quarantined"))
-                {
-                    menu.addAction(trUi("重试隔离的守护", "Retry quarantined guard"), this, &GuardTreePage::retryQuarantine);
-                    menu.addAction(trUi("清除隔离记录", "Clear quarantine"), this, &GuardTreePage::clearQuarantine);
-                }
-                menu.addSeparator();
-                QMenu *groupMenu = menu.addMenu(trUi("分组", "Group"));
-                QSet<QString> groups;
-                for (const GuardRow &candidate : m_guards)
-                {
-                    if (!candidate.group.isEmpty()) groups.insert(candidate.group);
-                }
-                groups.remove(row.group);
-                for (const QString &group : groups)
-                {
-                    groupMenu->addAction(trUi("加入 %1", "Join %1").arg(group), this, [this, group]() { assignGroup(group); });
-                }
-                groupMenu->addAction(trUi("新建分组…", "New group…"), this, [this]() {
-                    bool ok = false;
-                    const QString name = QInputDialog::getText(this,
-                        trUi("新建分组", "New group"),
-                        trUi("分组名称", "Group name"), QLineEdit::Normal, QString(), &ok);
-                    if (ok && !name.trimmed().isEmpty()) assignGroup(name.trimmed());
-                });
-                if (!row.group.isEmpty())
-                {
-                    groupMenu->addAction(trUi("从 %1 移除", "Remove from %1").arg(row.group), this, &GuardTreePage::removeFromGroup);
-                    groupMenu->addSeparator();
-                    groupMenu->addAction(trUi("暂停 %1", "Pause %1").arg(row.group), this, [this, row]() { groupPauseResume(row.group, true); });
-                    groupMenu->addAction(trUi("恢复 %1", "Resume %1").arg(row.group), this, [this, row]() { groupPauseResume(row.group, false); });
-                    groupMenu->addAction(trUi("重启 %1", "Restart %1").arg(row.group), this, [this, row]() { groupRestart(row.group); });
-                }
+                guard = &row;
                 break;
             }
         }
-        else if (key.startsWith(QLatin1String("group:")))
+        const ProcRow *proc = nullptr;
+        for (const ProcRow &candidate : m_procs)
         {
-            const QString group = key.mid(QString::fromLatin1("group:").size());
+            if (candidate.pid == pid)
+            {
+                proc = &candidate;
+                break;
+            }
+        }
+        if (!proc) return;
+
+        QMenu menu(this);
+        if (!guard)
+        {
+            menu.addAction(trUi("保护此进程", "Protect this process"), this, &GuardTreePage::protectProcess);
+        }
+        else
+        {
+            menu.addAction(trUi("关闭保护", "Close protection"), this, &GuardTreePage::closeProtection);
+            menu.addAction(trUi("立即退出并解除", "Intentional exit and unregister"), this, &GuardTreePage::intentionalExit);
+            if (guard->status == QLatin1String("quarantined"))
+            {
+                menu.addAction(trUi("重试隔离的守护", "Retry quarantined guard"), this, &GuardTreePage::retryQuarantine);
+                menu.addAction(trUi("清除隔离记录", "Clear quarantine"), this, &GuardTreePage::clearQuarantine);
+            }
             menu.addSeparator();
-            menu.addAction(trUi("重启分组", "Restart group"), this, [this, group]() { groupRestart(group); });
-            menu.addAction(trUi("暂停分组", "Pause group"), this, [this, group]() { groupPauseResume(group, true); });
-            menu.addAction(trUi("恢复分组", "Resume group"), this, [this, group]() { groupPauseResume(group, false); });
+            QMenu *groupMenu = menu.addMenu(trUi("分组", "Group"));
+            QSet<QString> groups;
+            for (const GuardRow &candidate : m_guards)
+            {
+                if (!candidate.group.isEmpty() && candidate.group != guard->group) groups.insert(candidate.group);
+            }
+            for (const QString &group : groups)
+            {
+                groupMenu->addAction(trUi("加入 %1", "Join %1").arg(group), this, [this, group]() { assignGroup(group); });
+            }
+            groupMenu->addAction(trUi("新建分组…", "New group…"), this, [this]() {
+                bool ok = false;
+                const QString name = QInputDialog::getText(this,
+                    trUi("新建分组", "New group"),
+                    trUi("分组名称", "Group name"), QLineEdit::Normal, QString(), &ok);
+                if (ok && !name.trimmed().isEmpty()) assignGroup(name.trimmed());
+            });
+            if (!guard->group.isEmpty())
+            {
+                groupMenu->addAction(trUi("从 %1 移除", "Remove from %1").arg(guard->group), this, &GuardTreePage::removeFromGroup);
+                groupMenu->addSeparator();
+                groupMenu->addAction(trUi("暂停 %1", "Pause %1").arg(guard->group), this, [this, guard]() { groupPauseResume(guard->group, true); });
+                groupMenu->addAction(trUi("恢复 %1", "Resume %1").arg(guard->group), this, [this, guard]() { groupPauseResume(guard->group, false); });
+                groupMenu->addAction(trUi("重启 %1", "Restart %1").arg(guard->group), this, [this, guard]() { groupRestart(guard->group); });
+            }
         }
         menu.addSeparator();
         menu.addAction(trUi("属性", "Properties"), this, &GuardTreePage::showDetails);
@@ -238,7 +252,9 @@ void GuardTreePage::setupUi()
 
 void GuardTreePage::retranslateUi()
 {
-    m_btnAdd->setText(trUi("添加保护", "Add protection"));
+    m_btnAdd->setText(trUi("启动并保护新程序", "Launch && protect"));
+    m_btnOnlyProtected->setText(m_onlyProtected ? trUi("显示全部进程", "Show all processes")
+                                                : trUi("只看受保护", "Protected only"));
     m_btnPauseRefresh->setText(m_paused ? trUi("恢复刷新", "Resume refresh")
                                         : trUi("暂停刷新", "Pause refresh"));
     m_filterEdit->setPlaceholderText(trUi("按名称过滤", "Filter by name"));
@@ -246,18 +262,20 @@ void GuardTreePage::retranslateUi()
         trUi("名称", "Name"),
         trUi("PID", "PID"),
         trUi("状态", "Status"),
+        trUi("CPU", "CPU"),
+        trUi("内存", "Memory"),
         trUi("保护时长", "Protected time"),
         trUi("触发保护", "Triggers"),
         trUi("分组", "Group"),
-        trUi("健康", "Health"),
         trUi("上次失败", "Last failure")});
-    m_tree->header()->resizeSection(kColName, 220);
+    m_tree->header()->resizeSection(kColName, 240);
     m_tree->header()->resizeSection(kColPid, 70);
-    m_tree->header()->resizeSection(kColStatus, 100);
+    m_tree->header()->resizeSection(kColStatus, 110);
+    m_tree->header()->resizeSection(kColCpu, 60);
+    m_tree->header()->resizeSection(kColMemory, 80);
     m_tree->header()->resizeSection(kColRuntime, 110);
-    m_tree->header()->resizeSection(kColRestarts, 80);
-    m_tree->header()->resizeSection(kColGroup, 100);
-    m_tree->header()->resizeSection(kColHealth, 80);
+    m_tree->header()->resizeSection(kColRestarts, 70);
+    m_tree->header()->resizeSection(kColGroup, 90);
 }
 
 void GuardTreePage::setChinese(bool ch)
@@ -283,17 +301,113 @@ void GuardTreePage::setEndpoint(const QString &host, quint16 port)
     if (port > 0) { m_port = port; m_portEdit->setText(QString::number(port)); }
 }
 
+void GuardTreePage::snapshotProcesses()
+{
+    // Client-side process enumeration — the same API surface the Windows Task
+    // Manager uses. One snapshot per refresh; CPU% comes from the per-process
+    // kernel+user time delta between samples.
+    QVector<ProcRow> procs;
+    QHash<quint32, QPair<quint64, quint64>> cpuTimes;
+    const qint64 wallNow = QDateTime::currentMSecsSinceEpoch();
+    const double wallDeltaSec = (m_prevWallMs > 0)
+        ? std::max(0.25, static_cast<double>(wallNow - m_prevWallMs) / 1000.0)
+        : 0.0;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE)
+    {
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        if (Process32FirstW(snapshot, &pe))
+        {
+            do
+            {
+                ProcRow row;
+                row.pid = pe.th32ProcessID;
+                row.parentPid = pe.th32ParentProcessID;
+                row.name = QString::fromWCharArray(pe.szExeFile);
+                procs.push_back(row);
+                cpuTimes.insert(row.pid, qMakePair(0ull, 0ull));
+            } while (Process32NextW(snapshot, &pe));
+        }
+        CloseHandle(snapshot);
+    }
+
+    double systemCores = 1.0;
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    systemCores = si.dwNumberOfProcessors > 0 ? si.dwNumberOfProcessors : 1.0;
+
+    for (ProcRow &row : procs)
+    {
+        HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.pid);
+        if (!handle)
+        {
+            continue;
+        }
+        FILETIME createTime{}, exitTime{}, kernelTime{}, userTime{};
+        if (GetProcessTimes(handle, &createTime, &exitTime, &kernelTime, &userTime))
+        {
+            const quint64 kernel100 = (static_cast<quint64>(kernelTime.dwHighDateTime) << 32) | kernelTime.dwLowDateTime;
+            const quint64 user100 = (static_cast<quint64>(userTime.dwHighDateTime) << 32) | userTime.dwLowDateTime;
+            cpuTimes.insert(row.pid, qMakePair(kernel100, user100));
+            if (m_prevWallMs > 0 && m_prevCpuTimes.contains(row.pid))
+            {
+                const QPair<quint64, quint64> prev = m_prevCpuTimes.value(row.pid);
+                const double procDeltaSec =
+                    (static_cast<double>(kernel100 - prev.first) + static_cast<double>(user100 - prev.second)) / 10.0 / 1000000.0;
+                row.cpuPercent = std::min(100.0 * systemCores,
+                                          std::max(0.0, 100.0 * procDeltaSec / wallDeltaSec / systemCores));
+            }
+        }
+        PROCESS_MEMORY_COUNTERS_EX pmc{};
+        pmc.cb = sizeof(pmc);
+        if (GetProcessMemoryInfo(handle, reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&pmc), sizeof(pmc)))
+        {
+            row.memoryBytes = pmc.WorkingSetSize;
+        }
+        WCHAR imagePathW[MAX_PATH] = {0};
+        DWORD imagePathLen = MAX_PATH;
+        if (QueryFullProcessImageNameW(handle, 0, imagePathW, &imagePathLen) && imagePathLen > 0)
+        {
+            row.imagePath = QString::fromWCharArray(imagePathW, static_cast<int>(imagePathLen));
+        }
+        CloseHandle(handle);
+    }
+
+    m_prevCpuTimes = cpuTimes;
+    m_prevWallMs = wallNow;
+
+    // Overlay the guard state (a guard pid may have exited: only alive guards
+    // highlight a live process; quarantined records render separately).
+    m_guardsByPid.clear();
+    for (const GuardRow &row : m_guards)
+    {
+        if (row.alive) m_guardsByPid.insert(row.pid, row);
+    }
+    for (ProcRow &row : procs)
+    {
+        row.guard = m_guardsByPid.contains(row.pid) ? &m_guardsByPid[row.pid] : nullptr;
+    }
+    std::sort(procs.begin(), procs.end(), [](const ProcRow &a, const ProcRow &b) {
+        if ((a.guard != nullptr) != (b.guard != nullptr)) return a.guard != nullptr;
+        return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+    });
+    m_procs = procs;
+}
+
 void GuardTreePage::refreshNow()
 {
     if (m_paused) return;
 
+    // Guard list comes from the service; the process list is local. A service
+    // hiccup must not blank the process tree.
     ClientOptions options;
     options.host = m_host.toStdString();
     options.port = m_port;
     options.token = m_token.toStdString();
 
     QVector<GuardRow> guards;
-    QHash<quint64, QVector<FamilyMember>> families;
     QString statsText;
     QString error;
 
@@ -322,34 +436,8 @@ void GuardTreePage::refreshNow()
             if (row.lastFailureCode == QLatin1String("-")) row.lastFailureCode.clear();
             row.lastFailure = decodeB64(kvValue(line, "LAST_FAILURE_B64"));
             row.path = decodeB64(kvValue(line, "PATH_B64"));
-            row.appKind = kvValue(line, "APP_KIND");
             row.alive = kvValue(line, "ALIVE") == QLatin1String("1");
             guards.push_back(row);
-        }
-
-        const ProcessGuard::client::ClientResponse familiesReply = sendCommand(options, "families", 800);
-        if (familiesReply.ok)
-        {
-            const QStringList familyLines = QString::fromStdString(familiesReply.payload).split(QLatin1Char('\n'));
-            for (const QString &line : familyLines)
-            {
-                if (!line.startsWith(QLatin1String("FAMILY "))) continue;
-                const quint64 guardId = kvValue(line, "guard_id").toULongLong();
-                const QByteArray membersJson = QByteArray::fromBase64(kvValue(line, "members_b64").toUtf8());
-                QVector<FamilyMember> members;
-                const QJsonDocument doc = QJsonDocument::fromJson(membersJson);
-                if (doc.isArray())
-                {
-                    for (const QJsonValue &value : doc.array())
-                    {
-                        FamilyMember member;
-                        member.pid = static_cast<quint32>(value.toObject().value(QLatin1String("pid")).toInt());
-                        member.name = value.toObject().value(QLatin1String("name")).toString();
-                        members.push_back(member);
-                    }
-                }
-                families.insert(guardId, members);
-            }
         }
 
         const ProcessGuard::client::ClientResponse statsReply = sendCommand(options, "stats", 800);
@@ -360,7 +448,6 @@ void GuardTreePage::refreshNow()
     }
 
     m_guards = guards;
-    m_families = families;
     m_lastError = error;
     if (!statsText.isEmpty())
     {
@@ -368,12 +455,14 @@ void GuardTreePage::refreshNow()
     }
     else if (!error.isEmpty())
     {
-        m_statsLabel->setText(trUi("无法连接服务：%1", "Cannot reach service: %1").arg(error));
+        m_statsLabel->setText(trUi("无法连接服务（进程列表仍可用）：%1", "Service unreachable (process list still works): %1").arg(error));
     }
     else
     {
         m_statsLabel->setText(QString());
     }
+
+    snapshotProcesses();
     rebuildTree();
     applyFilter();
 }
@@ -381,21 +470,21 @@ void GuardTreePage::refreshNow()
 void GuardTreePage::rebuildTree()
 {
     // Preserve expansion + selection across rebuilds via node keys stored in
-    // Qt::UserRole ("group:<name>" / "guard:<id>" / "member:<pid>").
+    // Qt::UserRole ("proc:<pid>").
     QSet<QString> expanded;
     for (int r = 0; r < m_model->rowCount(); ++r)
     {
-        QStandardItem *groupItem = m_model->item(r, 0);
-        if (m_tree->isExpanded(groupItem->index()))
+        QStandardItem *rootItem = m_model->item(r, 0);
+        if (m_tree->isExpanded(rootItem->index()))
         {
-            expanded.insert(groupItem->data(Qt::UserRole).toString());
+            expanded.insert(rootItem->data(Qt::UserRole).toString());
         }
-        for (int gr = 0; gr < groupItem->rowCount(); ++gr)
+        for (int cr = 0; cr < rootItem->rowCount(); ++cr)
         {
-            QStandardItem *guardItem = groupItem->child(gr, 0);
-            if (guardItem && m_tree->isExpanded(guardItem->index()))
+            QStandardItem *child = rootItem->child(cr, 0);
+            if (child && m_tree->isExpanded(child->index()))
             {
-                expanded.insert(guardItem->data(Qt::UserRole).toString());
+                expanded.insert(child->data(Qt::UserRole).toString());
             }
         }
     }
@@ -404,122 +493,126 @@ void GuardTreePage::rebuildTree()
 
     m_model->removeRows(0, m_model->rowCount());
 
-    // Group guards by their group name (empty group -> a synthetic bucket).
-    QHash<QString, QVector<const GuardRow *>> byGroup;
+    // Quarantined guard records have no live pid: render them in their own
+    // section on top so they never disappear from view.
     for (const GuardRow &row : m_guards)
     {
-        byGroup[row.group.isEmpty() ? trUi("默认", "Default") : row.group].push_back(&row);
+        if (row.status != QLatin1String("quarantined")) continue;
+        const QString key = QStringLiteral("quarantined:%1").arg(row.guardId);
+        QStandardItem *nameItem = new QStandardItem(
+            trUi("[已隔离] %1", "[quarantined] %1").arg(baseName(row.path)));
+        nameItem->setData(key, Qt::UserRole);
+        nameItem->setToolTip(row.path);
+        nameItem->setForeground(QBrush(QColor(0xf8, 0x51, 0x49)));
+        QList<QStandardItem *> quarantinedRow;
+        quarantinedRow << nameItem
+                       << new QStandardItem(QStringLiteral("-"))
+                       << new QStandardItem(statusText(row.status, m_chinese))
+                       << new QStandardItem(QStringLiteral("-"))
+                       << new QStandardItem(QStringLiteral("-"))
+                       << new QStandardItem(formatDuration(row.cumulativeRunMs))
+                       << new QStandardItem(QString::number(row.restartCount))
+                       << new QStandardItem(row.group)
+                       << new QStandardItem(row.lastFailureCode);
+        m_model->appendRow(quarantinedRow);
     }
-    QStringList groupNames;
-    for (auto it = byGroup.constBegin(); it != byGroup.constEnd(); ++it) groupNames << it.key();
-    groupNames.sort();
 
-    for (const QString &groupName : groupNames)
+    // Parent-child process tree: a process whose parent is also in the
+    // snapshot becomes its child; orphans (parent exited) render at the root,
+    // mirroring the Windows Task Manager behaviour.
+    QHash<quint32, ProcRow *> byPid;
+    for (ProcRow &row : m_procs) byPid.insert(row.pid, &row);
+    QHash<quint32, QList<ProcRow *>> children;
+    QList<ProcRow *> roots;
+    for (ProcRow &row : m_procs)
     {
-        QList<const GuardRow *> rows;
-        for (const GuardRow *row : byGroup[groupName]) rows.push_back(row);
-        std::sort(rows.begin(), rows.end(), [](const GuardRow *a, const GuardRow *b) {
-            return baseName(a->path).compare(baseName(b->path), Qt::CaseInsensitive) < 0;
+        ProcRow *parent = (row.parentPid != 0 && row.parentPid != row.pid) ? byPid.value(row.parentPid, nullptr) : nullptr;
+        if (parent && parent->pid != row.pid)
+        {
+            children[parent->pid].push_back(&row);
+        }
+        else
+        {
+            roots.push_back(&row);
+        }
+    }
+    std::sort(roots.begin(), roots.end(), [](const ProcRow *a, const ProcRow *b) {
+        if ((a->guard != nullptr) != (b->guard != nullptr)) return a->guard != nullptr;
+        return a->name.compare(b->name, Qt::CaseInsensitive) < 0;
+    });
+    for (auto it = children.begin(); it != children.end(); ++it)
+    {
+        std::sort(it->begin(), it->end(), [](const ProcRow *a, const ProcRow *b) {
+            if ((a->guard != nullptr) != (b->guard != nullptr)) return a->guard != nullptr;
+            return a->name.compare(b->name, Qt::CaseInsensitive) < 0;
         });
+    }
 
-        QStandardItem *groupItem = new QStandardItem(groupName);
-        groupItem->setData("group:" + groupName, Qt::UserRole);
-        groupItem->setForeground(QBrush(QColor(0xd2, 0xa8, 0xff)));
+    std::function<void(const ProcRow &, QStandardItem *)> appendProc = [&](const ProcRow &row, QStandardItem *parentItem) {
+        const QString key = keyForPid(row.pid, row.guard != nullptr);
+        const bool isGuard = row.guard != nullptr;
 
-        int groupActive = 0;
-        int groupRestarts = 0;
-        for (const GuardRow *row : rows)
+        QStandardItem *nameItem = new QStandardItem(row.name);
+        nameItem->setData(key, Qt::UserRole);
+        if (!row.imagePath.isEmpty()) nameItem->setToolTip(row.imagePath);
+        if (isGuard)
         {
-            if (row->status == QLatin1String("active")) ++groupActive;
-            groupRestarts += row->restartCount;
+            nameItem->setForeground(QBrush(QColor(0x39, 0xd3, 0x53)));
         }
-        QList<QStandardItem *> groupRow;
-        groupRow << groupItem
-                 << new QStandardItem(QString())
-                 << new QStandardItem(trUi("%1/%2 运行中", "%1/%2 running").arg(groupActive).arg(rows.size()))
-                 << new QStandardItem(QString())
-                 << new QStandardItem(QString::number(groupRestarts))
-                 << new QStandardItem(QString())
-                 << new QStandardItem(QString())
-                 << new QStandardItem(QString());
-        m_model->appendRow(groupRow);
 
-        for (const GuardRow *row : rows)
+        QStandardItem *pidItem = new QStandardItem(QString::number(row.pid));
+        pidItem->setData(key, Qt::UserRole);
+
+        QStandardItem *statusItem = new QStandardItem(isGuard
+            ? statusText(row.guard->status == QLatin1String("active") ? QStringLiteral("protected") : row.guard->status, m_chinese)
+            : statusText(QStringLiteral("plain"), m_chinese));
+        statusItem->setData(key, Qt::UserRole);
+        statusItem->setForeground(QBrush(statusColor(isGuard ? row.guard->status : QStringLiteral("plain"))));
+
+        QStandardItem *cpuItem = new QStandardItem(
+            row.cpuPercent >= 0.05 ? QStringLiteral("%1%").arg(row.cpuPercent, 0, 'f', 1) : QString());
+        cpuItem->setData(key, Qt::UserRole);
+
+        QStandardItem *memItem = new QStandardItem(
+            row.memoryBytes > 0 ? formatBytes(row.memoryBytes) : QStringLiteral("-"));
+        memItem->setData(key, Qt::UserRole);
+
+        QStandardItem *runtimeItem = new QStandardItem(isGuard ? formatDuration(row.guard->cumulativeRunMs) : QStringLiteral("-"));
+        runtimeItem->setData(key, Qt::UserRole);
+
+        QStandardItem *restartItem = new QStandardItem(isGuard ? QString::number(row.guard->restartCount) : QStringLiteral("-"));
+        restartItem->setData(key, Qt::UserRole);
+
+        QStandardItem *groupItem = new QStandardItem(isGuard ? row.guard->group : QString());
+        groupItem->setData(key, Qt::UserRole);
+
+        QStandardItem *failureItem = new QStandardItem(isGuard ? row.guard->lastFailureCode : QString());
+        failureItem->setData(key, Qt::UserRole);
+        if (isGuard && !row.guard->lastFailure.isEmpty()) failureItem->setToolTip(row.guard->lastFailure);
+
+        QList<QStandardItem *> procRow;
+        procRow << nameItem << pidItem << statusItem << cpuItem << memItem
+                << runtimeItem << restartItem << groupItem << failureItem;
+
+        if (parentItem) parentItem->appendRow(procRow);
+        else m_model->appendRow(procRow);
+
+        for (ProcRow *child : children.value(row.pid))
         {
-            const QString name = baseName(row->path);
-            const QString guardKey = "guard:" + QString::number(row->guardId);
-
-            QStandardItem *nameItem = new QStandardItem(name);
-            nameItem->setData(guardKey, Qt::UserRole);
-            nameItem->setToolTip(row->path);
-
-            QStandardItem *pidItem = new QStandardItem(row->alive ? QString::number(row->pid) : QStringLiteral("-"));
-            pidItem->setData(guardKey, Qt::UserRole);
-
-            QStandardItem *statusItem = new QStandardItem(statusText(row->status, m_chinese));
-            statusItem->setData(guardKey, Qt::UserRole);
-            statusItem->setForeground(QBrush(statusColor(row->status)));
-
-            QStandardItem *runtimeItem = new QStandardItem(formatDuration(row->cumulativeRunMs));
-            runtimeItem->setData(guardKey, Qt::UserRole);
-
-            QStandardItem *restartItem = new QStandardItem(QString::number(row->restartCount));
-            restartItem->setData(guardKey, Qt::UserRole);
-
-            QStandardItem *groupCell = new QStandardItem(row->group);
-            groupCell->setData(guardKey, Qt::UserRole);
-
-            QStandardItem *healthItem = new QStandardItem(
-                row->healthStatus == QLatin1String("disabled") ? QStringLiteral("-") : row->healthStatus);
-            healthItem->setData(guardKey, Qt::UserRole);
-
-            QStandardItem *failureItem = new QStandardItem(row->lastFailureCode);
-            failureItem->setData(guardKey, Qt::UserRole);
-            if (!row->lastFailure.isEmpty()) failureItem->setToolTip(row->lastFailure);
-
-            QList<QStandardItem *> guardRow;
-            guardRow << nameItem << pidItem << statusItem << runtimeItem
-                     << restartItem << groupCell << healthItem << failureItem;
-            groupItem->appendRow(guardRow);
-
-            // Process family children (Job Object members) — the task-manager
-            // style process tree under each guard.
-            const QVector<FamilyMember> members = m_families.value(row->guardId);
-            for (const FamilyMember &member : members)
-            {
-                if (member.pid == row->pid) continue;
-                const QString memberKey = "member:" + QString::number(member.pid);
-                QStandardItem *memberName = new QStandardItem(
-                    member.name.isEmpty() ? trUi("(进程 %1)", "(process %1)").arg(member.pid) : member.name);
-                memberName->setData(memberKey, Qt::UserRole);
-                memberName->setForeground(QBrush(QColor(0x8b, 0x94, 0x9e)));
-                QStandardItem *memberPid = new QStandardItem(QString::number(member.pid));
-                memberPid->setData(memberKey, Qt::UserRole);
-                memberPid->setForeground(QBrush(QColor(0x8b, 0x94, 0x9e)));
-                QList<QStandardItem *> memberRow;
-                memberRow << memberName << memberPid;
-                for (int col = 2; col < kColumnCount; ++col)
-                {
-                    QStandardItem *placeholder = new QStandardItem();
-                    placeholder->setData(memberKey, Qt::UserRole);
-                    memberRow << placeholder;
-                }
-                nameItem->appendRow(memberRow);
-            }
-
-            if (expanded.contains(guardKey))
-            {
-                m_tree->expand(nameItem->index());
-            }
-            if (selectedKey == guardKey)
-            {
-                m_tree->setCurrentIndex(nameItem->index());
-            }
+            appendProc(*child, nameItem);
         }
-        if (expanded.contains("group:" + groupName))
+        if (!children.value(row.pid).isEmpty() && expanded.contains(key))
         {
-            m_tree->expand(groupItem->index());
+            m_tree->expand(nameItem->index());
         }
+        if (selectedKey == key)
+        {
+            m_tree->setCurrentIndex(nameItem->index());
+        }
+    };
+    for (const ProcRow *root : roots)
+    {
+        appendProc(*root, nullptr);
     }
 }
 
@@ -528,20 +621,26 @@ void GuardTreePage::applyFilter()
     const QString filter = m_filterEdit->text().trimmed();
     for (int r = 0; r < m_model->rowCount(); ++r)
     {
-        QStandardItem *groupItem = m_model->item(r, 0);
-        bool groupVisible = filter.isEmpty();
-        for (int gr = 0; gr < groupItem->rowCount(); ++gr)
-        {
-            QStandardItem *guardItem = groupItem->child(gr, 0);
-            if (!guardItem) continue;
-            const bool visible = filter.isEmpty() ||
-                                 guardItem->text().contains(filter, Qt::CaseInsensitive) ||
-                                 guardItem->toolTip().contains(filter, Qt::CaseInsensitive);
-            m_tree->setRowHidden(gr, groupItem->index(), !visible);
-            if (visible) groupVisible = true;
-        }
-        m_tree->setRowHidden(r, QModelIndex(), !groupVisible);
+        QStandardItem *rootItem = m_model->item(r, 0);
+        if (!rootItem) continue;
+        const bool visible = filter.isEmpty() ||
+                             rootItem->text().contains(filter, Qt::CaseInsensitive) ||
+                             rootItem->toolTip().contains(filter, Qt::CaseInsensitive);
+        m_tree->setRowHidden(r, QModelIndex(), !visible);
     }
+}
+
+QString GuardTreePage::keyForPid(quint32 pid, bool guarded) const
+{
+    // Guarded and unprotected rows live in different key spaces so a pid that
+    // gains/loses protection keeps its expansion state consistent per role.
+    return guarded ? QStringLiteral("gproc:%1").arg(pid) : QStringLiteral("proc:%1").arg(pid);
+}
+
+QString GuardTreePage::currentProcKey() const
+{
+    QStandardItem *item = m_model->itemFromIndex(m_tree->currentIndex().siblingAtColumn(0));
+    return item ? item->data(Qt::UserRole).toString() : QString();
 }
 
 QString GuardTreePage::formatDuration(qint64 ms)
@@ -566,25 +665,33 @@ QString GuardTreePage::formatDuration(qint64 ms)
         .arg(seconds, 2, 10, QLatin1Char('0'));
 }
 
+QString GuardTreePage::formatBytes(quint64 bytes)
+{
+    const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+    if (mb >= 1024.0)
+    {
+        return QStringLiteral("%1 GB").arg(mb / 1024.0, 0, 'f', 1);
+    }
+    return QStringLiteral("%1 MB").arg(mb, 0, 'f', 1);
+}
+
 QString GuardTreePage::statusText(const QString &status, bool chinese)
 {
+    if (status == QLatin1String("protected")) return chinese ? QStringLiteral("受保护") : QStringLiteral("protected");
     if (status == QLatin1String("active")) return chinese ? QStringLiteral("运行中") : QStringLiteral("running");
     if (status == QLatin1String("paused")) return chinese ? QStringLiteral("已暂停") : QStringLiteral("paused");
     if (status == QLatin1String("quarantined")) return chinese ? QStringLiteral("已隔离") : QStringLiteral("quarantined");
     if (status == QLatin1String("missing")) return chinese ? QStringLiteral("已退出") : QStringLiteral("missing");
+    if (status == QLatin1String("plain")) return chinese ? QStringLiteral("运行中") : QStringLiteral("running");
     return status;
 }
 
-QString GuardTreePage::currentGuardKey() const
+QString GuardTreePage::baseName(const QString &path)
 {
-    QStandardItem *item = m_model->itemFromIndex(m_tree->currentIndex().siblingAtColumn(0));
-    while (item)
-    {
-        const QString key = item->data(Qt::UserRole).toString();
-        if (key.startsWith(QLatin1String("guard:"))) return key;
-        item = item->parent();
-    }
-    return QString();
+    QString cleaned = path;
+    cleaned.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    const int slash = cleaned.lastIndexOf(QLatin1Char('\\'));
+    return slash >= 0 ? cleaned.mid(slash + 1) : cleaned;
 }
 
 void GuardTreePage::sendAction(const QString &command)
@@ -641,83 +748,117 @@ void GuardTreePage::addProtection()
     process->start(tool, cliArgs);
 }
 
+void GuardTreePage::protectProcess()
+{
+    const QString key = currentProcKey();
+    if (!key.startsWith(QLatin1String("proc:"))) return;
+    const quint32 pid = key.mid(QString::fromLatin1("proc:").size()).toUInt();
+    const ProcRow *proc = nullptr;
+    for (const ProcRow &row : m_procs)
+    {
+        if (row.pid == pid)
+        {
+            proc = &row;
+            break;
+        }
+    }
+    if (!proc) return;
+
+    bool ok = false;
+    const QString maxText = QInputDialog::getText(this,
+        trUi("保护此进程", "Protect this process"),
+        trUi("重启上限（数字或 no = 无限）", "Restart limit (number or no = unlimited)"),
+        QLineEdit::Normal, QStringLiteral("3"), &ok);
+    if (!ok) return;
+    const QString max = maxText.trimmed().isEmpty() ? QStringLiteral("3") : maxText.trimmed();
+
+    QString path = proc->imagePath;
+    if (path.isEmpty())
+    {
+        QMessageBox::warning(this, trUi("保护此进程", "Protect this process"),
+                             trUi("无法读取进程镜像路径（权限不足或进程已退出）。", "Cannot read the process image path (access denied or the process exited)."));
+        return;
+    }
+    sendAction(QStringLiteral("bless %1 %2 %3")
+                   .arg(pid)
+                   .arg(QString::fromUtf8(path.toUtf8().toBase64()))
+                   .arg(max));
+}
+
 void GuardTreePage::closeProtection()
 {
-    const QString key = currentGuardKey();
-    if (!key.startsWith(QLatin1String("guard:"))) return;
-    const quint64 guardId = key.mid(QString::fromLatin1("guard:").size()).toULongLong();
+    const QString key = currentProcKey();
+    if (key.isEmpty()) return;
+    const quint32 pid = key.mid(key.lastIndexOf(QLatin1Char(':')) + 1).toUInt();
     for (const GuardRow &row : m_guards)
     {
-        if (row.guardId != guardId) continue;
-        if (QMessageBox::question(this, trUi("关闭保护", "Close protection"),
-                                  trUi("确定停止守护 %1？", "Stop guarding %1?").arg(baseName(row.path))) != QMessageBox::Yes)
+        if (row.alive && row.pid == pid)
         {
+            if (QMessageBox::question(this, trUi("关闭保护", "Close protection"),
+                                      trUi("确定停止守护 %1？", "Stop guarding %1?").arg(baseName(row.path))) != QMessageBox::Yes)
+            {
+                return;
+            }
+            sendAction(QStringLiteral("unbless %1").arg(pid));
             return;
         }
-        sendAction(QStringLiteral("unbless %1").arg(row.pid));
-        return;
     }
 }
 
 void GuardTreePage::intentionalExit()
 {
-    const QString key = currentGuardKey();
-    if (!key.startsWith(QLatin1String("guard:"))) return;
-    const quint64 guardId = key.mid(QString::fromLatin1("guard:").size()).toULongLong();
+    const QString key = currentProcKey();
+    if (key.isEmpty()) return;
+    const quint32 pid = key.mid(key.lastIndexOf(QLatin1Char(':')) + 1).toUInt();
     for (const GuardRow &row : m_guards)
     {
-        if (row.guardId != guardId) continue;
-        if (QMessageBox::question(this, trUi("立即退出", "Intentional exit"),
-                                  trUi("让 %1 立即退出并解除守护？", "Make %1 exit now and unregister?").arg(baseName(row.path))) != QMessageBox::Yes)
+        if (row.alive && row.pid == pid)
         {
+            if (QMessageBox::question(this, trUi("立即退出", "Intentional exit"),
+                                      trUi("让 %1 立即退出并解除守护？", "Make %1 exit now and unregister?").arg(baseName(row.path))) != QMessageBox::Yes)
+            {
+                return;
+            }
+            sendAction(QStringLiteral("intentional %1").arg(pid));
             return;
         }
-        sendAction(QStringLiteral("intentional %1").arg(row.pid));
-        return;
     }
 }
 
 void GuardTreePage::retryQuarantine()
 {
-    const QString key = currentGuardKey();
-    if (!key.startsWith(QLatin1String("guard:"))) return;
-    sendAction(QStringLiteral("guard retry --id %1").arg(key.mid(QString::fromLatin1("guard:").size())));
+    const QString key = currentProcKey();
+    if (!key.startsWith(QLatin1String("quarantined:"))) return;
+    sendAction(QStringLiteral("guard retry --id %1").arg(key.mid(QString::fromLatin1("quarantined:").size())));
 }
 
 void GuardTreePage::clearQuarantine()
 {
-    const QString key = currentGuardKey();
-    if (!key.startsWith(QLatin1String("guard:"))) return;
-    sendAction(QStringLiteral("guard clear-quarantine --id %1").arg(key.mid(QString::fromLatin1("guard:").size())));
+    const QString key = currentProcKey();
+    if (!key.startsWith(QLatin1String("quarantined:"))) return;
+    sendAction(QStringLiteral("guard clear-quarantine --id %1").arg(key.mid(QString::fromLatin1("quarantined:").size())));
 }
 
 void GuardTreePage::assignGroup(const QString &group)
 {
-    const QString key = currentGuardKey();
-    if (!key.startsWith(QLatin1String("guard:"))) return;
-    const quint64 guardId = key.mid(QString::fromLatin1("guard:").size()).toULongLong();
-    for (const GuardRow &row : m_guards)
-    {
-        if (row.guardId == guardId)
-        {
-            sendAction(QStringLiteral("group add --name \"%1\" --pid %2").arg(group).arg(row.pid));
-            return;
-        }
-    }
+    const QString key = currentProcKey();
+    if (key.isEmpty()) return;
+    const quint32 pid = key.mid(key.lastIndexOf(QLatin1Char(':')) + 1).toUInt();
+    sendAction(QStringLiteral("group add --name \"%1\" --pid %2").arg(group).arg(pid));
 }
 
 void GuardTreePage::removeFromGroup()
 {
-    const QString key = currentGuardKey();
-    if (!key.startsWith(QLatin1String("guard:"))) return;
-    const quint64 guardId = key.mid(QString::fromLatin1("guard:").size()).toULongLong();
+    const QString key = currentProcKey();
+    if (key.isEmpty()) return;
+    const quint32 pid = key.mid(key.lastIndexOf(QLatin1Char(':')) + 1).toUInt();
     for (const GuardRow &row : m_guards)
     {
-        if (row.guardId == guardId)
+        if (row.alive && row.pid == pid)
         {
             if (!row.group.isEmpty())
             {
-                sendAction(QStringLiteral("group remove --name \"%1\" --pid %2").arg(row.group).arg(row.pid));
+                sendAction(QStringLiteral("group remove --name \"%1\" --pid %2").arg(row.group).arg(pid));
             }
             return;
         }
@@ -736,27 +877,63 @@ void GuardTreePage::groupRestart(const QString &group)
 
 void GuardTreePage::showDetails()
 {
-    const QString key = currentGuardKey();
-    if (!key.startsWith(QLatin1String("guard:"))) return;
-    const quint64 guardId = key.mid(QString::fromLatin1("guard:").size()).toULongLong();
-    for (const GuardRow &row : m_guards)
+    const QString key = currentProcKey();
+    if (key.isEmpty()) return;
+    const quint32 pid = key.mid(key.lastIndexOf(QLatin1Char(':')) + 1).toUInt();
+
+    QStringList lines;
+    // Quarantined record details.
+    if (key.startsWith(QLatin1String("quarantined:")))
     {
-        if (row.guardId != guardId) continue;
-        QStringList lines;
-        for (const QString &pair : row.rawLine.split(QLatin1Char(';')))
+        const quint64 guardId = key.mid(QString::fromLatin1("quarantined:").size()).toULongLong();
+        for (const GuardRow &row : m_guards)
         {
-            const int eq = pair.indexOf(QLatin1Char('='));
-            if (eq <= 0) continue;
-            QString keyText = pair.left(eq);
-            QString valueText = pair.mid(eq + 1);
-            if (keyText.endsWith(QLatin1String("_B64")))
+            if (row.guardId == guardId)
             {
-                keyText.chop(4);
-                valueText = decodeB64(valueText);
+                for (const QString &pair : row.rawLine.split(QLatin1Char(';')))
+                {
+                    const int eq = pair.indexOf(QLatin1Char('='));
+                    if (eq <= 0) continue;
+                    QString keyText = pair.left(eq);
+                    QString valueText = pair.mid(eq + 1);
+                    if (keyText.endsWith(QLatin1String("_B64")))
+                    {
+                        keyText.chop(4);
+                        valueText = decodeB64(valueText);
+                    }
+                    lines << QStringLiteral("%1: %2").arg(keyText, valueText);
+                }
+                break;
             }
-            lines << QStringLiteral("%1: %2").arg(keyText, valueText);
         }
         QMessageBox::information(this, trUi("守护属性", "Guard properties"), lines.join(QLatin1Char('\n')));
         return;
     }
+
+    for (const ProcRow &row : m_procs)
+    {
+        if (row.pid != pid) continue;
+        lines << QStringLiteral("PID: %1").arg(row.pid);
+        lines << QStringLiteral("PPID: %1").arg(row.parentPid);
+        if (!row.imagePath.isEmpty()) lines << QStringLiteral("IMAGE: %1").arg(row.imagePath);
+        if (row.memoryBytes > 0) lines << QStringLiteral("WORKING SET: %1").arg(formatBytes(row.memoryBytes));
+        if (row.guard)
+        {
+            for (const QString &pair : row.guard->rawLine.split(QLatin1Char(';')))
+            {
+                const int eq = pair.indexOf(QLatin1Char('='));
+                if (eq <= 0) continue;
+                QString keyText = pair.left(eq);
+                QString valueText = pair.mid(eq + 1);
+                if (keyText.endsWith(QLatin1String("_B64")))
+                {
+                    keyText.chop(4);
+                    valueText = decodeB64(valueText);
+                }
+                lines << QStringLiteral("%1: %2").arg(keyText, valueText);
+            }
+        }
+        break;
+    }
+    QMessageBox::information(this, trUi("进程属性", "Process properties"), lines.join(QLatin1Char('\n')));
 }

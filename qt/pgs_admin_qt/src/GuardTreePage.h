@@ -2,12 +2,17 @@
  * @file GuardTreePage.h
  * @brief Task-manager style main page for the PGS Qt admin.
  *
- * Talks the management protocol directly through the shared ProcessGuard::client
- * (no QProcess per refresh): a timer polls `list` + `families` + `stats` and
- * renders guards as a tree — group nodes, guard rows (status / protected time /
- * trigger count / health / last failure) and, expandable per guard, the live
- * Job Object process family. Right-click offers add/close protection,
- * intentional exit, quarantine retry/clear and group operations.
+ * Shows ALL running processes (client-side Win32 snapshot, parent-child tree,
+ * CPU/memory columns) and overlays the PGS guard state on top: protected
+ * processes are highlighted and carry protected-time / trigger-count columns.
+ * Right-click any unprotected process to protect it (protocol `bless <pid>`),
+ * and any protected process to close protection, do an intentional exit,
+ * retry/clear quarantine or manage its group. "Add protection" on the toolbar
+ * launches a brand-new program via a one-shot pgs_bless bless-start.
+ *
+ * Data paths: the process list never crosses the protocol (the UI runs on the
+ * same machine); the service protocol is used for the guard list (1 Hz `list`
+ * poll) and for actions.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -15,6 +20,7 @@
 #define GUARDTREEPAGE_H
 
 #include <QHash>
+#include <QPair>
 #include <QString>
 #include <QVector>
 #include <QWidget>
@@ -43,6 +49,7 @@ public:
 private slots:
     void refreshNow();
     void addProtection();
+    void protectProcess();
     void closeProtection();
     void intentionalExit();
     void retryQuarantine();
@@ -54,6 +61,7 @@ private slots:
     void showDetails();
 
 private:
+    // One row of `list` (the service's guard summary line).
     struct GuardRow
     {
         quint64 guardId = 0;
@@ -66,25 +74,34 @@ private:
         QString lastFailureCode;
         QString lastFailure;
         QString path;
-        QString appKind;
         bool alive = false;
         QString rawLine;
     };
-    struct FamilyMember
+    // One process from the client-side snapshot.
+    struct ProcRow
     {
         quint32 pid = 0;
+        quint32 parentPid = 0;
         QString name;
+        QString imagePath;
+        double cpuPercent = 0.0;
+        quint64 memoryBytes = 0;
+        const GuardRow *guard = nullptr; // set when the pid is protected
     };
 
     void setupUi();
     void retranslateUi();
+    void snapshotProcesses();
     void rebuildTree();
     void applyFilter();
     void sendAction(const QString &command);
     QString trUi(const QString &en, const QString &zh) const { return m_chinese ? zh : en; }
     static QString formatDuration(qint64 ms);
+    static QString formatBytes(quint64 bytes);
     static QString statusText(const QString &status, bool chinese);
-    QString currentGuardKey() const;
+    static QString baseName(const QString &path);
+    QString keyForPid(quint32 pid, bool guarded) const;
+    QString currentProcKey() const;
 
     bool m_chinese = false;
     QString m_toolPath;
@@ -94,13 +111,15 @@ private:
 
     QTimer *m_timer = nullptr;
     bool m_paused = false;
+    bool m_onlyProtected = false;
 
+    QPushButton *m_btnAdd = nullptr;
+    QPushButton *m_btnOnlyProtected = nullptr;
+    QPushButton *m_btnPauseRefresh = nullptr;
+    QComboBox *m_intervalCombo = nullptr;
+    QLineEdit *m_filterEdit = nullptr;
     QLineEdit *m_hostEdit = nullptr;
     QLineEdit *m_portEdit = nullptr;
-    QComboBox *m_intervalCombo = nullptr;
-    QPushButton *m_btnAdd = nullptr;
-    QPushButton *m_btnPauseRefresh = nullptr;
-    QLineEdit *m_filterEdit = nullptr;
     QLabel *m_statsLabel = nullptr;
 
     QTreeView *m_tree = nullptr;
@@ -109,7 +128,11 @@ private:
     QProcess *m_addProcess = nullptr;
 
     QVector<GuardRow> m_guards;
-    QHash<quint64, QVector<FamilyMember>> m_families;
+    QHash<quint32, GuardRow> m_guardsByPid;
+    QVector<ProcRow> m_procs;
+    // pid -> (kernelTime100ns, userTime100ns) of the previous sample, for CPU%.
+    QHash<quint32, QPair<quint64, quint64>> m_prevCpuTimes;
+    qint64 m_prevWallMs = 0;
     QString m_lastError;
 };
 

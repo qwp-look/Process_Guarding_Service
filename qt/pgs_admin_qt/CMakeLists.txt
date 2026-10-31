@@ -30,4 +30,4 @@ else()
 endif()
 
 target_include_directories(pgs_admin_qt PRIVATE ../../include)
-target_link_libraries(pgs_admin_qt PRIVATE Qt${QT_VERSION_MAJOR}::Widgets ws2_32)
+target_link_libraries(pgs_admin_qt PRIVATE Qt${QT_VERSION_MAJOR}::Widgets ws2_32 psapi)
