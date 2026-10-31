@@ -166,7 +166,7 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     // auto-repair ACLs (that would hide an insecure install). Explicit repair
     // is `pgs_bless doctor repair-modules-acl` only.
     m_modulesDir = moduleDirectoryOfSelf();
-    const bool wantModules = m_modulesEnabled || m_modulesPermissive.load();
+    const bool wantModules = m_modulesEnabled || m_launcherModulesEnabled || m_modulesPermissive.load();
     if (!m_modulesDir.empty())
     {
         // Create the directory if missing so doctor/load paths have a root, but
@@ -223,7 +223,17 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     m_modules.setServices(svc);
     }
     m_modules.setPermissive(m_modulesPermissive.load());
-    m_modules.setEnabledModules(std::vector<std::string>{"*"});
+    // Launcher providers (class="provider", e.g. the winapp AUMID launcher)
+    // stay out of the startup scan unless explicitly opted in; command modules
+    // load whenever module loading is on.
+    if (m_launcherModulesEnabled)
+    {
+        m_modules.setEnabledModules(std::vector<std::string>{"*"});
+    }
+    else
+    {
+        m_modules.setEnabledModules(std::vector<std::string>{"*", "!winapp"});
+    }
     {
         const bool permissive = m_modulesPermissive.load();
         // Production: require clean ACL audit. Permissive: allow load with warning.

@@ -559,83 +559,68 @@ bool activateWindowsAppByAumid(
         outError = "AUMID is empty";
         return false;
     }
-    const std::wstring aumidW = narrowToWideBestEffort(aumidUtf8);
-    const std::wstring argsW = narrowToWideBestEffort(startArgsUtf8);
-    if (aumidW.empty())
+
+    // Activation mechanics live in the winapp launcher provider module
+    // (modules\winapp\pgs_winapp_module.dll) so the service restart path and
+    // the CLI share one implementation. Load it from the tool's own modules
+    // directory; the allowlist gate still applies.
+    char exePathBuf[MAX_PATH] = {0};
+    const DWORD exeLen = GetModuleFileNameA(nullptr, exePathBuf, MAX_PATH);
+    std::string exeDir = (exeLen > 0 && exeLen < MAX_PATH)
+        ? std::filesystem::path(exePathBuf, exePathBuf + exeLen).parent_path().string()
+        : std::string(".");
+    const std::string modulesRoot = exeDir + "\\modules";
+    const std::string launcherDll = modulesRoot + "\\winapp\\pgs_winapp_module.dll";
+    if (!std::filesystem::exists(std::filesystem::path(launcherDll)))
     {
-        outError = "AUMID conversion failed";
+        outError = "winapp launcher provider not found: " + launcherDll +
+                   " (reinstall the release tree or build the winapp module)";
         return false;
     }
 
-    bool ok = false;
-    DWORD activatedPid = 0;
-    HANDLE processHandle = nullptr;
-    HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool comUsable = SUCCEEDED(comInit) || comInit == RPC_E_CHANGED_MODE;
-    if (comUsable)
+    ProcessGuard::ModuleManager launcher;
+    std::string modulesDirOption;
+    std::string loadErr;
+    launcher.ensureAllowlistLoaded(modulesRoot);
+    if (!launcher.load(launcherDll, loadErr))
     {
-        IApplicationActivationManager *act = nullptr;
-        HRESULT hr = CoCreateInstance(CLSID_ApplicationActivationManager, nullptr,
-                                      CLSCTX_LOCAL_SERVER | CLSCTX_NO_FAILURE_LOG,
-                                      IID_PPV_ARGS(&act));
-        if (SUCCEEDED(hr) && act)
-        {
-            hr = act->ActivateApplication(aumidW.c_str(), argsW.empty() ? L"" : argsW.c_str(), AO_NONE, &activatedPid);
-            act->Release();
-            if (SUCCEEDED(hr) && activatedPid != 0)
-            {
-                processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE, FALSE, activatedPid);
-                ok = processHandle != nullptr;
-                if (!ok)
-                {
-                    outError = "ActivateApplication returned pid but OpenProcess failed: " + win32ErrorText(GetLastError());
-                }
-            }
-            else
-            {
-                outError = "ActivateApplication failed: " + hresultText(hr);
-            }
-        }
-        else
-        {
-            outError = "CoCreateInstance(ApplicationActivationManager) failed: " + hresultText(hr);
-        }
-        if (comInit == S_OK || comInit == S_FALSE)
-        {
-            CoUninitialize();
-        }
-    }
-    else
-    {
-        outError = "CoInitializeEx failed: " + hresultText(comInit);
+        outError = "failed to load winapp launcher provider: " + loadErr;
+        return false;
     }
 
-    if (!ok)
+    const std::string request = "op=activate;aumid_b64=" + base64Encode(aumidUtf8) +
+                                ";args_b64=" + base64Encode(startArgsUtf8);
+    std::string response;
+    std::string invokeErr;
+    if (!launcher.invoke("winapp", request, response, invokeErr) || response.rfind("OK pid=", 0) != 0)
     {
-        std::wstring file = L"shell:AppsFolder\\" + aumidW;
-        std::vector<wchar_t> paramsBuf(argsW.begin(), argsW.end());
-        paramsBuf.push_back(L'\0');
-        SHELLEXECUTEINFOW sei{};
-        sei.cbSize = sizeof(sei);
-        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
-        sei.lpFile = file.c_str();
-        sei.lpParameters = argsW.empty() ? nullptr : paramsBuf.data();
-        sei.nShow = SW_SHOWNORMAL;
-        if (ShellExecuteExW(&sei) && sei.hProcess)
+        outError = "winapp activation failed: " + (invokeErr.empty() ? response : invokeErr);
+        return false;
+    }
+    DWORD activatedPid = 0;
+    {
+        const std::string pidText = ProcessGuard::util::trim(response.substr(7));
+        bool ok = !pidText.empty();
+        for (char ch : pidText)
         {
-            processHandle = sei.hProcess;
-            activatedPid = GetProcessId(processHandle);
-            ok = activatedPid != 0;
+            if (ch < '0' || ch > '9') { ok = false; break; }
         }
+        if (ok) activatedPid = static_cast<DWORD>(std::strtoull(pidText.c_str(), nullptr, 10));
+        if (activatedPid == 0) ok = false;
         if (!ok)
         {
-            if (processHandle)
-            {
-                CloseHandle(processHandle);
-            }
-            outError += outError.empty() ? "ShellExecuteExW failed" : "; ShellExecuteExW failed";
+            outError = "winapp activation returned an invalid pid: " + response;
             return false;
         }
+    }
+
+    HANDLE processHandle = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE, FALSE, activatedPid);
+    const bool ok = processHandle != nullptr;
+    if (!ok)
+    {
+        outError = "ActivateApplication returned pid but OpenProcess failed: " + win32ErrorText(GetLastError());
+        return false;
     }
 
     std::string actualPath;

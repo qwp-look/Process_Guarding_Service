@@ -76,7 +76,7 @@ if exist "%RELEASE%" (
         exit /b 1
     )
 )
-mkdir "%RELEASE%" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\modules\notify" "%RELEASE%\modules\metrics" "%RELEASE%\modules\backup" "%RELEASE%\modules\eventlog" "%RELEASE%\modules\dump" "%RELEASE%\modules\service_guard" "%RELEASE%\modules\file_watch" "%RELEASE%\modules\policy" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
+mkdir "%RELEASE%" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\report" "%RELEASE%\modules\notify" "%RELEASE%\modules\metrics" "%RELEASE%\modules\backup" "%RELEASE%\modules\eventlog" "%RELEASE%\modules\dump" "%RELEASE%\modules\service_guard" "%RELEASE%\modules\file_watch" "%RELEASE%\modules\policy" "%RELEASE%\modules\winapp" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_bless.exe"       "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_admin_qt\pgs_admin_qt.exe" "%RELEASE%\" >nul
@@ -110,7 +110,7 @@ copy /Y "%BUILD%\modules\backup\module.manifest.json" "%RELEASE%\modules\backup\
 copy /Y "%BUILD%\modules\eventlog\pgs_eventlog_module.dll" "%RELEASE%\modules\eventlog\" >nul
 copy /Y "%BUILD%\modules\eventlog\module.html"           "%RELEASE%\modules\eventlog\" >nul
 copy /Y "%BUILD%\modules\eventlog\module.manifest.json" "%RELEASE%\modules\eventlog\" >nul
-for %%M in (dump service_guard file_watch policy) do (
+for %%M in (dump service_guard file_watch policy winapp) do (
   copy /Y "%BUILD%\modules\%%M\pgs_%%M_module.dll" "%RELEASE%\modules\%%M\" >nul
   copy /Y "%BUILD%\modules\%%M\module.html" "%RELEASE%\modules\%%M\" >nul
   copy /Y "%BUILD%\modules\%%M\module.manifest.json" "%RELEASE%\modules\%%M\" >nul
@@ -213,8 +213,10 @@ for %%F in (
   modules\file_watch\module.manifest.json
   modules\policy\pgs_policy_module.dll
   modules\policy\module.html
-  modules\policy\module.manifest
   modules\policy\module.manifest.json
+  modules\winapp\pgs_winapp_module.dll
+  modules\winapp\module.html
+  modules\winapp\module.manifest.json
   module_managers\official\manager.manifest.json
   modules_staging\README.md
   examples\smoke_worker.exe
@@ -261,7 +263,7 @@ for %%F in (
 echo [7/7] Done. Release layout:
 echo   %RELEASE%\pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe / pgs_admin_web.exe / pgs_cluster_web.exe
 echo   %RELEASE%\modules\sched\{pgs_sched_module.dll, module.html, module.manifest}
-echo   %RELEASE%\modules\{health,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy}\{module dll, module.html, module.manifest}
+echo   %RELEASE%\modules\{health,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy,winapp}\{module dll, module.html, module.manifest}
 echo   Qt6 + MinGW runtime DLLs (self-contained)
 
 popd

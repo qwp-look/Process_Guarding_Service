@@ -12,7 +12,7 @@ BUILD_DIR="${PGS_BUILD_DIR:-build}"
 # v3: NTDDI_VERSION >= Win8 enables MinGW's IApplicationActivationManager
 # (used by restartAppGuard for WindowsApps activation), no WinRT headers needed.
 CXXFLAGS="-std=c++17 -Wall -Wextra -O2 -Iinclude -DNTDDI_VERSION=0x06020000"
-TOTAL_STEPS=21
+TOTAL_STEPS=22
 mkdir -p "$BUILD_DIR" "$BUILD_DIR/tmp"
 export TMPDIR="${TMPDIR:-$PWD/$BUILD_DIR/tmp}"
 export TEMP="${TEMP:-$TMPDIR}"
@@ -114,11 +114,13 @@ build_module 18 dump pgs_dump_module "modules/dump/pgs_dump_module.cpp" "-ldbghe
 build_module 19 service_guard pgs_service_guard_module "modules/service_guard/pgs_service_guard_module.cpp" "-ladvapi32"
 build_module 20 file_watch pgs_file_watch_module "modules/file_watch/pgs_file_watch_module.cpp" "-lbcrypt"
 build_module 21 policy pgs_policy_module "modules/policy/pgs_policy_module.cpp"
+build_module 22 winapp pgs_winapp_module "modules/winapp/pgs_winapp_module.cpp" "-lole32 -lshell32 -luser32"
 
 copy_mingw_runtime "$BUILD_DIR"
 
-# Default module allowlist: approve the bundled modules.
-printf "sched\nhealth\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\n" > "$BUILD_DIR/modules/modules.allow"
+# Default module allowlist: approve the bundled modules. winapp is trusted but
+# NOT startup-enabled (provider class; opt in via --enable-launchers).
+printf "sched\nhealth\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\nwinapp\n" > "$BUILD_DIR/modules/modules.allow"
 write_modules_lock
 
 echo
@@ -128,6 +130,6 @@ echo "- $BUILD_DIR/guard_example.exe"
 echo "- $BUILD_DIR/quick_start.exe"
 echo "- $BUILD_DIR/smoke_worker.exe"
 echo "- $BUILD_DIR/pgs_bless.exe"
-for name in sched health report notify metrics backup eventlog dump service_guard file_watch policy; do
+for name in sched health report notify metrics backup eventlog dump service_guard file_watch policy winapp; do
   echo "- $BUILD_DIR/modules/$name/pgs_${name}_module.dll"
 done

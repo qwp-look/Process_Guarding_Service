@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>PGS winapp launcher provider</title></head>
+<body>
+<h1>winapp launcher provider</h1>
+<p>Provider-class module (default opt-in). Implements WindowsApps AUMID
+activation mechanics used by the service restart path
+(<code>appKind=winapp</code>) and by <code>pgs_bless bless-start --winapp</code>.</p>
+<p>Enable with <code>pgs_service install --enable-launchers</code> or load on
+demand via <code>module load --path modules\winapp\pgs_winapp_module.dll</code>.</p>
+<p>Request surface: <code>op=activate;aumid_b64=&lt;b64&gt;;args_b64=&lt;b64&gt;</code>
+&mdash; responds <code>OK pid=&lt;pid&gt;</code>.</p>
+</body></html>

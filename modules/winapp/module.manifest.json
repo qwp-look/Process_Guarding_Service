@@ -1,0 +1,13 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "class": "provider",
+  "name": "winapp",
+  "version": "1.0.0",
+  "abi": 2,
+  "summary": "WindowsApps AUMID launcher provider (restart/bless-start activation mechanics).",
+  "risk": "high",
+  "capabilities": ["launcher.winapp"],
+  "methods": [
+    {"name": "winapp.activate", "risk": "high", "sync": true, "required_capabilities": ["launcher.winapp"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+  ]
+}

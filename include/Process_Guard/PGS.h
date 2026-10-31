@@ -201,6 +201,10 @@ namespace ProcessGuard
         bool isRunning() const;
         // Module loading opt-in (default off). Enable via --enable-modules.
         void setModulesEnabled(bool enabled) { m_modulesEnabled = enabled; }
+        // Launcher-provider opt-in (default off). Provider-class modules such
+        // as the winapp AUMID launcher are high-risk: guards of that kind
+        // cannot restart while the provider is disabled.
+        void setLauncherModulesEnabled(bool enabled) { m_launcherModulesEnabled = enabled; if (enabled) m_modulesEnabled = true; }
         // Override the listen port (default kServerPort); must be set before
         // initialize()/start(). Honoured by createListenSocket().
         void setServerPort(std::uint16_t port) { m_serverPort = port ? port : kServerPort; m_serverPortUserSet = true; }
@@ -355,6 +359,7 @@ namespace ProcessGuard
         ModuleManager m_modules;
         std::string m_modulesDir;
         bool m_modulesEnabled{false};
+        bool m_launcherModulesEnabled{false};
         std::string m_dataDirCache;
         // When false (default), ModuleManager refuses any DLL not listed in
         // <exe>\modules\modules.allow. When true, the legacy permissive load-all

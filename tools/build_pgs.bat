@@ -307,7 +307,7 @@ copy /Y modules\file_watch\module.html "%BUILD_DIR%\modules\file_watch\module.ht
 copy /Y modules\file_watch\module.manifest.json "%BUILD_DIR%\modules\file_watch\module.manifest.json" >nul
 
 REM Policy module: named guard-policy templates.
-echo [21/21] Building pgs_policy_module.dll...
+echo [21/22] Building pgs_policy_module.dll...
 if not exist "%BUILD_DIR%\modules\policy" mkdir "%BUILD_DIR%\modules\policy"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\policy\pgs_policy_module.dll" modules\policy\pgs_policy_module.cpp -I %INCLUDE_DIR%
 if errorlevel 1 (
@@ -320,6 +320,19 @@ copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\policy\libgcc_s_se
 copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\policy\libwinpthread-1.dll" >nul 2>&1
 copy /Y modules\policy\module.html "%BUILD_DIR%\modules\policy\module.html" >nul
 copy /Y modules\policy\module.manifest.json "%BUILD_DIR%\modules\policy\module.manifest.json" >nul
+
+REM Winapp module: WindowsApps AUMID launcher provider (provider class). Trusted
+REM via the allowlist but NOT startup-enabled; opt in via --enable-launchers.
+echo [22/22] Building pgs_winapp_module.dll...
+if not exist "%BUILD_DIR%\modules\winapp" mkdir "%BUILD_DIR%\modules\winapp"
+"%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\winapp\pgs_winapp_module.dll" modules\winapp\pgs_winapp_module.cpp -I %INCLUDE_DIR% -lole32 -lshell32 -luser32
+if errorlevel 1 (
+    echo Failed: modules\winapp\pgs_winapp_module.cpp
+    popd
+    exit /b 1
+)
+copy /Y modules\winapp\module.html "%BUILD_DIR%\modules\winapp\module.html" >nul
+copy /Y modules\winapp\module.manifest.json "%BUILD_DIR%\modules\winapp\module.manifest.json" >nul
 
 REM v3: ship a default allowlist that permits the bundled modules. Operators add
 REM lines "name[|sha256|signed]" to <exe>\modules\modules.allow to approve more.
@@ -335,6 +348,7 @@ echo dump
 echo service_guard
 echo file_watch
 echo policy
+echo winapp
 ) > "%BUILD_DIR%\modules\modules.allow"
 
 REM Manifest-driven modules.lock (manifest v2): derived from each module's

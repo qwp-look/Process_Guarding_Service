@@ -979,13 +979,12 @@ bool PGS::isGuardHung(const GuardInfo &info) const
 
 bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage)
 {
-    // Activate a WindowsApps (UWP/Store) guard via its AUMID. The primary path is
-    // IApplicationActivationManager::ActivateApplication (the documented Start-menu
-    // activation entry), which returns the real packaged app pid so we can keep a
-    // handle for liveness watching. We impersonate the original user token so a
-    // Session 0 service lands the app in the interactive session. ShellExecuteExW
-    // with "shell:AppsFolder\<AUMID>" is the fallback when COM activation is
-    // unavailable; the broker there rarely yields a usable hProcess.
+    // Restart a WindowsApps (UWP/Store) guard. Activation mechanics live in the
+    // winapp launcher provider module (default opt-in): this core path acquires
+    // the target session's user token, impersonates it, calls the provider for
+    // AUMID activation, and re-opens the resulting pid for liveness watching.
+    // The provider itself uses IApplicationActivationManager with a
+    // ShellExecuteExW("shell:AppsFolder\<AUMID>") fallback.
     if (info.aumid.empty())
     {
         Logger::error("PGS: winapp restart refused, missing AUMID, path=" + info.path);
@@ -1046,12 +1045,11 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
     {
         argsUtf8 = replaceAll(argsUtf8, kRestartIndexToken, std::to_string(restartIndex));
     }
-    const std::wstring aumidW = utf8ToWide(info.aumid);
-    const std::wstring argsW = utf8ToWide(argsUtf8);
 
     bool ok = false;
     DWORD activatedPid = 0;
     HANDLE procHandle = nullptr;
+    std::string launcherDetail;
 
     if (!SetThreadToken(nullptr, primaryToken))
     {
@@ -1061,71 +1059,36 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
         return setRestartFailure(failureCode, failureMessage, "winapp.set_thread_token", "SetThreadToken failed for WindowsApps restart, error=" + std::to_string(err));
     }
 
-    HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool comInited = (SUCCEEDED(comInit) || comInit == RPC_E_CHANGED_MODE);
-    if (comInited)
+    // Delegate the activation mechanics to the winapp launcher provider module
+    // (manifest class="provider", default opt-in). The provider runs in-process
+    // under the impersonated thread token set above, so ActivateApplication
+    // lands the packaged app in the guard's session exactly as before.
     {
-        IApplicationActivationManager *act = nullptr;
-        HRESULT hr = CoCreateInstance(CLSID_ApplicationActivationManager, nullptr,
-                                      CLSCTX_LOCAL_SERVER | CLSCTX_NO_FAILURE_LOG,
-                                      IID_PPV_ARGS(&act));
-        if (SUCCEEDED(hr) && act)
+        const std::string request = "op=activate;aumid_b64=" + base64Encode(info.aumid) +
+                                    ";args_b64=" + base64Encode(argsUtf8);
+        std::string response;
+        std::string invokeErr;
+        if (m_modules.invoke("winapp", request, response, invokeErr) &&
+            response.rfind("OK pid=", 0) == 0)
         {
-            hr = act->ActivateApplication(aumidW.c_str(),
-                                          (argsW.empty() ? L"" : argsW.c_str()),
-                                          AO_NONE, &activatedPid);
-            if (SUCCEEDED(hr) && activatedPid != 0)
+            DWORD parsed = 0;
+            if (parsePid(util::trim(response.substr(7)), parsed) && parsed != 0)
             {
-                procHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-                                          FALSE, activatedPid);
-                ok = (procHandle != nullptr);
-                if (!ok)
-                {
-                    Logger::warning("PGS: winapp ActivateApplication ok pid=" + std::to_string(activatedPid) +
-                                    " but OpenProcess failed error=" + std::to_string(GetLastError()) +
-                                    ", aumid=" + info.aumid);
-                    activatedPid = 0;
-                }
+                activatedPid = parsed;
+                ok = true;
             }
-            else
-            {
-                Logger::warning("PGS: ActivateApplication hr=0x" +
-                                std::to_string(static_cast<unsigned long>(hr)) +
-                                " pid=" + std::to_string(activatedPid) +
-                                ", aumid=" + info.aumid);
-            }
-            act->Release();
         }
-        else
-        {
-            Logger::warning("PGS: CoCreateInstance(ApplicationActivationManager) hr=0x" +
-                            std::to_string(static_cast<unsigned long>(hr)) +
-                            ", falling back to ShellExecute, aumid=" + info.aumid);
-        }
-        if (comInit == S_OK || comInit == S_FALSE)
-        {
-            CoUninitialize();
-        }
-    }
-
-    // Fallback: ShellExecuteExW("shell:AppsFolder\<AUMID>"). Broker often does
-    // not hand back hProcess, so this is best-effort.
-    if (!ok)
-    {
-        std::wstring file = L"shell:AppsFolder\\" + aumidW;
-        std::vector<wchar_t> paramsBuf(argsW.begin(), argsW.end());
-        paramsBuf.push_back(L'\0');
-        SHELLEXECUTEINFOW sei{};
-        sei.cbSize = sizeof(sei);
-        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
-        sei.lpFile = file.c_str();
-        sei.lpParameters = (argsW.empty() ? nullptr : paramsBuf.data());
-        sei.nShow = SW_SHOWNORMAL;
-        ok = (ShellExecuteExW(&sei) == TRUE);
+        launcherDetail = invokeErr.empty() ? response : invokeErr;
         if (ok)
         {
-            procHandle = sei.hProcess;
-            activatedPid = procHandle ? GetProcessId(procHandle) : 0;
+            // Open the liveness handle while still impersonated, matching the
+            // historical access rights for packaged-app processes.
+            procHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, activatedPid);
+            ok = (procHandle != nullptr);
+            if (!ok)
+            {
+                launcherDetail = "OpenProcess failed after activation, error=" + std::to_string(GetLastError());
+            }
         }
     }
 
@@ -1134,14 +1097,19 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
 
     if (!ok || !procHandle || activatedPid == 0)
     {
-        const DWORD err = GetLastError();
         Logger::error("PGS: winapp restart failed, aumid=" + info.aumid +
-                      ", error=" + std::to_string(err));
+                      ", detail=" + launcherDetail);
         if (procHandle)
         {
             CloseHandle(procHandle);
         }
-        return setRestartFailure(failureCode, failureMessage, "winapp.activate_failed", "WindowsApps activation failed, aumid=" + info.aumid + ", error=" + std::to_string(err));
+        if (launcherDetail.find("module not found") != std::string::npos)
+        {
+            return setRestartFailure(failureCode, failureMessage, "winapp.launcher_unavailable",
+                                     "WindowsApps launcher provider not loaded (enable launchers via --enable-launchers or 'module load' winapp)");
+        }
+        return setRestartFailure(failureCode, failureMessage, "winapp.activate_failed",
+                                 "WindowsApps activation failed, aumid=" + info.aumid + ", detail=" + launcherDetail);
     }
 
     DWORD sessionId = 0xFFFFFFFF;

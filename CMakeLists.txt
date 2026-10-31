@@ -113,15 +113,17 @@ target_link_libraries(pgs_service_guard_module PRIVATE advapi32)
 pgs_module(pgs_file_watch_module file_watch pgs_file_watch_module modules/file_watch/pgs_file_watch_module.cpp)
 target_link_libraries(pgs_file_watch_module PRIVATE bcrypt)
 pgs_module(pgs_policy_module policy pgs_policy_module modules/policy/pgs_policy_module.cpp)
+pgs_module(pgs_winapp_module winapp pgs_winapp_module modules/winapp/pgs_winapp_module.cpp)
+target_link_libraries(pgs_winapp_module PRIVATE ole32 shell32 user32)
 
 file(MAKE_DIRECTORY "${PGS_BUILD_DIR}/modules")
-file(WRITE "${PGS_BUILD_DIR}/modules/modules.allow" "sched\nhealth\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\n")
+file(WRITE "${PGS_BUILD_DIR}/modules/modules.allow" "sched\nhealth\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\nwinapp\n")
 add_custom_target(pgs_bundled_modules_lock ALL
     COMMAND ${CMAKE_COMMAND}
         -DPGS_MODULES_ROOT=${PGS_BUILD_DIR}/modules
         -DPGS_MODULES_LOCK_OUT=${PGS_BUILD_DIR}/modules/modules.lock
         -P ${PGS_ROOT}/cmake/WriteBundledModulesLock.cmake
-    DEPENDS pgs_sched_module pgs_health_module pgs_report_module pgs_notify_module pgs_metrics_module pgs_backup_module pgs_eventlog_module pgs_dump_module pgs_service_guard_module pgs_file_watch_module pgs_policy_module
+    DEPENDS pgs_sched_module pgs_health_module pgs_report_module pgs_notify_module pgs_metrics_module pgs_backup_module pgs_eventlog_module pgs_dump_module pgs_service_guard_module pgs_file_watch_module pgs_policy_module pgs_winapp_module
     COMMENT "Writing modules.lock for bundled modules")
 
 if(PGS_BUILD_TESTS)

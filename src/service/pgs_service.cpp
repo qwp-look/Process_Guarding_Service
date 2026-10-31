@@ -63,6 +63,12 @@ public:
         {
             m_pgs.setModulesEnabled(true);
         }
+        // Launcher providers (e.g. the winapp AUMID launcher) are high-risk and
+        // default off; --enable-launchers opts in and implies --enable-modules.
+        if (args.enableLaunchers || std::getenv("PGS_ENABLE_LAUNCHERS") != nullptr)
+        {
+            m_pgs.setLauncherModulesEnabled(true);
+        }
         // Legacy --enable-ppl / --enable-kernel-modules / PGS_ENABLE_PPL /
         // PGS_ENABLE_KERNEL_MODULES are accepted by parseArguments as deprecated
         // aliases that enable module loading; the kernel/PPL module itself no
@@ -114,6 +120,7 @@ private:
         // --enable-risk critical) land here as plain module-loading opt-in.
         bool enablePpl{false};
         bool enableModules{false};
+        bool enableLaunchers{false};
         bool enableKernelModules{false};
         // v3 G: install/run can bind an explicit port; install embeds it into
         // the service binPath so SCM startup honours it. Default 0 = use the
@@ -171,6 +178,10 @@ private:
         if (args.enableModules)
         {
             binPath += L" --enable-modules";
+        }
+        if (args.enableLaunchers)
+        {
+            binPath += L" --enable-launchers";
         }
         // Deprecated --enable-ppl / --enable-kernel-modules flags are no longer
         // written into the service binPath; enable-modules covers module load.
@@ -443,7 +454,7 @@ private:
     {
         std::cout
             << "Usage: " << exe << " [install|uninstall|start|stop|status|run|--service] [options]\n"
-            << "Options: --token <value> --port <1-65535> --enable-modules --allow-all-modules --no-allow-all-modules\n"
+            << "Options: --token <value> --port <1-65535> --enable-modules --enable-launchers --allow-all-modules --no-allow-all-modules\n"
             << "       Set PGS_SERVICE_TOKEN to provide the service token without exposing it on the command line.\n"
             << "       Deprecated: --enable-ppl / --enable-kernel-modules / --enable-risk critical are accepted as aliases of --enable-modules.\n";
         return 1;
@@ -701,6 +712,13 @@ private:
             if (arg == "--enable-modules")
             {
                 out.enableModules = true;
+                continue;
+            }
+
+            if (arg == "--enable-launchers")
+            {
+                out.enableModules = true;
+                out.enableLaunchers = true;
                 continue;
             }
 
