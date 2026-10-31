@@ -10,6 +10,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Manifest-driven modules.lock generation (manifest v2).
+# Each modules/<name>/module.manifest.json supplies name/version/capabilities/
+# risk/class; the DLL hash anchors the supply chain. The module set is whatever
+# module directories with a manifest + DLL exist under ModulesRoot, so adding a
+# bundled module no longer requires touching a hardcoded list.
+
 function Get-Sha256Hex {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -32,56 +38,44 @@ function Get-Sha256Hex {
 $ModulesRoot = [System.IO.Path]::GetFullPath($ModulesRoot)
 $Output = [System.IO.Path]::GetFullPath($Output)
 
-$capabilities = @{
-    sched = @('sched.add', 'sched.list', 'sched.remove', 'sched.enable', 'sched.disable', 'guard.register', 'guard.unregister', 'guard.intentional', 'guard.policy', 'guard.list')
-    health = @('health.summary', 'health.stats', 'guard.list', 'event.read')
-    profile = @('profile.set', 'profile.list', 'profile.apply', 'guard.policy')
-    report = @('report.snapshot', 'report.backup', 'event.read', 'guard.list', 'health.stats', 'pgs.operation.create', 'pgs.operation.update', 'pgs.operation.finish', 'pgs.operation.fail', 'pgs.artifact.put', 'pgs.artifact.get_meta')
-    notify = @('notify.eventlog', 'notify.popup', 'event.read')
-    metrics = @('metrics.summary', 'metrics.prometheus', 'health.stats', 'guard.list')
-    backup = @('backup.snapshot', 'pgs.operation.create', 'pgs.operation.finish', 'pgs.operation.fail', 'pgs.artifact.put')
-    eventlog = @('eventlog.read', 'event.read')
-    dump = @('dump.collect', 'pgs.operation.create', 'pgs.operation.finish', 'pgs.operation.fail', 'pgs.artifact.put')
-    service_guard = @('service.query', 'service.start', 'service.stop')
-    file_watch = @('file.watch', 'event.emit')
-    policy = @('policy.template', 'guard.policy')
-}
-
 $items = @()
-foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics', 'backup', 'eventlog', 'dump', 'service_guard', 'file_watch', 'policy')) {
-    $dll = Join-Path $ModulesRoot (Join-Path $name ("pgs_{0}_module.dll" -f $name))
+foreach ($dir in (Get-ChildItem -LiteralPath $ModulesRoot -Directory | Sort-Object Name)) {
+    $manifestPath = Join-Path $dir.FullName 'module.manifest.json'
+    $dll = Join-Path $dir.FullName ("pgs_{0}_module.dll" -f $dir.Name)
+    if (-not (Test-Path -LiteralPath $manifestPath)) { continue }
     if (-not [System.IO.File]::Exists($dll)) {
-        throw "required module DLL missing: $dll"
+        throw "module manifest present but DLL missing: $dll"
     }
 
-    $risk = 'low'
-    $version = '1.0.0'
-    if ($name -eq 'sched' -or $name -eq 'profile' -or $name -eq 'service_guard' -or $name -eq 'file_watch' -or $name -eq 'policy') {
-        $risk = 'medium'
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if (-not $manifest.name) {
+        throw "manifest missing name: $manifestPath"
     }
-    elseif ($name -eq 'dump') {
-        $risk = 'high'
+    $manifestName = [string]$manifest.name
+    if ($manifestName -ne $dir.Name) {
+        throw "manifest name '$manifestName' does not match module folder '$($dir.Name)'"
     }
-    if ($name -eq 'report') {
-        $version = '1.1.0'
-    }
+
+    $capabilities = @()
+    if ($manifest.capabilities) { $capabilities = @($manifest.capabilities) }
 
     $items += [ordered]@{
-        name = $name
-        version = $version
+        name = $manifestName
+        version = [string]$manifest.version
+        class = [string]$manifest.class
         sha256 = Get-Sha256Hex -Path $dll
         publisher = 'PGS bundled'
         source = 'bundled'
-        capabilities = $capabilities[$name]
-        risk = $risk
+        capabilities = $capabilities
+        risk = [string]$manifest.risk
         trustedAt = $GeneratedAt
         signature_policy = 'hash'
         require_signed = $false
     }
 }
 
-if ($items.Count -ne 12) {
-    throw "expected 12 bundled modules, got $($items.Count)"
+if ($items.Count -eq 0) {
+    throw "no module manifests found under $ModulesRoot"
 }
 
 $outDir = [System.IO.Path]::GetDirectoryName($Output)
@@ -90,7 +84,7 @@ if ($outDir -and -not [System.IO.Directory]::Exists($outDir)) {
 }
 
 [ordered]@{
-    version = 1
+    version = 2
     generated_at = $GeneratedAt
     modules = $items
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Output -Encoding ASCII

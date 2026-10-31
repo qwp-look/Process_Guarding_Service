@@ -1,13 +1,19 @@
 {
   "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "class": "command",
   "name": "policy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "abi": 3,
-  "summary": "Named guard policy templates.",
+  "summary": "Named guard policy templates and restart profiles.",
   "risk": "medium",
-  "capabilities": ["policy.template", "guard.policy"],
+  "capabilities": ["policy.template", "profile.set", "profile.list", "profile.apply", "guard.policy"],
   "methods": [
     {"name": "policy.set", "risk": "medium", "sync": true, "required_capabilities": ["policy.template"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
-    {"name": "policy.apply", "risk": "medium", "sync": true, "required_capabilities": ["policy.template", "guard.policy"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
+    {"name": "policy.list", "risk": "low", "sync": true, "required_capabilities": ["policy.template"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "policy.remove", "risk": "medium", "sync": true, "required_capabilities": ["policy.template"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "policy.apply", "risk": "medium", "sync": true, "required_capabilities": ["policy.template", "guard.policy"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "profile.set", "risk": "medium", "sync": true, "required_capabilities": ["profile.set"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "profile.list", "risk": "low", "sync": true, "required_capabilities": ["profile.list"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}},
+    {"name": "profile.apply", "risk": "medium", "sync": true, "required_capabilities": ["profile.apply", "guard.policy"], "params_schema": {"type": "object"}, "result_schema": {"type": "object"}}
   ]
 }

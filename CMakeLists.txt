@@ -93,14 +93,12 @@ function(pgs_module target module_dir output_name)
         RUNTIME_OUTPUT_DIRECTORY "${PGS_BUILD_DIR}/modules/${module_dir}"
         LIBRARY_OUTPUT_DIRECTORY "${PGS_BUILD_DIR}/modules/${module_dir}")
     pgs_copy_if_exists(${target} "${PGS_ROOT}/modules/${module_dir}/module.html" "${PGS_BUILD_DIR}/modules/${module_dir}")
-    pgs_copy_if_exists(${target} "${PGS_ROOT}/modules/${module_dir}/module.manifest" "${PGS_BUILD_DIR}/modules/${module_dir}")
     pgs_copy_if_exists(${target} "${PGS_ROOT}/modules/${module_dir}/module.manifest.json" "${PGS_BUILD_DIR}/modules/${module_dir}")
     pgs_copy_mingw_runtime(${target} "$<TARGET_FILE_DIR:${target}>")
 endfunction()
 
 pgs_module(pgs_sched_module sched pgs_sched_module modules/sched/SchedCron.cpp modules/sched/pgs_sched_module.cpp)
 pgs_module(pgs_health_module health pgs_health_module modules/health/pgs_health_module.cpp)
-pgs_module(pgs_profile_module profile pgs_profile_module modules/profile/pgs_profile_module.cpp)
 pgs_module(pgs_report_module report pgs_report_module modules/report/pgs_report_module.cpp)
 pgs_module(pgs_notify_module notify pgs_notify_module modules/notify/pgs_notify_module.cpp)
 target_link_libraries(pgs_notify_module PRIVATE advapi32 user32)
@@ -117,13 +115,13 @@ target_link_libraries(pgs_file_watch_module PRIVATE bcrypt)
 pgs_module(pgs_policy_module policy pgs_policy_module modules/policy/pgs_policy_module.cpp)
 
 file(MAKE_DIRECTORY "${PGS_BUILD_DIR}/modules")
-file(WRITE "${PGS_BUILD_DIR}/modules/modules.allow" "sched\nhealth\nprofile\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\n")
+file(WRITE "${PGS_BUILD_DIR}/modules/modules.allow" "sched\nhealth\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\n")
 add_custom_target(pgs_bundled_modules_lock ALL
     COMMAND ${CMAKE_COMMAND}
         -DPGS_MODULES_ROOT=${PGS_BUILD_DIR}/modules
         -DPGS_MODULES_LOCK_OUT=${PGS_BUILD_DIR}/modules/modules.lock
         -P ${PGS_ROOT}/cmake/WriteBundledModulesLock.cmake
-    DEPENDS pgs_sched_module pgs_health_module pgs_profile_module pgs_report_module pgs_notify_module pgs_metrics_module pgs_backup_module pgs_eventlog_module pgs_dump_module pgs_service_guard_module pgs_file_watch_module pgs_policy_module
+    DEPENDS pgs_sched_module pgs_health_module pgs_report_module pgs_notify_module pgs_metrics_module pgs_backup_module pgs_eventlog_module pgs_dump_module pgs_service_guard_module pgs_file_watch_module pgs_policy_module
     COMMENT "Writing modules.lock for bundled modules")
 
 if(PGS_BUILD_TESTS)

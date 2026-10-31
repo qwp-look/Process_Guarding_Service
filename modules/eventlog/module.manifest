@@ -1,1 +1,0 @@
-name=eventlog;version=1.0.0;abi=3;summary=Local Windows Event Log reader for PGS;capabilities=eventlog.read,event.read

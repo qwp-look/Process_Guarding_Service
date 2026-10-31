@@ -1,1 +1,0 @@
-name=metrics;version=1.0.0;abi=3;summary=Local PGS guard and host metrics;capabilities=metrics.summary,metrics.prometheus,health.stats,guard.list

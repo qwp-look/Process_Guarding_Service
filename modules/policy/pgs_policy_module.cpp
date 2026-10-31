@@ -1,8 +1,11 @@
 /*
- * pgs_policy_module.cpp - named guard policy templates (ABI v3).
+ * pgs_policy_module.cpp - named guard policy templates + restart profiles (ABI v3).
  *
  * Stores restart-policy templates under the service data directory and can apply
- * them to an existing guard through the PGS callback surface.
+ * them to an existing guard through the PGS callback surface. The former
+ * profile module was merged into this module: its op surface (op=profile-*)
+ * aliases the same template store, and its legacy pgs_profiles.db is imported
+ * once on first access.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -167,6 +170,15 @@ namespace
         return std::filesystem::path(dataDir()) / "modules" / "policy" / "templates.db";
     }
 
+    // Legacy store of the removed profile module; imported once so existing
+    // named profiles survive the merge into the policy template store.
+    std::filesystem::path legacyProfilesPath()
+    {
+        return std::filesystem::path(dataDir()) / "modules" / "profile" / "pgs_profiles.db";
+    }
+
+    void importLegacyProfilesIfNeeded(std::vector<Template> &templates);
+
     std::vector<Template> loadTemplates()
     {
         std::vector<Template> templates;
@@ -185,6 +197,7 @@ namespace
             t.killOnExit = requestValue(line, "kill");
             if (safeName(t.name)) templates.push_back(std::move(t));
         }
+        importLegacyProfilesIfNeeded(templates);
         return templates;
     }
 
@@ -209,6 +222,31 @@ namespace
     {
         for (const Template &t : templates) if (lower(t.name) == lower(name)) return &t;
         return nullptr;
+    }
+
+    void importLegacyProfilesIfNeeded(std::vector<Template> &templates)
+    {
+        const std::filesystem::path legacy = legacyProfilesPath();
+        std::error_code ec;
+        if (!std::filesystem::exists(legacy, ec)) return;
+        std::ifstream in(legacy, std::ios::in | std::ios::binary);
+        if (!in.is_open()) return;
+        std::string line;
+        while (std::getline(in, line))
+        {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty() || line[0] == '#') continue;
+            Template t;
+            t.name = requestValue(line, "name");
+            t.maxRestarts = requestValue(line, "max");
+            t.restartArgs = base64Decode(requestValue(line, "restart_args_b64"));
+            if (!safeName(t.name) || !safeMax(t.maxRestarts)) continue;
+            if (findTemplate(templates, t.name)) continue;
+            templates.push_back(std::move(t));
+        }
+        // Renaming the imported file keeps the one-time import idempotent even
+        // if persisting the merged store fails afterwards.
+        std::filesystem::rename(legacy, legacy.string() + ".imported", ec);
     }
 
     bool callPGS(const std::string &command, std::string &response)
@@ -245,11 +283,13 @@ BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID)
 extern "C" {
 
 PG_MODULE_API const char *PG_GetName(void) { return "policy"; }
-PG_MODULE_API const char *PG_GetVersion(void) { return "1.0.0"; }
+PG_MODULE_API const char *PG_GetVersion(void) { return "1.1.0"; }
 PG_MODULE_API unsigned int PG_GetAbiVersion(void) { return PG_MODULE_ABI_VERSION_JSON; }
 PG_MODULE_API const char *PG_GetManifest(void)
 {
-    return "name=policy;version=1.0.0;abi=3;summary=Named guard policy templates;capabilities=policy.template,guard.policy";
+    return "name=policy;version=1.1.0;abi=3;"
+           "summary=Named guard policy templates and restart profiles;"
+           "capabilities=policy.template,profile.set,profile.list,profile.apply,guard.policy";
 }
 
 PG_MODULE_API int PG_Init(void *reserved)
@@ -377,6 +417,111 @@ PG_MODULE_API int PG_Invoke(const char *request, char *responseBuf, size_t respo
         setResponse(responseBuf, responseBufSize, "OK applied=" + name + ";pid=" + pid + ";response_b64=" + base64Encode(response));
         return 0;
     }
+    // ---- profile-* ops: compatibility surface of the merged profile module.
+    // They address the same template store but keep the historical profile
+    // output format ("NAME=...;MAX_RESTARTS=...;RESTART_ARGS_B64=...") so
+    // existing scripts and UI flows keep parsing.
+    if (op == "profile-set")
+    {
+        Template t;
+        t.name = trim(requestValue(req, "name"));
+        t.maxRestarts = trim(requestValue(req, "max"));
+        if (t.maxRestarts.empty()) t.maxRestarts = "3";
+        t.restartArgs = base64Decode(requestValue(req, "restart_args_b64"));
+        std::string error;
+        if (!validateTemplate(t, error))
+        {
+            setResponse(responseBuf, responseBufSize, "ERR invalid profile: " + error);
+            return 1;
+        }
+        std::vector<Template> templates = loadTemplates();
+        templates.erase(std::remove_if(templates.begin(), templates.end(), [&](const Template &existing) { return lower(existing.name) == lower(t.name); }), templates.end());
+        templates.push_back(t);
+        if (!saveTemplates(templates))
+        {
+            setResponse(responseBuf, responseBufSize, "ERR failed to save profiles");
+            return 1;
+        }
+        setResponse(responseBuf, responseBufSize, "OK profile saved name=" + t.name);
+        return 0;
+    }
+    if (op == "profile-list")
+    {
+        const std::vector<Template> templates = loadTemplates();
+        std::ostringstream out;
+        out << "OK count=" << templates.size();
+        for (const Template &t : templates)
+        {
+            out << "\nNAME=" << t.name << ";MAX_RESTARTS=" << t.maxRestarts
+                << ";RESTART_ARGS_B64=" << base64Encode(t.restartArgs);
+        }
+        setResponse(responseBuf, responseBufSize, out.str());
+        return 0;
+    }
+    if (op == "profile-get")
+    {
+        const std::string name = trim(requestValue(req, "name"));
+        const std::vector<Template> templates = loadTemplates();
+        const Template *t = findTemplate(templates, name);
+        if (!t)
+        {
+            setResponse(responseBuf, responseBufSize, "ERR profile not found");
+            return 1;
+        }
+        setResponse(responseBuf, responseBufSize,
+                    "OK\nNAME=" + t->name + ";MAX_RESTARTS=" + t->maxRestarts +
+                    ";RESTART_ARGS_B64=" + base64Encode(t->restartArgs));
+        return 0;
+    }
+    if (op == "profile-remove")
+    {
+        const std::string name = trim(requestValue(req, "name"));
+        if (!safeName(name))
+        {
+            setResponse(responseBuf, responseBufSize, "ERR invalid profile name");
+            return 1;
+        }
+        std::vector<Template> templates = loadTemplates();
+        const std::size_t before = templates.size();
+        templates.erase(std::remove_if(templates.begin(), templates.end(), [&](const Template &t) { return lower(t.name) == lower(name); }), templates.end());
+        if (templates.size() == before)
+        {
+            setResponse(responseBuf, responseBufSize, "ERR profile not found");
+            return 1;
+        }
+        if (!saveTemplates(templates))
+        {
+            setResponse(responseBuf, responseBufSize, "ERR failed to save profiles");
+            return 1;
+        }
+        setResponse(responseBuf, responseBufSize, "OK profile removed name=" + name);
+        return 0;
+    }
+    if (op == "profile-apply")
+    {
+        const std::string name = trim(requestValue(req, "name"));
+        const std::string pid = trim(requestValue(req, "pid"));
+        if (!safeName(name) || pid.empty())
+        {
+            setResponse(responseBuf, responseBufSize, "ERR invalid apply arguments");
+            return 1;
+        }
+        const std::vector<Template> templates = loadTemplates();
+        const Template *t = findTemplate(templates, name);
+        if (!t)
+        {
+            setResponse(responseBuf, responseBufSize, "ERR profile not found");
+            return 1;
+        }
+        std::string command = "set-policy " + pid + "|" + t->maxRestarts;
+        if (!t->restartArgs.empty())
+            command += "|" + base64Encode(t->restartArgs);
+        std::string response;
+        const bool ok = callPGS(command, response);
+        setResponse(responseBuf, responseBufSize, response.empty() ? "ERR apply failed" : response);
+        return ok && response.rfind("OK", 0) == 0 ? 0 : 1;
+    }
+
     setResponse(responseBuf, responseBufSize, "ERR unknown policy op");
     return 1;
 }

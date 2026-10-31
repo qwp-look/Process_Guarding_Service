@@ -75,6 +75,7 @@ namespace
         nlohmann::json obj = nlohmann::json::object();
         obj["name"] = name;
         obj["version"] = manifest.version.empty() ? (info.version.empty() ? "1.0.0" : info.version) : manifest.version;
+        obj["class"] = manifest.json.value("class", "command");
         obj["sha256"] = toLowerAscii(info.sha256);
         obj["publisher"] = manifest.publisher.empty() ? (manifest.author.empty() ? "local" : manifest.author) : manifest.publisher;
         obj["source"] = source.empty() ? "local-install" : source;

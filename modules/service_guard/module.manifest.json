@@ -1,5 +1,6 @@
 {
   "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "class": "command",
   "name": "service_guard",
   "version": "1.0.0",
   "abi": 3,

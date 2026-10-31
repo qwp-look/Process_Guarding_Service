@@ -12,7 +12,7 @@ BUILD_DIR="${PGS_BUILD_DIR:-build}"
 # v3: NTDDI_VERSION >= Win8 enables MinGW's IApplicationActivationManager
 # (used by restartAppGuard for WindowsApps activation), no WinRT headers needed.
 CXXFLAGS="-std=c++17 -Wall -Wextra -O2 -Iinclude -DNTDDI_VERSION=0x06020000"
-TOTAL_STEPS=22
+TOTAL_STEPS=21
 mkdir -p "$BUILD_DIR" "$BUILD_DIR/tmp"
 export TMPDIR="${TMPDIR:-$PWD/$BUILD_DIR/tmp}"
 export TEMP="${TEMP:-$TMPDIR}"
@@ -31,7 +31,7 @@ copy_mingw_runtime() {
 copy_module_assets() {
   local name="$1"
   cp -f "modules/$name/module.html" "$BUILD_DIR/modules/$name/module.html"
-  cp -f "modules/$name/module.manifest" "$BUILD_DIR/modules/$name/module.manifest"
+
   cp -f "modules/$name/module.manifest.json" "$BUILD_DIR/modules/$name/module.manifest.json"
 }
 
@@ -49,69 +49,15 @@ build_module() {
   copy_module_assets "$name"
 }
 
+# Manifest-driven modules.lock generation (manifest v2): the lock is derived
+# from each module's module.manifest.json plus the built DLL hash, so the
+# module set lives in the manifests instead of a hardcoded list here.
 write_modules_lock() {
-  {
-    echo '{"version":1,"generated_at":"build","modules":['
-    local first=1
-    local names=(sched health profile report notify metrics backup eventlog dump service_guard file_watch policy)
-    for name in "${names[@]}"; do
-      local dll="$BUILD_DIR/modules/$name/pgs_${name}_module.dll"
-      local hash
-      hash="$(sha256sum "$dll" | awk '{print $1}')"
-      [ "$first" -eq 1 ] || echo ','
-      first=0
-      local risk="low"
-      local version="1.0.0"
-      local caps='[]'
-      case "$name" in
-        sched)
-          risk="medium"
-          caps='["sched.add","sched.list","sched.remove","sched.enable","sched.disable","guard.register","guard.unregister","guard.intentional","guard.policy","guard.list"]'
-          ;;
-        health)
-          caps='["health.summary","health.stats","guard.list","event.read"]'
-          ;;
-        profile)
-          risk="medium"
-          caps='["profile.set","profile.list","profile.apply","guard.policy"]'
-          ;;
-        report)
-          version="1.1.0"
-          caps='["report.snapshot","report.backup","event.read","guard.list","health.stats","pgs.operation.create","pgs.operation.update","pgs.operation.finish","pgs.operation.fail","pgs.artifact.put","pgs.artifact.get_meta"]'
-          ;;
-        notify)
-          caps='["notify.eventlog","notify.popup","event.read"]'
-          ;;
-        metrics)
-          caps='["metrics.summary","metrics.prometheus","health.stats","guard.list"]'
-          ;;
-        backup)
-          caps='["backup.snapshot","pgs.operation.create","pgs.operation.finish","pgs.operation.fail","pgs.artifact.put"]'
-          ;;
-        eventlog)
-          caps='["eventlog.read","event.read"]'
-          ;;
-        dump)
-          risk="high"
-          caps='["dump.collect","pgs.operation.create","pgs.operation.finish","pgs.operation.fail","pgs.artifact.put"]'
-          ;;
-        service_guard)
-          risk="medium"
-          caps='["service.query","service.start","service.stop","service.policy","event.emit"]'
-          ;;
-        file_watch)
-          risk="medium"
-          caps='["file.watch","event.emit"]'
-          ;;
-        policy)
-          risk="medium"
-          caps='["policy.template","guard.policy"]'
-          ;;
-      esac
-      printf '{"name":"%s","version":"%s","sha256":"%s","publisher":"PGS bundled","source":"bundled","capabilities":%s,"risk":"%s","trustedAt":"build","signature_policy":"hash","require_signed":false}' "$name" "$version" "$hash" "$caps" "$risk"
-    done
-    echo ']}'
-  } > "$BUILD_DIR/modules/modules.lock"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass \
+    -File tools/write_modules_lock.ps1 \
+    -ModulesRoot "$(cygpath -w "$BUILD_DIR/modules")" \
+    -Output "$(cygpath -w "$BUILD_DIR/modules/modules.lock")" \
+    -GeneratedAt build
 }
 
 echo "[1/$TOTAL_STEPS] Compiling logger..."
@@ -159,21 +105,20 @@ echo "[10/$TOTAL_STEPS] Building pgs_bless.exe..."
 
 build_module 11 sched pgs_sched_module "modules/sched/SchedCron.cpp modules/sched/pgs_sched_module.cpp"
 build_module 12 health pgs_health_module "modules/health/pgs_health_module.cpp"
-build_module 13 profile pgs_profile_module "modules/profile/pgs_profile_module.cpp"
-build_module 14 report pgs_report_module "modules/report/pgs_report_module.cpp"
-build_module 15 notify pgs_notify_module "modules/notify/pgs_notify_module.cpp" "-ladvapi32 -luser32"
-build_module 16 metrics pgs_metrics_module "modules/metrics/pgs_metrics_module.cpp"
-build_module 17 backup pgs_backup_module "modules/backup/pgs_backup_module.cpp"
-build_module 18 eventlog pgs_eventlog_module "modules/eventlog/pgs_eventlog_module.cpp" "-ladvapi32"
-build_module 19 dump pgs_dump_module "modules/dump/pgs_dump_module.cpp" "-ldbghelp"
-build_module 20 service_guard pgs_service_guard_module "modules/service_guard/pgs_service_guard_module.cpp" "-ladvapi32"
-build_module 21 file_watch pgs_file_watch_module "modules/file_watch/pgs_file_watch_module.cpp" "-lbcrypt"
-build_module 22 policy pgs_policy_module "modules/policy/pgs_policy_module.cpp"
+build_module 13 report pgs_report_module "modules/report/pgs_report_module.cpp"
+build_module 14 notify pgs_notify_module "modules/notify/pgs_notify_module.cpp" "-ladvapi32 -luser32"
+build_module 15 metrics pgs_metrics_module "modules/metrics/pgs_metrics_module.cpp"
+build_module 16 backup pgs_backup_module "modules/backup/pgs_backup_module.cpp"
+build_module 17 eventlog pgs_eventlog_module "modules/eventlog/pgs_eventlog_module.cpp" "-ladvapi32"
+build_module 18 dump pgs_dump_module "modules/dump/pgs_dump_module.cpp" "-ldbghelp"
+build_module 19 service_guard pgs_service_guard_module "modules/service_guard/pgs_service_guard_module.cpp" "-ladvapi32"
+build_module 20 file_watch pgs_file_watch_module "modules/file_watch/pgs_file_watch_module.cpp" "-lbcrypt"
+build_module 21 policy pgs_policy_module "modules/policy/pgs_policy_module.cpp"
 
 copy_mingw_runtime "$BUILD_DIR"
 
 # Default module allowlist: approve the bundled modules.
-printf "sched\nhealth\nprofile\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\n" > "$BUILD_DIR/modules/modules.allow"
+printf "sched\nhealth\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\n" > "$BUILD_DIR/modules/modules.allow"
 write_modules_lock
 
 echo
@@ -183,6 +128,6 @@ echo "- $BUILD_DIR/guard_example.exe"
 echo "- $BUILD_DIR/quick_start.exe"
 echo "- $BUILD_DIR/smoke_worker.exe"
 echo "- $BUILD_DIR/pgs_bless.exe"
-for name in sched health profile report notify metrics backup eventlog dump service_guard file_watch policy; do
+for name in sched health report notify metrics backup eventlog dump service_guard file_watch policy; do
   echo "- $BUILD_DIR/modules/$name/pgs_${name}_module.dll"
 done

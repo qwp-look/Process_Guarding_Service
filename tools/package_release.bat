@@ -12,7 +12,7 @@ REM  PATH). Do not publish an existing release/ tree without rerunning this
 REM  script; it is rebuilt from current build outputs each time:
 REM    - pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe + examples
 REM    - pgs_admin_web.exe + pgs_cluster_web.exe (browser consoles)
-REM    - modules/{sched,health,profile,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy}/ payloads
+REM    - modules/{sched,health,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy}/ payloads
 REM    - Qt6 DLLs + plugins via windeployqt6
 REM    - MinGW third-party runtime DLLs that Qt6Core/Qt6Gui transitively depend
 REM      on (windeployqt does NOT deploy these MSYS2 libs; without them the Qt
@@ -91,40 +91,28 @@ copy /Y "%MINGW%\libstdc++-6.dll"   "%RELEASE%\examples\" >nul
 copy /Y "%MINGW%\libwinpthread-1.dll" "%RELEASE%\examples\" >nul
 copy /Y "%BUILD%\modules\sched\pgs_sched_module.dll" "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.html"          "%RELEASE%\modules\sched\" >nul
-copy /Y "%BUILD%\modules\sched\module.manifest"      "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.manifest.json" "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\health\pgs_health_module.dll" "%RELEASE%\modules\health\" >nul
 copy /Y "%BUILD%\modules\health\module.html"           "%RELEASE%\modules\health\" >nul
-copy /Y "%BUILD%\modules\health\module.manifest"       "%RELEASE%\modules\health\" >nul
 copy /Y "%BUILD%\modules\health\module.manifest.json" "%RELEASE%\modules\health\" >nul
-copy /Y "%BUILD%\modules\profile\pgs_profile_module.dll" "%RELEASE%\modules\profile\" >nul
-copy /Y "%BUILD%\modules\profile\module.html"            "%RELEASE%\modules\profile\" >nul
-copy /Y "%BUILD%\modules\profile\module.manifest"        "%RELEASE%\modules\profile\" >nul
-copy /Y "%BUILD%\modules\profile\module.manifest.json" "%RELEASE%\modules\profile\" >nul
 copy /Y "%BUILD%\modules\report\pgs_report_module.dll" "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\report\module.html"           "%RELEASE%\modules\report\" >nul
-copy /Y "%BUILD%\modules\report\module.manifest"       "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\report\module.manifest.json" "%RELEASE%\modules\report\" >nul
 copy /Y "%BUILD%\modules\notify\pgs_notify_module.dll" "%RELEASE%\modules\notify\" >nul
 copy /Y "%BUILD%\modules\notify\module.html"           "%RELEASE%\modules\notify\" >nul
-copy /Y "%BUILD%\modules\notify\module.manifest"       "%RELEASE%\modules\notify\" >nul
 copy /Y "%BUILD%\modules\notify\module.manifest.json" "%RELEASE%\modules\notify\" >nul
 copy /Y "%BUILD%\modules\metrics\pgs_metrics_module.dll" "%RELEASE%\modules\metrics\" >nul
 copy /Y "%BUILD%\modules\metrics\module.html"           "%RELEASE%\modules\metrics\" >nul
-copy /Y "%BUILD%\modules\metrics\module.manifest"       "%RELEASE%\modules\metrics\" >nul
 copy /Y "%BUILD%\modules\metrics\module.manifest.json" "%RELEASE%\modules\metrics\" >nul
 copy /Y "%BUILD%\modules\backup\pgs_backup_module.dll" "%RELEASE%\modules\backup\" >nul
 copy /Y "%BUILD%\modules\backup\module.html"           "%RELEASE%\modules\backup\" >nul
-copy /Y "%BUILD%\modules\backup\module.manifest"       "%RELEASE%\modules\backup\" >nul
 copy /Y "%BUILD%\modules\backup\module.manifest.json" "%RELEASE%\modules\backup\" >nul
 copy /Y "%BUILD%\modules\eventlog\pgs_eventlog_module.dll" "%RELEASE%\modules\eventlog\" >nul
 copy /Y "%BUILD%\modules\eventlog\module.html"           "%RELEASE%\modules\eventlog\" >nul
-copy /Y "%BUILD%\modules\eventlog\module.manifest"       "%RELEASE%\modules\eventlog\" >nul
 copy /Y "%BUILD%\modules\eventlog\module.manifest.json" "%RELEASE%\modules\eventlog\" >nul
 for %%M in (dump service_guard file_watch policy) do (
   copy /Y "%BUILD%\modules\%%M\pgs_%%M_module.dll" "%RELEASE%\modules\%%M\" >nul
   copy /Y "%BUILD%\modules\%%M\module.html" "%RELEASE%\modules\%%M\" >nul
-  copy /Y "%BUILD%\modules\%%M\module.manifest" "%RELEASE%\modules\%%M\" >nul
   copy /Y "%BUILD%\modules\%%M\module.manifest.json" "%RELEASE%\modules\%%M\" >nul
 )
 copy /Y "%BUILD%\modules\modules.allow"        "%RELEASE%\modules\" >nul
@@ -191,10 +179,6 @@ for %%F in (
   modules\health\module.html
   modules\health\module.manifest
   modules\health\module.manifest.json
-  modules\profile\pgs_profile_module.dll
-  modules\profile\module.html
-  modules\profile\module.manifest
-  modules\profile\module.manifest.json
   modules\report\pgs_report_module.dll
   modules\report\module.html
   modules\report\module.manifest
@@ -277,7 +261,7 @@ for %%F in (
 echo [7/7] Done. Release layout:
 echo   %RELEASE%\pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe / pgs_admin_web.exe / pgs_cluster_web.exe
 echo   %RELEASE%\modules\sched\{pgs_sched_module.dll, module.html, module.manifest}
-echo   %RELEASE%\modules\{health,profile,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy}\{module dll, module.html, module.manifest}
+echo   %RELEASE%\modules\{health,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy}\{module dll, module.html, module.manifest}
 echo   Qt6 + MinGW runtime DLLs (self-contained)
 
 popd

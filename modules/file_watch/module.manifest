@@ -1,1 +1,0 @@
-name=file_watch;version=1.0.0;abi=3;summary=Demand-driven local file change watcher;capabilities=file.watch,event.emit

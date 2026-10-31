@@ -423,6 +423,11 @@ namespace ProcessGuard
         // "module list|load|unload|call|invoke" sub-protocol handler.
         std::string handleModuleCommand(const std::string &args);
         std::string handleModulePermissiveCommand(const std::string &rest);
+        // P2-12: host-enforced capability policy. Returns an error string when
+        // the requested JSON-RPC method is outside the module's declared
+        // manifest surface; empty string means allowed (including modules
+        // without any declared surface).
+        std::string checkModuleMethodAllowed(const std::string &name, const std::string &method) const;
         std::string handleModuleInstallCommand(const std::string &rest);
         std::string handleModuleRollbackCommand(const std::string &rest);
         std::string handleCoreJsonRpc(const std::string &requestJson);

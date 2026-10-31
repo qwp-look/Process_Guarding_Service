@@ -1,1 +1,0 @@
-name=service_guard;version=1.0.0;abi=3;summary=Local Windows service guard helper;capabilities=service.query,service.start,service.stop,service.policy,event.emit

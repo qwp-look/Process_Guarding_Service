@@ -345,16 +345,6 @@ namespace ProcessGuard
             return true;
         }
 
-        std::string moduleSidecarManifestPath(const std::string &modulePath)
-        {
-            const std::string dir = util::parentDirectoryUtf8(modulePath);
-            if (dir.empty())
-            {
-                return std::string("module.manifest");
-            }
-            return dir + "\\module.manifest";
-        }
-
         std::string moduleSidecarJsonManifestPath(const std::string &modulePath)
         {
             const std::string dir = util::parentDirectoryUtf8(modulePath);
@@ -446,11 +436,30 @@ namespace ProcessGuard
                     manifest.version = j.at("version").get<std::string>();
                 if (j.contains("summary") && j.at("summary").is_string())
                     manifest.summary = j.at("summary").get<std::string>();
+                if (j.contains("class") && j.at("class").is_string())
+                    manifest.moduleClass = j.at("class").get<std::string>();
+                if (j.contains("risk") && j.at("risk").is_string())
+                    manifest.risk = j.at("risk").get<std::string>();
                 if (j.contains("capabilities") && j.at("capabilities").is_array())
                 {
                     for (const auto &item : j.at("capabilities"))
                         if (item.is_string())
                             manifest.capabilities.push_back(item.get<std::string>());
+                }
+                if (j.contains("methods") && j.at("methods").is_array())
+                {
+                    for (const auto &item : j.at("methods"))
+                    {
+                        if (!item.is_object())
+                            continue;
+                        ModuleManager::ModuleManifest::MethodSpec spec;
+                        if (item.contains("name") && item.at("name").is_string())
+                            spec.name = item.at("name").get<std::string>();
+                        if (item.contains("risk") && item.at("risk").is_string())
+                            spec.risk = item.at("risk").get<std::string>();
+                        if (!spec.name.empty())
+                            manifest.methods.push_back(spec);
+                    }
                 }
                 if (j.contains("abi"))
                 {
@@ -753,19 +762,12 @@ namespace ProcessGuard
         out.hasInvokeExport = probed.hasInvoke;
         out.hasInvokeJsonExport = probed.hasInvokeJson;
         out.hasManifestExport = probed.hasManifest;
-        std::string sidecarManifest;
+        // Manifest v2: the on-disk sidecar manifest is the single JSON format
+        // (module.manifest.json). The legacy KV sidecar is no longer read.
         std::string sidecarJsonManifest;
         if (readSmallTextFile(moduleSidecarJsonManifestPath(path), sidecarJsonManifest))
         {
             out.manifest = parseJsonSidecarManifest(sidecarJsonManifest);
-            out.name = out.manifest.name;
-            out.version = out.manifest.version;
-            out.abiVersion = out.manifest.abiVersion;
-            out.hasAbiVersion = out.manifest.hasAbiVersion;
-        }
-        if (out.manifest.name.empty() && readSmallTextFile(moduleSidecarManifestPath(path), sidecarManifest))
-        {
-            out.manifest = parseManifest(sidecarManifest);
             out.name = out.manifest.name;
             out.version = out.manifest.version;
             out.abiVersion = out.manifest.abiVersion;

@@ -145,7 +145,7 @@ function Start-PgsConsole {
         [string]$Token,
         [string]$ProgramDataRoot,
         [string]$LogPrefix,
-        [switch]$WithoutTokenEnv,
+        [switch]$WithoutTokenEnv
 
     )
 
@@ -354,7 +354,6 @@ try {
     $ModulesDir = Join-Path $PortableRelease 'modules'
     $SchedDll = Join-Path $ModulesDir 'sched\pgs_sched_module.dll'
     $HealthDll = Join-Path $ModulesDir 'health\pgs_health_module.dll'
-    $ProfileDll = Join-Path $ModulesDir 'profile\pgs_profile_module.dll'
     $ReportDll = Join-Path $ModulesDir 'report\pgs_report_module.dll'
     $NotifyDll = Join-Path $ModulesDir 'notify\pgs_notify_module.dll'
     $MetricsDll = Join-Path $ModulesDir 'metrics\pgs_metrics_module.dll'
@@ -367,7 +366,7 @@ try {
 
     foreach ($path in @(
         $BlessExe, $ServiceExe, $WebExe, $ClusterExe, $QtExe, $WorkerExe,
-        $SchedDll, $HealthDll, $ProfileDll, $ReportDll, $NotifyDll, $MetricsDll, $BackupDll, $EventlogDll,
+        $SchedDll, $HealthDll, $ReportDll, $NotifyDll, $MetricsDll, $BackupDll, $EventlogDll,
         $DumpDll, $ServiceGuardDll, $FileWatchDll, $PolicyDll,
         (Join-Path $ModulesDir 'modules.allow'),
         (Join-Path $PortableRelease 'Qt6Core.dll'),
@@ -383,7 +382,6 @@ try {
     $expectedModules = @(
         @{ Name = 'sched'; Path = $SchedDll },
         @{ Name = 'health'; Path = $HealthDll },
-        @{ Name = 'profile'; Path = $ProfileDll },
         @{ Name = 'report'; Path = $ReportDll },
         @{ Name = 'notify'; Path = $NotifyDll },
         @{ Name = 'metrics'; Path = $MetricsDll },
@@ -416,11 +414,11 @@ try {
     $badAuth = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token 'wrong-token' -CommandArgs @('ping') -AllowError
     Assert-True ($badAuth.Code -ne 0 -or $badAuth.Text -notmatch '^OK pong') 'wrong token was accepted'
 
-
+    foreach ($dll in @($SchedDll, $HealthDll, $ReportDll, $NotifyDll, $MetricsDll, $BackupDll, $EventlogDll, $DumpDll, $ServiceGuardDll, $FileWatchDll, $PolicyDll)) {
         Ensure-ModuleLoaded -BlessExe $BlessExe -Port $PortablePort -Token $Token -Path $dll
     }
     $modules = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'list')
-    foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics', 'backup', 'eventlog', 'dump', 'service_guard', 'file_watch', 'policy')) {
+    foreach ($name in @('sched', 'health', 'report', 'notify', 'metrics', 'backup', 'eventlog', 'dump', 'service_guard', 'file_watch', 'policy')) {
         Assert-True ($modules -match $name) "module list missing $name`: $modules"
     }
 
@@ -444,7 +442,10 @@ try {
         @('dump', 'status'),
         @('service-guard', 'status'),
         @('file-watch', 'status'),
-        @("policy-template", "status")
+        @('policy-template', 'status')
+    )) {
+        $status = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs $statusArgs
+        Assert-True ($status -match '^OK') "module status failed ($($statusArgs -join ' ')): $status"
     }
     $events = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('events', 'list', '--limit', '10')
     Assert-True ($events -match '^OK count=') "events list failed: $events"
@@ -502,7 +503,7 @@ try {
 
     Write-Step 'Persistence after service restart'
     $portableProc = Start-PgsConsole -ReleaseDir $PortableRelease -Port $PortablePort -Token $Token -ProgramDataRoot $ProgramDataPortable -LogPrefix (Join-Path $LogsRoot 'portable-persist-1')
-    foreach ($dll in @($HealthDll, $ProfileDll, $ReportDll)) {
+    foreach ($dll in @($HealthDll, $ReportDll)) {
         Ensure-ModuleLoaded -BlessExe $BlessExe -Port $PortablePort -Token $Token -Path $dll
     }
     $start = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('bless-start', '--path', $WorkerExe, '--start-args', '--sleep-ms 60000', '--max-restarts', '1', '--hash', 'auto')
@@ -670,7 +671,7 @@ try {
             (Join-Path $InstallDir 'modules\dump\pgs_dump_module.dll'),
             (Join-Path $InstallDir 'modules\service_guard\pgs_service_guard_module.dll'),
             (Join-Path $InstallDir 'modules\file_watch\pgs_file_watch_module.dll'),
-            (Join-Path $InstallDir 'modules\policy\pgs_policy_module.dll'),
+            (Join-Path $InstallDir 'modules\policy\pgs_policy_module.dll')
         )) {
             Assert-Path $path
         }

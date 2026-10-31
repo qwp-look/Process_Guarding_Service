@@ -3471,10 +3471,13 @@ int main()
     }
     else if (command == "profile")
     {
+        // The profile module merged into the policy module (manifest v2); the
+        // CLI surface stays stable and routes to the policy module's
+        // compatibility ops over the same template store.
         const std::string sub = subCommand.empty() ? "list" : subCommand;
         if (sub == "list")
         {
-            wireCommand = "module call profile op=list";
+            wireCommand = "module call policy op=profile-list";
         }
         else if (sub == "set")
         {
@@ -3484,7 +3487,7 @@ int main()
                 WSACleanup();
                 return 1;
             }
-            wireCommand = "module call profile op=set;name=" + moduleName +
+            wireCommand = "module call policy op=profile-set;name=" + moduleName +
                           ";max=" + maxRestartsLabel(maxRestarts);
             if (hasRestartArgs)
             {
@@ -3499,7 +3502,7 @@ int main()
                 WSACleanup();
                 return 1;
             }
-            wireCommand = "module call profile op=" + sub + ";name=" + moduleName;
+            wireCommand = "module call policy op=profile-" + sub + ";name=" + moduleName;
         }
         else if (sub == "apply")
         {
@@ -3509,7 +3512,7 @@ int main()
                 WSACleanup();
                 return 1;
             }
-            wireCommand = "module call profile op=apply;name=" + moduleName +
+            wireCommand = "module call policy op=profile-apply;name=" + moduleName +
                           ";pid=" + std::to_string(pid);
         }
         else

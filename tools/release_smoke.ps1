@@ -84,8 +84,6 @@ if (-not (Test-Path -LiteralPath $worker)) {
 }
 $schedPath = Join-Path $Release 'modules\sched\pgs_sched_module.dll'
 $healthPath = Join-Path $Release 'modules\health\pgs_health_module.dll'
-$profilePath = Join-Path $Release 'modules\profile\pgs_profile_module.dll'
-$profileDb = Join-Path $Release 'modules\profile\pgs_profiles.db'
 $reportPath = Join-Path $Release 'modules\report\pgs_report_module.dll'
 $metricsPath = Join-Path $Release 'modules\metrics\pgs_metrics_module.dll'
 $backupPath = Join-Path $Release 'modules\backup\pgs_backup_module.dll'
@@ -95,7 +93,7 @@ $serviceGuardPath = Join-Path $Release 'modules\service_guard\pgs_service_guard_
 $fileWatchPath = Join-Path $Release 'modules\file_watch\pgs_file_watch_module.dll'
 $policyPath = Join-Path $Release 'modules\policy\pgs_policy_module.dll'
 
-foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $healthPath, $profilePath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath)) {
+foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $healthPath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "required release artifact missing: $required"
     }
@@ -167,7 +165,7 @@ try {
     }
     Write-Host '[release-smoke] sched call ok'
 
-    foreach ($modulePath in @($healthPath, $profilePath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath)) {
+    foreach ($modulePath in @($healthPath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath)) {
         $load = Invoke-PgsOk @('module', 'load', '--path', $modulePath)
         if ($load -notmatch '^OK loaded') {
             throw "unexpected module load response for ${modulePath}: $load"
@@ -251,7 +249,6 @@ finally {
         Wait-Process -Id $serviceProc.Id -Timeout 10 -ErrorAction SilentlyContinue
     }
     Stop-ByName @('smoke_worker')
-    Remove-Item -LiteralPath $profileDb -Force -ErrorAction SilentlyContinue
 
     if ($null -eq $oldProgramData) {
         Remove-Item Env:ProgramData -ErrorAction SilentlyContinue

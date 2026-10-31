@@ -1,1 +1,0 @@
-name=report;version=1.1.0;abi=3;summary=Base64 service snapshots, backups, and artifact-backed reports;capabilities=report.snapshot,report.backup,event.read,guard.list,health.stats,pgs.operation.create,pgs.operation.update,pgs.operation.finish,pgs.operation.fail,pgs.artifact.put,pgs.artifact.get_meta

@@ -83,11 +83,8 @@ namespace ProcessGuard
          * Returns true on success; false + err if not found. */
         bool unload(const std::string &name, std::string &err);
 
-        /* Optional advisory metadata parsed from PG_GetManifest. The manifest
-         * uses the same UTF-8 "key=value;..." style as module requests:
-         *   name=sched;version=1.0.0;abi=2;summary=...;capabilities=a,b,c
-         * Capabilities are groundwork for future host-enforced policy; current
-         * loading only validates name/ABI consistency when present. */
+        /* Module metadata parsed from the JSON sidecar manifest
+         * (module.manifest.json) or the in-DLL PG_GetManifest export. */
         struct ModuleManifest
         {
             std::string raw;
@@ -96,7 +93,20 @@ namespace ProcessGuard
             unsigned int abiVersion = 0;
             bool hasAbiVersion = false;
             std::string summary;
+            // Manifest v2 module class: "command" (invoke-style plugin),
+            // "provider" (core hook provider, e.g. a launcher), or
+            // "companion" (out-of-process distribution component).
+            std::string moduleClass;
+            std::string risk;
             std::vector<std::string> capabilities;
+            // Method entries from the manifest; the host enforces that
+            // JSON-RPC invokes name a declared method (P2-12).
+            struct MethodSpec
+            {
+                std::string name;
+                std::string risk;
+            };
+            std::vector<MethodSpec> methods;
         };
 
         /* One parsed line from modules.allow. */

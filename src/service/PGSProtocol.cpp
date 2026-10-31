@@ -1249,6 +1249,51 @@ bool PGS::stripAuthEnvelope(const std::string &message, std::string &commandLine
     return !commandLine.empty();
 }
 
+// P2-12: host-enforced capability policy. A module that declares methods or
+// capabilities in its manifest may only be invoked inside that surface, so a
+// compromised client cannot reach undeclared module behaviour through the
+// JSON-RPC path. Modules without any declared surface (legacy plugins) stay
+// allowed and keep working; the KV "module call" surface remains validated by
+// the module itself plus the ModuleManager callback capability gate.
+std::string PGS::checkModuleMethodAllowed(const std::string &name, const std::string &method) const
+{
+    const std::string key = util::toLowerAscii(name);
+    for (const auto &info : m_modules.list())
+    {
+        if (util::toLowerAscii(info.name) != key)
+        {
+            continue;
+        }
+        const auto &manifest = info.manifest;
+        if (!manifest.methods.empty())
+        {
+            for (const auto &spec : manifest.methods)
+            {
+                if (spec.name == method)
+                {
+                    return {};
+                }
+            }
+            return "ERR module method not declared in manifest: " + method;
+        }
+        if (!manifest.capabilities.empty())
+        {
+            const auto dot = method.find('.');
+            const std::string ns = (dot == std::string::npos) ? method : method.substr(0, dot);
+            for (const auto &cap : manifest.capabilities)
+            {
+                if (cap == method || cap == ns)
+                {
+                    return {};
+                }
+            }
+            return "ERR module capability not declared in manifest: " + method;
+        }
+        return {};
+    }
+    return "ERR module not found: " + name;
+}
+
 std::string PGS::handleModulePermissiveCommand(const std::string &rest)
 {
     const std::vector<std::string> parts = splitByChar(trim(rest), ' ');
@@ -1448,6 +1493,13 @@ std::string PGS::handleModuleCommand(const std::string &args)
         {
             return "ERR module method must be namespaced, e.g. profile.apply";
         }
+        const std::string capabilityErr = checkModuleMethodAllowed(name, method);
+        if (!capabilityErr.empty())
+        {
+            recordEvent("module.invoke-denied", "name=" + name + ";method=" + method +
+                                                ";reason_b64=" + base64Encode(capabilityErr));
+            return capabilityErr;
+        }
         const std::string requestJson = jsonRpcRequest(name, method, paramsB64);
         std::string response;
         std::string err;
@@ -1478,6 +1530,13 @@ std::string PGS::handleModuleCommand(const std::string &args)
         if (method.find('.') == std::string::npos)
         {
             return jsonRpcError(id, "INVALID_METHOD", "module method must be namespaced");
+        }
+        const std::string capabilityErr = checkModuleMethodAllowed(name, method);
+        if (!capabilityErr.empty())
+        {
+            recordEvent("module.invoke-json-denied", "name=" + name + ";method=" + method +
+                                                     ";reason_b64=" + base64Encode(capabilityErr));
+            return jsonRpcError(id, "METHOD_NOT_DECLARED", capabilityErr.substr(4));
         }
         std::string response;
         std::string err;
