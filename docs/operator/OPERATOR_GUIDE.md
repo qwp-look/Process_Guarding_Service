@@ -19,7 +19,7 @@ pgs_service.exe stop
 pgs_service.exe uninstall
 ```
 
-`install` 会把需要 SCM 后续启动继续生效的运行参数写入服务配置，例如端口、PPL opt-in、模块 permissive 模式。token 不写入 SCM 命令行。
+`install` 会把需要 SCM 后续启动继续生效的运行参数写入服务配置，例如端口、launcher provider opt-in、模块 permissive 模式。token 不写入 SCM 命令行。
 
 ## token 管理
 
@@ -56,7 +56,7 @@ pgs_service.exe install --port 23456
 pgs_bless.exe --port 23456 ping --token your-token
 ```
 
-## 模块与 PPL
+## 模块与 launcher provider
 
 普通模块默认不会在服务启动时全部扫描加载，推荐按需显式加载：
 
@@ -64,17 +64,16 @@ pgs_bless.exe --port 23456 ping --token your-token
 pgs_bless.exe module load --path "C:\Program Files\Process_Guarding_Service\modules\sched\pgs_sched_module.dll" --token your-token
 ```
 
-PPL 模块默认关闭。只有明确需要时才使用：
+provider 类模块（如 WindowsApps 的 `winapp` launcher）默认关闭。只有明确需要时才使用：
 
 ```bat
-set PGS_ENABLE_PPL=1
-pgs_service.exe run --enable-ppl
+pgs_service.exe run --enable-launchers
 ```
 
 安装成服务并长期启用时，把 opt-in 参数写进 SCM 配置：
 
 ```bat
-pgs_service.exe install --enable-ppl
+pgs_service.exe install --enable-launchers
 ```
 
 服务模式下建议传绝对 DLL 路径；相对路径只适合从 release 目录直接运行 `pgs_service.exe run` 的调试场景。`--allow-all-modules` 只用于开发和应急调试，生产环境不要开启。模块开发和 allowlist 细节见 [模块系统](../developer/MODULE_SYSTEM.md)。

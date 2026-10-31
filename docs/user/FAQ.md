@@ -20,13 +20,13 @@ C:\ProgramData\ProcessGuard\state\pgs_initial_token.txt
 
 PGS 需要作为 Windows 服务运行，并跨会话重启用户程序。管理员权限和默认 LocalSystem 身份能让它更稳定地完成这些动作。
 
-## PPL 要不要开？
+## launcher provider 要不要开？
 
-默认不要开。PPL 模块会涉及内核驱动，只有明确需要并理解风险时才启用。普通守护进程不需要 PPL。
+默认不要开。provider 类模块（如守护 WindowsApps 应用所需的 `winapp` launcher）只在明确需要时启用：`pgs_service install/run --enable-launchers`。普通守护进程不需要开启。
 
 ## WindowsApps 怎么守护？
 
-Store/UWP 应用需要 AUMID。可以先启动应用后用 `--pid --winapp --aumid` 注册，也可以用 `bless-start --winapp --aumid <id>` 直接激活并注册。给出 WindowsApps exe 路径时，CLI 会尽量从 `AppxManifest.xml` 推导 AUMID；真实 Store/UWP 环境建议跑 `tools/verify_winapp.ps1` 验证。
+Store/UWP 应用需要 AUMID。可以先启动应用后用 `--pid --winapp --aumid` 注册，也可以用 `bless-start --winapp --aumid <id>` 直接激活并注册。给出 WindowsApps exe 路径时，CLI 会尽量从 `AppxManifest.xml` 推导 AUMID。AUMID 激活机制位于 `winapp` launcher provider 模块（默认不启用），守护 WindowsApps 应用时需要 `--enable-launchers`。真实 Store/UWP 环境建议跑 `tools/verify_winapp.ps1` 验证。
 
 ## Web 可以直接开到公网吗？
 

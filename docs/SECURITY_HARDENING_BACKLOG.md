@@ -143,14 +143,14 @@
 - 验证方式：重启后事件仍可查询；篡改 audit chain 可检测；日志轮转不丢最近事件。
 - 是否阻塞功能版 release：否。
 
-## P2-12 capability policy 尚未端到端强制
+## P2-12 capability policy 端到端强制（核心已落地，RBAC 集成仍开放）
 
 - 影响组件：模块 manifest/capabilities、ModuleManager、Web RBAC
-- 当前行为：manifest capabilities 已用于模块回调 PGS 核心命令时的能力检查；但外部管理员直接 `module call` / `module invoke`、Web RBAC 与模块 method/capability 之间还没有完整统一的最小权限策略。
-- 风险/攻击面：受信任模块一旦加载，管理员入口可以调用其公开方法；远程 Web 若授权过粗，会把模块能力整体暴露给有登录权限的用户。
-- 建议修复：定义统一 capability allow policy；模块 load 时校验 manifest capability；`module call`/`module invoke` 前按调用来源、角色、method risk 和 capability 检查。
-- 涉及入口：`include/Process_Guard/PGModule.h`、`src/modules/ModuleManager.cpp`、Web RBAC。
-- 验证方式：未授权 capability 的模块加载或调用失败；授权后成功；remote viewer/operator/admin 角色对模块 method 的权限不同且可测试。
+- 当前行为（2026-10-31 更新）：manifest v2 落地后，`module invoke` / `module invoke-json` 分发前会校验 method 是否在模块 manifest 的 `methods` 声明内（无 methods 时退化为 capability 前缀匹配，均未声明则放行遗留插件），拒绝路径记录 `module.invoke-denied` / `module.invoke-json-denied` 审计事件；模块回调 PGS 核心命令继续受 ModuleManager 的 `commandAllowedForCapabilities` 能力检查。剩余缺口：KV `module call` 的 op 参数仍由模块自身校验，Web RBAC 角色（viewer/operator/admin）与模块 method/capability 之间尚未统一最小权限策略。
+- 风险/攻击面：远程 Web 若授权过粗，会把模块能力整体暴露给有登录权限的用户；未声明 manifest surface 的遗留模块不受分发面校验。
+- 建议修复：为 KV 面补 op→capability 声明校验；把 Web RBAC 角色接入同一 capability policy。
+- 涉及入口：`src/service/PGSProtocol.cpp`（`checkModuleMethodAllowed`）、`src/modules/ModuleManager.cpp`、Web RBAC。
+- 验证方式：调用未声明 method 返回 `ERR module method not declared in manifest` 并产生审计事件；声明后成功。
 - 是否阻塞功能版 release：否。
 
 ## P2-12a Cluster 节点凭据编辑与审计

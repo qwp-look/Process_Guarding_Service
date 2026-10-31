@@ -11,14 +11,14 @@ Completed in the current repository state:
 - WindowsApps activation: `bless-start --winapp --aumid` can activate and register apps, and CLI can best-effort derive AUMID from `AppxManifest.xml` when given a WindowsApps exe path.
 - Notify module: Windows-native Event Log delivery plus opt-in local popup, no chat/webhook/mail integration.
 - Profile/scheduler runtime DB migration: state DBs now live under the service data directory with copy-only compatibility from the old module directory.
-- PPL decoupling: PPL is treated as a critical-risk module gated by explicit kernel/risk flags, while legacy `ppl set/get/clear` remains a CLI compatibility layer.
+- PPL module removed (2026-10-31): the kernel-driver path was cut; provider-class modules (e.g. winapp launcher) are gated by --enable-launchers.
 - Module trust foundation: `module.manifest.json`, `modules.lock`, staging install, rollback, reload/disable/verify commands, capability/risk checks, and protected loader ownership in core.
 - Module manager extension foundation: separate `module_managers/` directory, manager manifest/schema, and ABI declarations; managers can advise but cannot bypass the core loader.
 - Doctor and UI scope: CLI/Web/Qt doctor surface, v3 guard fields, module page risk/trust details, and existing visual style preserved.
 - Guard protocol upgrades: service-side `start-register`, health-check config, restart-hook config storage with execution disabled, guard groups, paused state, and runtime profile fields.
 - Build and release foundation: top-level CMake, build script updates, package script rebuild behavior, bundled `modules.lock`, release smoke coverage, and release docs/schema packaging.
 - Metrics/backup/eventlog modules: bundled first pass is implemented, covered by build/smoke, and exposed through CLI plus Web/Qt convenience surfaces.
-- Remaining candidate modules implemented as bundled first pass: `dump`, `service_guard`, `file_watch`, `policy`, `remote_agent`, `update`, and `script_runner` now build into `modules.lock`, ship in release packaging, and have high-level CLI wrappers plus smoke status/function checks.
+- Remaining candidate modules implemented as bundled first pass: `dump`, `service_guard`, `file_watch`, and `policy` now build into `modules.lock`, ship in release packaging, and have high-level CLI wrappers plus smoke status/function checks. (`remote_agent`, `update`, and `script_runner` were removed on 2026-10-31.)
 - Release metadata first pass: `tools/write_release_manifest.ps1` generates `release-manifest.json`, `SHA256SUMS.txt`, and first-party `sbom.spdx.json`; `build_installer.bat` writes them beside installer/zip; publish workflow uploads them and requests GitHub artifact attestation.
 - GitHub Actions `build` and `publish-release` workflows are temporarily manual-only (`workflow_dispatch`) while backlog items are pushed in small batches.
 
@@ -27,8 +27,8 @@ Known intentionally incomplete areas:
 - `restart-hook` only stores structured config and returns `execution=disabled`; no script or module action execution is enabled.
 - Code signing is still not configured. Release manifest/SBOM/checksum generation is implemented locally and wired into publish workflow, but a live GitHub Release run must still confirm repository attestation permissions and final asset upload behavior.
 - Automatic GitHub CI/CD triggers are temporarily disabled; push/tag validation depends on local MSYS2/MinGW64 verification until workflows are re-enabled.
-- New higher-risk bundled modules are intentionally conservative: `dump collect`, service start/stop/ensure, and `script_runner run` require `--confirm`; `script_runner` is disabled by default, accepts only scripts whose final path resolves under the service data scripts directory, pins SHA-256 at registration, re-hashes before run, and emits audit events; `update` only verifies local manifests and does not download or install anything.
-- VM-level E2E checks for LocalSystem, low-privilege service accounts, real PPL/test-signing, remote TLS, and clean installers still need dedicated environment runs.
+- New higher-risk bundled modules are intentionally conservative: `dump collect` and service start/stop/ensure require `--confirm`; provider-class modules (e.g. `winapp`) are default-off and need `--enable-launchers`.
+- VM-level E2E checks for LocalSystem, low-privilege service accounts, launcher provider opt-in, remote TLS, and clean installers still need dedicated environment runs.
 - Local Web loopback mode now uses an HttpOnly `pgs_local_session` cookie plus `X-PGS-CSRF`; the page no longer embeds a Web API bearer. This still needs live VM/browser validation before a security release.
 - `ModuleManager` / protocol JSON parsing still uses lightweight string extraction in several security-relevant paths. It is acceptable for bundled fixtures but should be replaced or explicitly constrained before opening community modules.
 - Release versioning is now sourced from root `VERSION` for local packaging and the publish workflow; README/download snippets still need review whenever the public version string changes.
@@ -315,7 +315,6 @@ Matrix:
 - LocalSystem service install/start/stop.
 - Administrator console service run.
 - Low-privilege account access denial and token behavior.
-- PPL/test-signing enabled host with Sirius driver path.
 - Remote Web with TLS and token checks.
 - Cluster dashboard basic flow.
 - Clean machine using release package only, no MSYS2 in PATH.
@@ -323,8 +322,6 @@ Matrix:
 Tests:
 
 - service install preserves intended persistent args.
-- PPL module remains blocked without kernel/risk flags.
-- trusted bundled modules load from `modules.lock`.
 - tampered module hash is rejected.
 - staging install cannot be loaded before confirmation.
 - local Web Host/Origin/CSP/no-store behavior remains enforced.
@@ -333,9 +330,7 @@ Tests:
 Acceptance criteria:
 
 - `tools/vm_acceptance.ps1` passes on a clean VM.
-- Any required manual PPL/test-signing step is documented with exact commands and expected output.
 
-## Workstream E: Reliability Layer
 
 Goal: move PGS from a basic restart tool toward an operator-grade guard that can explain failures, suppress destructive loops, and detect false-alive targets.
 
@@ -344,7 +339,7 @@ Scope:
 - Done 2026-07-18: Quarantine / needs-attention state for restart failures instead of immediate guard retirement.
 - Done 2026-07-18: Durable failure fields `QUARANTINED`, `LAST_FAILURE_B64`, `NEXT_RETRY_MS`, `FAILURE_COUNT`; bounded failure history remains future work.
 - Done 2026-07-18: Health Check execution for `process`, `tcp`, and `http` probes, using a dedicated health worker thread that cannot block monitor or client workers.
-- Done 2026-07-18: Windows-native notify surface for `guard.restart`, `guard.restart-failed`, `guard.quarantine`, `auth.token-set`, `module.load-failed`, PPL-related events, and other core events. Per operator decision, no chat software, webhook, mail, or remote messenger integration; default is Windows Event Log, optional local popup is opt-in.
+- Done 2026-07-18: Windows-native notify surface for `guard.restart`, `guard.restart-failed`, `guard.quarantine`, `auth.token-set`, `module.load-failed`, and other core events. Per operator decision, no chat software, webhook, mail, or remote messenger integration; default is Windows Event Log, optional local popup is opt-in.
 - Done 2026-07-19: Web console can retry/clear quarantined guards and set/get/clear health checks; guard table shows quarantine/failure/health fields. Full guard detail timeline remains future work.
 - Done 2026-07-20: Qt guard table now shows guard id, quarantine/failure-code/health fields, highlights quarantined rows, and can retry or clear quarantine for the selected guard.
 - Done 2026-07-20: Qt guard table now includes a Health policy editor for `process`, `tcp`, and `http` probes, with set/get/clear actions wired through the existing `pgs_bless health-check` command path.
@@ -383,7 +378,7 @@ Diagnostics should cover:
 - service install/running status and SCM recovery configuration.
 - PGS token state, bootstrap token file location, and state directory ACL.
 - listen port occupancy and PGS protocol reachability.
-- modules root ACL, recursive modules trust-boundary ACL (`modules_acl_recursive`), `modules.lock` hash coverage, PPL gate state, and permissive mode.
+- modules root ACL, recursive modules trust-boundary ACL (`modules_acl_recursive`), `modules.lock` hash coverage, launcher provider opt-in state, and permissive mode.
 - Done 2026-08-01 (acceptance fix): true recursive path enumeration; startup audit-only fail-closed (no auto-repair); explicit `repair-modules-acl` sets owner+DACL; nested-path unit tests; smoke runs explicit repair before `--enable-modules`; `test_modules_acl.ps1` hard-fails on successful load under insecure ACL.
 - Qt/OpenSSL/MinGW runtime closure for release trees.
 - ProgramData state/module data directories and runtime DB migration status.
@@ -424,7 +419,7 @@ Implemented bundled first pass:
 7. `policy`: named guard-policy templates with optional apply through the service callback surface.
 8. `remote_agent`: local node heartbeat/guard metadata surface for future cluster integration. It opens no listener and provides no chat/webhook integration.
 9. `update`: local `release-manifest.json` verifier. It reads manifest `release_root`, verifies only the release tree `files` array, ignores artifact absolute paths for tree verification, and performs no network download or install.
-10. `script_runner`: disabled-by-default restricted local runner. Operators must enable it, register scripts whose final path resolves under `modules\script_runner\scripts` in the service data directory, keep the registered SHA-256 unchanged, and pass `confirm=1` to run. Config/add/run denial/attempt/result emits local audit events.
+10. `winapp` (provider): default-off launcher provider. Operators must opt in via `--enable-launchers` (or load it explicitly) before WindowsApps guards can restart; a missing provider quarantines the guard with `winapp.launcher_unavailable`.
 
 Every bundled module now ships with manifest files, `modules.lock` capability/risk metadata, build script integration, release packaging, and smoke coverage. A first batch of high-risk negative tests now covers confirmation gates, service_guard protected-service/allowlist boundaries and mutation denial audit, script-runner path/default-disable/final-path/hash-tamper boundaries and run denial audit, file-watch unreadable and system-path denial paths, update tampering, artifact sensitivity, and download audit. Remaining work is production hardening: structured UI for the new modules, broader doctor visibility, stronger capability enforcement, signing/hash fail-closed policy, and deeper environment-specific negative tests.
 

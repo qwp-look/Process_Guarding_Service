@@ -111,7 +111,7 @@ $env:PATH="$env:MINGW_BIN;$env:PATH"
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\release_smoke.ps1 -Release release -Fresh
 ```
 
-验证便携 release 的核心 happy path，包含模块加载、PPL gate 和 guard 生命周期。
+验证便携 release 的核心 happy path，包含模块加载和 guard 生命周期。bootstrap token 段需要提权 shell（token 文件 DACL 为 SYSTEM+Administrators），非提权环境会优雅跳过。
 
 ## 压力与长稳
 

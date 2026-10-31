@@ -10,7 +10,7 @@
 - [守护功能](user/FEATURE_GUARD.md)：进程守护、重启策略、WindowsApps/AUMID 用法。
 - [界面与远程查看](user/FEATURE_UI.md)：Qt、Web、Cluster 的定位。
 - [Scheduler 功能](user/FEATURE_SCHEDULER.md)：普通用户如何理解和使用定时任务。
-- [常见问题](user/FAQ.md)：token、权限、服务、PPL、WindowsApps 常见疑问。
+- [常见问题](user/FAQ.md)：token、权限、服务、launcher provider、WindowsApps 常见疑问。
 
 ## 高级用户 / 维护者
 

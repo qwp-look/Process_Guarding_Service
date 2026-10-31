@@ -63,7 +63,7 @@ Web remote 必须 TLS + users file + audit log。Cluster 非回环监听必须 T
 
 ## 模块边界
 
-模块是 Windows DLL，导出 C ABI。PGS 通过 `LoadLibrary` 和 `PG_Invoke` 调用。模块默认按需加载；PPL 和全量扫描需要 opt-in。
+模块是 Windows DLL，导出 C ABI，随目录携带 manifest v2（`module.manifest.json`，`class` 区分 command/provider/companion）。PGS 通过 `LoadLibrary` 和 `PG_Invoke` 调用。命令模块按需加载；provider 类模块（如 winapp launcher）需要 `--enable-launchers` opt-in。JSON-RPC 调用面按 manifest capability/methods 强制校验。
 
 模块目录受 allowlist 和路径限制保护。完整模块开发细节见 [模块系统](MODULE_SYSTEM.md)。
 

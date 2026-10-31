@@ -10,7 +10,7 @@ Process_Guarding_Service (PGS) 是一个 Windows 进程守护工具，用来把�
 - Windows 服务重启后恢复守护目标和 token。
 - 通过 Qt 图形界面、命令行或 Web 页面查看和管理守护对象。
 - 为高级场景提供重启窗口、延迟、退避、假活检测、进程族清理等策略。
-- 通过模块扩展 Scheduler、Health、Profile、Report、PPL 等能力。
+- 通过模块扩展 Scheduler、Health、Policy（含 Profiles）、Report、Metrics 等能力。
 - 为远程管理和集群查看提供 Web gateway / cluster dashboard。
 
 ## 普通用户怎么开始
@@ -49,8 +49,8 @@ pgs_admin_qt.exe
 
 ## 当前边界
 
-- WindowsApps / Store 应用支持显式 `--aumid`，也支持在给出 WindowsApps exe 路径时从 `AppxManifest.xml` 推导 AUMID；`bless-start --winapp --aumid ...` 可通过 Windows AUMID activation 启动并注册，真实 Store/UWP 环境仍需按 [WindowsApps 验证脚本](tools/verify_winapp.ps1) 做 E2E 验证。
-- PPL 模块默认不启用；只有显式 opt-in 才会加载相关模块和驱动。
+- WindowsApps / Store 应用支持显式 `--aumid`，也支持在给出 WindowsApps exe 路径时从 `AppxManifest.xml` 推导 AUMID；AUMID 启动机制位于 `winapp` launcher provider 模块（provider 类，默认不启用），需以 `pgs_service install --enable-launchers` 显式开启，或按需 `module load`。真实 Store/UWP 环境仍需按 [WindowsApps 验证脚本](tools/verify_winapp.ps1) 做 E2E 验证。
+- Web 管理端与 Cluster 面板是 companion 发行组件（`companions/`，独立进程），不进入服务进程。
 - 完整安全收口仍是后续专项，详见 [安全收口交接](docs/SECURITY_HARDENING_BACKLOG.md)。
 - 未完成或未验证的功能集中记录在 [未完成功能交接](docs/UNFINISHED_FEATURES_BACKLOG.md)。
 

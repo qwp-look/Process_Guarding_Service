@@ -8,7 +8,7 @@
 
 2026-07-19 功能收口记录：
 
-- WindowsApps：CLI 已支持从 WindowsApps exe 路径读取 `AppxManifest.xml` 推导 AUMID，并支持 `bless-start --winapp --aumid` 通过 AUMID activation 激活并注册返回 PID；剩余是 `tools/verify_winapp.ps1` 的真实 Store/UWP E2E。
+- WindowsApps：CLI 已支持从 WindowsApps exe 路径读取 `AppxManifest.xml` 推导 AUMID，并支持 `bless-start --winapp --aumid` 激活注册；AUMID 激活机制已抽取到 `winapp` launcher provider 模块（2026-10-31，provider 类默认 opt-in，需 `--enable-launchers`）。剩余是 `tools/verify_winapp.ps1` 的真实 Store/UWP E2E。
 - Operation/Artifact：服务端已实现 `pgs.operation.*` 和 `pgs.artifact.*`，report 模块可输出 artifact，CLI `module artifact get --out` 下载后会校验 size 和 SHA-256，smoke 已覆盖。
 - Web：已补 guard retry/clear-quarantine、health-check set/get/clear、notify status/config、report artifact、operation status、artifact meta/download/status/policy 控件和 API。
 - Qt：模块页已补 scheduler add/list/enable/disable/remove、notify status/config、report snapshot/backup、operation status、artifact meta/download/status/policy 便捷控件。
@@ -58,7 +58,7 @@
 ## P0-01 WindowsApps 自动 AUMID 推导真实环境验证
 
 - 预期行为：用户给出 `C:\Program Files\WindowsApps\...\App.exe` 时，CLI/服务可解析 `AppxManifest.xml`，推导 PackageFamilyName 和 AUMID。
-- 当前状态：代码已实现。`PGUtil.h` 有 manifest/PFN/AUMID helper，`pgs_bless` 在 `--winapp` 且未传 `--aumid` 时会尝试从路径推导；显式 AUMID 与 manifest 推导不一致时拒绝。
+- 当前状态：代码已实现。`PGUtil.h` 有 manifest/PFN/AUMID helper，`pgs_bless` 在 `--winapp` 且未传 `--aumid` 时会尝试从路径推导；显式 AUMID 与 manifest 推导不一致时拒绝。激活机制位于 `winapp` launcher provider 模块（2026-10-31）。
 - 未完成原因：真实 WindowsApps/Store 环境、不同 publisher hash 兼容性、错误 manifest/错误路径负例仍需在管理员/交互会话里验证。
 - 下一步方案：运行 `tools/verify_winapp.ps1`；增加错误 AUMID、manifest 不可读、package/path 不匹配的专项负例。
 - 测试方式：manifest fixture unit；`tools/verify_winapp.ps1` 真实环境；错误 manifest/错误路径负例。
@@ -68,7 +68,7 @@
 ## P0-02 `bless-start --winapp` AUMID 激活真实环境验证
 
 - 预期行为：用户可直接 `bless-start --winapp --aumid ...` 激活 Store/UWP app 并注册返回的 PID。
-- 当前状态：代码已实现。`pgs_bless bless-start --winapp --aumid <id>` 会调用 Windows AUMID activation，查询激活 PID/path，并确认激活出的进程 AUMID 与请求匹配后注册。Web `bless-start` 入口也允许 AUMID-only WinApp。
+- 当前状态：代码已实现。`pgs_bless bless-start --winapp --aumid <id>` 经 `winapp` launcher provider 模块激活，查询激活 PID/path，并确认激活出的进程 AUMID 与请求匹配后注册。Web `bless-start` 入口也允许 AUMID-only WinApp。
 - 未完成原因：需要真实 Store/UWP 应用验证交互 session、错误 AUMID、ShellExecute fallback、无法查询路径等外部环境行为。
 - 下一步方案：运行 `tools/verify_winapp.ps1 -RunWinApp` 或 VM acceptance 的 `-RunWinApp` 路径，保存日志到 release notes。
 - 测试方式：真实 WindowsApps 环境；无交互 session、错误 AUMID、fallback ShellExecute 负例。
@@ -77,7 +77,7 @@
 
 ## P0-03 完整管理员 VM E2E 尚未在本轮运行
 
-- 预期行为：在干净管理员 VM 中跑完 portable、SCM install/start/stop、installer、Web、Cluster、PPL opt-in、WindowsApps helper。
+- 预期行为：在干净管理员 VM 中跑完 portable、SCM install/start/stop、installer、Web、Cluster、launcher provider opt-in、WindowsApps helper。
 - 当前状态：`tools/vm_acceptance.ps1` 已扩展，支持 `-EnablePpl` 和 `-RunWinApp`，但本轮未在真实干净 VM 里执行。
 - 未完成原因：需要管理员 VM、安装器、真实服务权限和可能的 WindowsApps 环境。
 - 下一步方案：发布前在 VM 中执行 `powershell -File tools\vm_acceptance.ps1 -EnablePpl -RunWinApp`，保存日志到 release notes。

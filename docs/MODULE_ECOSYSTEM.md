@@ -127,8 +127,7 @@ PGS itself should only download to `modules_staging/` and never load a community
 - `pgs_bless file-watch status|add|list|check|remove --path <file> [--id <id>] [--action event|none]`
 - `pgs_bless policy-template status|set|list|remove|apply --name <template> [--pid <pid>]`
 - `pgs_bless remote-agent status|heartbeat|guards`
-- `pgs_bless update status|verify --path <release-manifest.json>`
-- `pgs_bless script-runner status|config|add|list|run [--id <id>] [--path <script>] [--start-args "..."] [--enable|--disable] [--confirm]`
+- - `pgs_bless script-runner status|config|add|list|run [--id <id>] [--path <script>] [--start-args "..."] [--enable|--disable] [--confirm]`
 - `pgs_bless ppl set|get|clear` as compatibility sugar through module invocation
 
 `module call` and `module.manifest` remain supported for ABI v2 modules.
@@ -149,7 +148,7 @@ Modules that call back into these commands through `PGS_ServicesV3.call_json` ne
 
 ## Bundled Module Set
 
-The release build currently writes 16 bundled modules into `modules.lock`: `sched`, `health`, `profile`, `report`, `notify`, `metrics`, `backup`, `eventlog`, `dump`, `service_guard`, `file_watch`, `policy`, `remote_agent`, `update`, `script_runner`, and `ppl`. The newer operational modules are deliberately narrow first passes: no chat/webhook/mail integrations, no update downloader/installer, no remote listener in `remote_agent`, and script execution is disabled until explicitly enabled and confirmed. `script_runner` additionally requires scripts to resolve under the service data scripts directory by final path, pins SHA-256 at registration, re-hashes before run, and emits config/add/run audit events. `service_guard` is bounded by confirm-required mutations, default-deny protected services, an optional persisted allowlist, and mutation/policy audit events. `file_watch` is similarly bounded: at most 64 rules, local absolute drive paths only, and default denies for UNC/device/ADS/Windows system paths.
+The release build writes 12 bundled modules into `modules.lock` (manifest v2, derived from each module's `module.manifest.json` + DLL hash): `sched`, `health`, `report`, `notify`, `metrics`, `backup`, `eventlog`, `dump`, `service_guard`, `file_watch`, `policy`, and the `winapp` provider. The former `profile` module merged into `policy` (v1.1.0); `ppl`, `script_runner`, `remote_agent`, and `update` were removed on 2026-10-31. `service_guard` is bounded by confirm-required mutations, default-deny protected services, an optional persisted allowlist, and mutation/policy audit events. `file_watch` is similarly bounded: at most 64 rules, local absolute drive paths only, and default denies for UNC/device/ADS/Windows system paths.
 
 ## Module Registry
 
