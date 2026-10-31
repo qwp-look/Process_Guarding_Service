@@ -26,6 +26,7 @@ copy_mingw_runtime() {
   cp -f "$MINGW_ROOT/bin/libstdc++-6.dll" "$dst/" 2>/dev/null || true
   cp -f "$MINGW_ROOT/bin/libgcc_s_seh-1.dll" "$dst/" 2>/dev/null || true
   cp -f "$MINGW_ROOT/bin/libwinpthread-1.dll" "$dst/" 2>/dev/null || true
+  cp -f "$MINGW_ROOT/bin/libsqlite3-0.dll" "$dst/" 2>/dev/null || true
 }
 
 copy_module_assets() {
@@ -69,6 +70,7 @@ echo "[2/$TOTAL_STEPS] Compiling PGS core..."
 "$GXX" $CXXFLAGS -c src/service/PGSMonitor.cpp -o "$BUILD_DIR/PGSMonitor.o"
 "$GXX" $CXXFLAGS -c src/service/PGSHealth.cpp -o "$BUILD_DIR/PGSHealth.o"
 "$GXX" $CXXFLAGS -c src/service/PGSGuardStore.cpp -o "$BUILD_DIR/PGSGuardStore.o"
+"$GXX" $CXXFLAGS -c src/service/PGSSqliteStore.cpp -o "$BUILD_DIR/PGSSqliteStore.o"
 
 # Module system: ModuleManager is linked into pgs_service.exe.
 echo "[3/$TOTAL_STEPS] Compiling module manager..."
@@ -84,9 +86,9 @@ echo "[5/$TOTAL_STEPS] Compiling service host..."
 
 echo "[6/$TOTAL_STEPS] Linking pgs_service.exe..."
 "$GXX" -std=c++17 -Wall -Wextra -O2 \
-  "$BUILD_DIR/PGLogger.o" "$BUILD_DIR/PGS.o" "$BUILD_DIR/PGSServer.o" "$BUILD_DIR/PGSMonitor.o" "$BUILD_DIR/PGSHealth.o" "$BUILD_DIR/PGSGuardStore.o" "$BUILD_DIR/PGSProtocol.o" "$BUILD_DIR/PGSOperationStore.o" "$BUILD_DIR/PGSModuleInstall.o" "$BUILD_DIR/ModuleManager.o" "$BUILD_DIR/pgs_service.o" \
+  "$BUILD_DIR/PGLogger.o" "$BUILD_DIR/PGS.o" "$BUILD_DIR/PGSServer.o" "$BUILD_DIR/PGSMonitor.o" "$BUILD_DIR/PGSHealth.o" "$BUILD_DIR/PGSGuardStore.o" "$BUILD_DIR/PGSSqliteStore.o" "$BUILD_DIR/PGSProtocol.o" "$BUILD_DIR/PGSOperationStore.o" "$BUILD_DIR/PGSModuleInstall.o" "$BUILD_DIR/ModuleManager.o" "$BUILD_DIR/pgs_service.o" \
   -o "$BUILD_DIR/pgs_service.exe" \
-  -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
+  -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32 -lsqlite3
 
 echo "[7/$TOTAL_STEPS] Building guard_example.exe..."
 "$GXX" $CXXFLAGS examples/guard_example.cpp -o "$BUILD_DIR/guard_example.exe" -lws2_32 -ladvapi32 -lbcrypt

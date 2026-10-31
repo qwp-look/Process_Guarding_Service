@@ -163,7 +163,7 @@ echo [5/6] Copy MinGW third-party runtime DLLs (Qt6Core/Gui/TLS transitive deps)
 REM windeployqt does not deploy these MSYS2 libs. This verified closure is what
 REM makes pgs_admin_qt.exe run on a machine without mingw64/bin in PATH. The
 REM ICU version (78) tracks the MSYS2 Qt6 build; bump if Qt is upgraded.
-set "QT_MINGW_DEPS=libb2-1.dll libbrotlicommon.dll libbrotlidec.dll libbz2-1.dll libcrypto-3-x64.dll libdouble-conversion.dll libfreetype-6.dll libgcc_s_seh-1.dll libglib-2.0-0.dll libgraphite2.dll libharfbuzz-0.dll libiconv-2.dll libicudt78.dll libicuin78.dll libicuuc78.dll libintl-8.dll libmd4c.dll libpcre2-16-0.dll libpcre2-8-0.dll libpng16-16.dll libssl-3-x64.dll libstdc++-6.dll libwinpthread-1.dll libzstd.dll zlib1.dll"
+set "QT_MINGW_DEPS=libb2-1.dll libbrotlicommon.dll libbrotlidec.dll libbz2-1.dll libcrypto-3-x64.dll libdouble-conversion.dll libfreetype-6.dll libgcc_s_seh-1.dll libglib-2.0-0.dll libgraphite2.dll libharfbuzz-0.dll libiconv-2.dll libicudt78.dll libicuin78.dll libicuuc78.dll libintl-8.dll libmd4c.dll libpcre2-16-0.dll libpcre2-8-0.dll libpng16-16.dll libssl-3-x64.dll libsqlite3-0.dll libstdc++-6.dll libwinpthread-1.dll libzstd.dll zlib1.dll"
 for %%D in (%QT_MINGW_DEPS%) do copy /Y "%MINGW%\%%D" "%RELEASE%\%%D" >nul 2>&1
 if not exist "%RELEASE%\tls" mkdir "%RELEASE%\tls" >nul 2>&1
 copy /Y "%MINGW_ROOT%\share\qt6\plugins\tls\qopensslbackend.dll" "%RELEASE%\tls\" >nul 2>&1

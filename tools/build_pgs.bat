@@ -66,6 +66,12 @@ if errorlevel 1 (
     popd
     exit /b 1
 )
+"%COMPILER%" %CXXFLAGS% -c src\service\PGSSqliteStore.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGSSqliteStore.o
+if errorlevel 1 (
+    echo Failed: src\service\PGSSqliteStore.cpp
+    popd
+    exit /b 1
+)
 
 REM Module system: ModuleManager is linked into pgs_service.exe.
 echo [3/21] Compiling module manager...
@@ -105,7 +111,7 @@ if errorlevel 1 (
 )
 
 echo [6/21] Linking pgs_service.exe...
-"%COMPILER%" -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\PGSServer.o %BUILD_DIR%\PGSMonitor.o %BUILD_DIR%\PGSHealth.o %BUILD_DIR%\PGSGuardStore.o %BUILD_DIR%\PGSProtocol.o %BUILD_DIR%\PGSModuleInstall.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
+"%COMPILER%" -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\PGSServer.o %BUILD_DIR%\PGSMonitor.o %BUILD_DIR%\PGSHealth.o %BUILD_DIR%\PGSGuardStore.o %BUILD_DIR%\PGSSqliteStore.o %BUILD_DIR%\PGSProtocol.o %BUILD_DIR%\PGSModuleInstall.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32 -lsqlite3
 if errorlevel 1 (
     echo Failed: link pgs_service.exe
     popd

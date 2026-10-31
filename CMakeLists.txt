@@ -56,11 +56,12 @@ add_library(pgs_core STATIC
     src/service/PGSMonitor.cpp
     src/service/PGSHealth.cpp
     src/service/PGSGuardStore.cpp
+    src/service/PGSSqliteStore.cpp
     src/service/PGSProtocol.cpp
     src/service/PGSOperationStore.cpp
     src/service/PGSModuleInstall.cpp)
 target_include_directories(pgs_core PUBLIC include)
-target_link_libraries(pgs_core PUBLIC pgs_logger pgs_module_manager ws2_32 winhttp advapi32 wtsapi32 userenv bcrypt wintrust ole32 shell32)
+target_link_libraries(pgs_core PUBLIC pgs_logger pgs_module_manager ws2_32 winhttp advapi32 wtsapi32 userenv bcrypt wintrust ole32 shell32 sqlite3)
 
 add_executable(pgs_service src/service/pgs_service.cpp)
 target_link_libraries(pgs_service PRIVATE pgs_core)
@@ -142,4 +143,9 @@ if(PGS_BUILD_TESTS)
     add_executable(test_sched_cron tests/test_sched_cron.cpp modules/sched/SchedCron.cpp)
     target_include_directories(test_sched_cron PRIVATE include modules/sched)
     add_test(NAME sched_cron COMMAND test_sched_cron)
+
+    add_executable(test_state_db tests/test_state_db.cpp src/service/PGSSqliteStore.cpp src/common/PGLogger.cpp)
+    target_include_directories(test_state_db PRIVATE include src/service)
+    target_link_libraries(test_state_db PRIVATE sqlite3)
+    add_test(NAME state_db COMMAND test_state_db)
 endif()

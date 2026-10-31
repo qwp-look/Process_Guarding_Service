@@ -19,3 +19,12 @@ echo "[unit:core] compiling tests/test_pgs_core.cpp ..."
 
 echo "[unit:core] running ..."
 "$BUILD_DIR/test_pgs_core.exe"
+
+echo "[unit:state-db] compiling tests/test_state_db.cpp ..."
+"$GXX" -std=c++17 -Wall -Wextra -O2 -Iinclude -Isrc/service \
+    tests/test_state_db.cpp src/service/PGSSqliteStore.cpp src/common/PGLogger.cpp \
+    -o "$BUILD_DIR/test_state_db.exe" \
+    -lsqlite3
+
+echo "[unit:state-db] running ..."
+"$BUILD_DIR/test_state_db.exe"

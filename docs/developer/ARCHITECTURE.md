@@ -24,7 +24,7 @@ PGS 把守护对象当成“逻辑 guard”，而不是单个 PID。进程重启
 - 高级策略字段。
 - 模块 permissive 状态。
 
-状态文件版本当前为 v4。旧版本加载时会补默认字段；v4 在 v3 高级策略/WindowsApps 字段基础上增加持久隔离字段。
+归档存储为 SQLite 数据库（2026-10-31 起，阶段 E）：事务化快照写入、类型化列（guards/groups/restart_policy/meta 四张表），schema 版本由 meta.state_version 标记（当前 5，与旧文本格式版本对齐）。首次加载遇到旧 tab 分隔文本归档时会自动迁移到 SQLite 并把旧文件改名 `.text-imported`；v1/v2/v3/v4 文本版本沿用历史迁移规则（v1 丢弃 FNV-1a token hash）。
 
 默认持久化文件位于：
 
@@ -32,7 +32,7 @@ PGS 把守护对象当成“逻辑 guard”，而不是单个 PID。进程重启
 C:\ProgramData\ProcessGuard\state\pgs_guard_state.db
 ```
 
-文件是 tab 分隔文本，主要记录 `VERSION`、`NEXT_GUARD_ID`、`AUTH_TOKEN_HASH`、`MODULES_PERMISSIVE`、`GUARD`、`RESTART_COUNT`、`RESTART`。路径、restart args、AUMID、health/restart-hook JSON 和 failure reason 使用 base64，便于保留空格和非 ASCII 内容。
+实现位于 `src/service/PGSSqliteStore.{h,cpp}`（快照结构与旧文本互转的 `parseLegacyStateText` 也在其中，供迁移和单测使用）；`loadPersistedState`/`persistState` 的快照编排在 `PGSGuardStore.cpp`。MinGW 构建链接 `sqlite3`，发布树附带 `libsqlite3-0.dll`。
 
 ## 监控和重启
 

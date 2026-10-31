@@ -1,4 +1,5 @@
 #include "Process_Guard/PGS.h"
+#include "PGSSqliteStore.h"
 
 #include <ws2tcpip.h>
 #include <winhttp.h>
@@ -204,369 +205,71 @@ std::string PGS::defaultStateFilePath(const std::string &logFilePath)
 
 bool PGS::loadPersistedState()
 {
-    // State-file format is intentionally line-oriented and append-safe to keep
-    // recovery independent from third-party storage libraries. Each line is a
-    // complete record so field additions can be versioned explicitly.
+    // Two storage backends behind one snapshot: new archives are SQLite
+    // (transactional, typed columns); legacy v1..v5 text archives are parsed
+    // once, migrated into SQLite, and renamed aside. A malformed archive fails
+    // closed instead of half-populating the runtime state.
     std::lock_guard<std::mutex> lock(m_guardsMutex);
     m_persistedGuards.clear();
-
-    // Parse into a local buffer first and only commit to m_persistedGuards on
-    // full success. A malformed line mid-file must not leave a half-populated
-    // archive (and a stale m_nextGuardId) behind for restorePersistedGuards().
-    std::unordered_map<std::uint64_t, PersistedGuardState> parsedGuards;
-    std::unordered_map<std::uint64_t, RestartPolicyState> parsedPolicy;
-    std::unordered_map<std::string, GuardGroupState> parsedGroups;
-    std::uint64_t groupCount = 0;
-    std::uint64_t parsedGroupLines = 0;
+    m_policyByGuardId.clear();
+    m_guardGroups.clear();
 
     if (m_stateFilePath.empty())
     {
         return true;
     }
 
-    std::ifstream in(m_stateFilePath, std::ios::in | std::ios::binary);
-    if (!in.is_open())
+    StateSnapshot snap;
+    PGSStateDb db;
+    std::string dbErr;
+    bool fromSqlite = false;
+    if (PGSStateDb::isSqliteFile(m_stateFilePath))
     {
-        m_nextGuardId = 1ull;
-        return true;
+        if (!db.open(m_stateFilePath, dbErr) || !db.loadAll(snap, dbErr))
+        {
+            Logger::error("PGS: failed to load sqlite state archive: " + dbErr);
+            m_nextGuardId = 1ull;
+            return false;
+        }
+        fromSqlite = true;
     }
-
-    int version = 0;
-    std::uint64_t nextGuardId = 1;
-    std::string persistedAuthHash;
-    std::uint16_t archivedServerPort = 0;
-    bool archivedModulesPermissive = false;
-    std::string line;
-    while (std::getline(in, line))
+    else
     {
-        const std::string trimmed = trim(line);
-        if (trimmed.empty())
+        std::ifstream in(m_stateFilePath, std::ios::in | std::ios::binary);
+        if (!in.is_open())
         {
-            continue;
+            m_nextGuardId = 1ull;
+            return true;
         }
-
-        const std::vector<std::string> fields = splitByChar(trimmed, '\t');
-        if (fields.empty())
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        if (!parseLegacyStateText(buffer.str(), snap, dbErr))
         {
-            continue;
-        }
-
-        if (fields[0] == "VERSION")
-        {
-            if (fields.size() < 2)
-            {
-                return false;
-            }
-            try
-            {
-                version = std::stoi(fields[1]);
-            }
-            catch (const std::exception &)
-            {
-                return false;
-            }
-            continue;
-        }
-
-        if (fields[0] == "NEXT_GUARD_ID")
-        {
-            if (fields.size() < 2 || !parseUnsignedLongLong(fields[1], nextGuardId))
-            {
-                return false;
-            }
-            continue;
-        }
-
-        if (fields[0] == "AUTH_TOKEN_HASH")
-        {
-            if (fields.size() < 2)
-            {
-                return false;
-            }
-            persistedAuthHash = toLowerAscii(trim(fields[1]));
-            continue;
-        }
-
-        if (fields[0] == "SERVER_PORT")
-        {
-            if (fields.size() >= 2)
-            {
-                DWORD sp = 0;
-                if (parseDwordValue(fields[1], sp) && sp > 0)
-                {
-                    archivedServerPort = static_cast<std::uint16_t>(sp);
-                }
-            }
-            continue;
-        }
-
-        if (fields[0] == "MODULES_PERMISSIVE")
-        {
-            if (fields.size() >= 2)
-            {
-                bool b = false;
-                if (parseBoolFlag(fields[1], b))
-                {
-                    archivedModulesPermissive = b;
-                }
-            }
-            continue;
-        }
-
-        if (fields[0] == "RESTART_COUNT")
-        {
-            std::uint64_t guardId = 0;
-            std::uint64_t count = 0;
-            if (fields.size() >= 3 &&
-                parseUnsignedLongLong(fields[1], guardId) &&
-                parseUnsignedLongLong(fields[2], count) &&
-                guardId != 0)
-            {
-                auto &policy = parsedPolicy[guardId];
-                policy.restartCount = static_cast<int>(std::min<std::uint64_t>(
-                    count, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
-            }
-            continue;
-        }
-
-        if (fields[0] == "RESTART")
-        {
-            std::uint64_t guardId = 0;
-            std::uint64_t epochMs = 0;
-            if (fields.size() >= 3 &&
-                parseUnsignedLongLong(fields[1], guardId) &&
-                parseUnsignedLongLong(fields[2], epochMs) &&
-                guardId != 0)
-            {
-                parsedPolicy[guardId].recentRestartMs.push_back(static_cast<std::int64_t>(epochMs));
-            }
-            continue;
-        }
-
-        if (fields[0] == "GROUP_COUNT")
-        {
-            if (fields.size() >= 2)
-            {
-                parseUnsignedLongLong(fields[1], groupCount);
-            }
-            continue;
-        }
-
-        if (fields[0] == "GROUP")
-        {
-            if (fields.size() < 3)
-            {
-                return false;
-            }
-            GuardGroupState group;
-            group.name = sanitizeGroupName(base64Decode(fields[1]));
-            if (group.name.empty())
-            {
-                return false;
-            }
-            if (!parseBoolFlag(fields[2], group.paused))
-            {
-                return false;
-            }
-            if (fields.size() > 3)
-            {
-                parseIntField(fields[3], group.startupOrder);
-            }
-            if (fields.size() > 4 && fields[4] != "-")
-            {
-                group.dependencies = splitCsvTrimmed(base64Decode(fields[4]));
-            }
-            parsedGroups[group.name] = group;
-            ++parsedGroupLines;
-            continue;
-        }
-
-        if (fields[0] == "GUARD")
-        {
-            if (fields.size() < 10)
-            {
-                return false;
-            }
-
-            PersistedGuardState persisted;
-            if (!parseUnsignedLongLong(fields[1], persisted.guardId) ||
-                !parseDwordValue(fields[2], persisted.lastKnownPid) ||
-                !parseDwordValue(fields[3], persisted.sessionId))
-            {
-                return false;
-            }
-
-            if (!parseMaxRestarts(fields[4], persisted.maxRestarts))
-            {
-                return false;
-            }
-
-            persisted.path = base64Decode(fields[5]);
-            persisted.restartArgs = base64Decode(fields[6]);
-            persisted.fileHash = (fields[7] == "-") ? std::string() : trim(fields[7]);
-            if (!parseBoolFlag(fields[8], persisted.intentional) ||
-                !parseBoolFlag(fields[9], persisted.hashVerified))
-            {
-                return false;
-            }
-
-            // v3 advanced guard-policy fields (trailing the v2 base). Older
-            // archives that stop at field[9] get the legacy defaults here.
-            {
-                DWORD dv = 0;
-                if (fields.size() > 12 && parseDwordValue(fields[12], dv))
-                {
-                    persisted.restartWindowSec = static_cast<int>(dv);
-                }
-                if (fields.size() > 13 && parseDwordValue(fields[13], dv))
-                {
-                    persisted.restartDelayMs = static_cast<int>(dv);
-                }
-                if (fields.size() > 15 && parseDwordValue(fields[15], dv))
-                {
-                    persisted.hangTimeoutMs = static_cast<int>(dv);
-                }
-            }
-            if (fields.size() > 10)
-            {
-                const std::string aks = trim(fields[10]);
-                if (aks == "1" || aks == "winapp" || aks == "uwp" || aks == "store")
-                {
-                    persisted.appKind = AppKind::WinApp;
-                }
-            }
-            if (fields.size() > 11 && fields[11] != "-")
-            {
-                persisted.aumid = base64Decode(fields[11]);
-            }
-            if (fields.size() > 14)
-            {
-                const std::string bv = trim(fields[14]);
-                persisted.backoff = (bv == "1" || bv == "true" || bv == "yes");
-            }
-            if (fields.size() > 16)
-            {
-                const std::string bv = trim(fields[16]);
-                persisted.killOnExit = (bv == "1" || bv == "true" || bv == "yes");
-            }
-            if (fields.size() > 17 && fields[17] != "-")
-            {
-                persisted.healthCheckJson = base64Decode(fields[17]);
-                if (!persisted.healthCheckJson.empty() && !looksLikeJsonObjectOrArray(persisted.healthCheckJson))
-                {
-                    persisted.healthCheckJson.clear();
-                }
-            }
-            if (fields.size() > 18 && fields[18] != "-")
-            {
-                persisted.groupName = sanitizeGroupName(base64Decode(fields[18]));
-            }
-            if (fields.size() > 19)
-            {
-                bool b = false;
-                if (parseBoolFlag(fields[19], b))
-                {
-                    persisted.paused = b;
-                }
-            }
-            if (fields.size() > 20) parseInt64Field(fields[20], persisted.createdAtMs);
-            if (fields.size() > 21) parseInt64Field(fields[21], persisted.lastStartMs);
-            if (fields.size() > 22) parseInt64Field(fields[22], persisted.lastExitMs);
-            if (fields.size() > 23) parseIntField(fields[23], persisted.lastExitCode);
-            if (fields.size() > 24) parseInt64Field(fields[24], persisted.cumulativeRunMs);
-            if (fields.size() > 25) parseInt64Field(fields[25], persisted.restartIntervalSumMs);
-            if (fields.size() > 26) parseIntField(fields[26], persisted.restartIntervalCount);
-            if (fields.size() > 27)
-            {
-                bool b = false;
-                if (parseBoolFlag(fields[27], b))
-                {
-                    persisted.crashLoop = b;
-                }
-            }
-            if (fields.size() > 28 && fields[28] != "-")
-            {
-                persisted.restartHookJson = base64Decode(fields[28]);
-                if (!persisted.restartHookJson.empty() && !looksLikeJsonObjectOrArray(persisted.restartHookJson))
-                {
-                    persisted.restartHookJson.clear();
-                }
-            }
-            if (fields.size() > 29)
-            {
-                bool b = false;
-                if (parseBoolFlag(fields[29], b))
-                {
-                    persisted.quarantined = b;
-                }
-            }
-            if (fields.size() > 30 && fields[30] != "-")
-            {
-                persisted.lastFailure = base64Decode(fields[30]);
-            }
-            if (fields.size() > 31) parseInt64Field(fields[31], persisted.nextRetryMs);
-            if (fields.size() > 32) parseIntField(fields[32], persisted.failureCount);
-            if (persisted.failureCount < 0) persisted.failureCount = 0;
-            if (fields.size() > 33 && fields[33] != "-")
-            {
-                persisted.lastFailureCode = trim(fields[33]);
-            }
-            if (persisted.createdAtMs <= 0)
-            {
-                persisted.createdAtMs = currentEpochMs();
-            }
-            if (persisted.lastStartMs <= 0 && persisted.lastKnownPid != 0)
-            {
-                persisted.lastStartMs = persisted.createdAtMs;
-            }
-
-            if (persisted.path.empty() || persisted.guardId == 0)
-            {
-                return false;
-            }
-
-            parsedGuards[persisted.guardId] = persisted;
-            if (persisted.guardId >= nextGuardId)
-            {
-                nextGuardId = persisted.guardId + 1;
-            }
-        }
-    }
-
-    if (version != kStateFileVersion)
-    {
-        // Migration: the v3 archive only ADDS trailing fields over v2, so v1 and
-        // v2 are forward-compatible. v1's FNV-1a token hash is not trusted under
-        // SHA-256 auth, so we drop only the auth hash (initialize() will mint a
-        // fresh random token) while KEEPING guard records for SCM-restart
-        // recovery. v2 already has the SHA-256 hash; its guards parsed with the
-        // advanced-policy defaults above. The next persistState() rewrites at v3.
-        if (version == 1)
-        {
-            Logger::warning("PGS: migrating state file v1 -> v3 (guard records kept, auth token reset)");
-            persistedAuthHash.clear();
-        }
-        else if (version == kLegacyStateFileVersion || version == kAdvancedStateFileVersion || version == kPreviousStateFileVersion)
-        {
-            Logger::warning("PGS: migrating state file v" + std::to_string(version) + " -> v5 (guard records kept)");
-        }
-        else
-        {
-            Logger::warning("PGS: unsupported state file version " + std::to_string(version) + ", ignoring persisted archive");
-            m_persistedGuards.clear();
+            Logger::error("PGS: failed to parse legacy state file: " + dbErr);
             m_nextGuardId = 1ull;
             return false;
         }
     }
-    if (!persistedAuthHash.empty() && !isSha256Hex(persistedAuthHash))
+
+    // Commit the snapshot into the runtime structures (copy, not move: the
+    // snapshot is reused for the one-time text -> sqlite migration below).
+    std::unordered_map<std::uint64_t, RestartPolicyState> parsedPolicy;
+    for (const auto &entry : snap.policy)
     {
-        Logger::warning("PGS: persisted auth hash is invalid, generating a fresh token");
-        persistedAuthHash.clear();
+        parsedPolicy[entry.first] = entry.second;
+    }
+    std::unordered_map<std::uint64_t, PersistedGuardState> parsedGuards;
+    std::uint64_t nextGuardId = std::max<std::uint64_t>(1ull, snap.nextGuardId);
+    for (const PersistedGuardState &g : snap.guards)
+    {
+        parsedGuards[g.guardId] = g;
+        if (g.guardId >= nextGuardId)
+        {
+            nextGuardId = g.guardId + 1;
+        }
     }
 
-    const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    m_policyByGuardId.clear();
+    const std::int64_t nowMs = currentEpochMs();
     for (const auto &entry : parsedGuards)
     {
         RestartPolicyState policy = RestartPolicyState{entry.second.maxRestarts, 0, {}};
@@ -590,44 +293,58 @@ bool PGS::loadPersistedState()
     }
 
     m_persistedGuards = std::move(parsedGuards);
-    m_guardGroups = std::move(parsedGroups);
-    m_nextGuardId = std::max<std::uint64_t>(1ull, nextGuardId);
+    for (const GuardGroupState &group : snap.groups)
+    {
+        m_guardGroups[group.name] = group;
+    }
+    m_nextGuardId = nextGuardId;
     {
         std::lock_guard<std::mutex> authLock(m_authMutex);
-        // Accept a persisted auth hash at v2/v3. An empty hash here makes
-        // initialize() generate a fresh random token.
-        m_authTokenHash = persistedAuthHash;
+        m_authTokenHash = snap.authTokenHash;
     }
-
-    // v3: restore the archived listen port only when the host has not
-    // explicitly overridden it (here: m_serverPort still at the default). The
-    // module-permissive flag gates the ModuleManager allowlist (see E).
-    if (!m_serverPortUserSet && m_serverPort == kServerPort && archivedServerPort != 0)
+    if (!m_serverPortUserSet && m_serverPort == kServerPort && snap.serverPort != 0)
     {
-        m_serverPort = archivedServerPort;
+        m_serverPort = snap.serverPort;
     }
     if (!m_modulesPermissiveUserSet.load())
     {
-        m_modulesPermissive.store(archivedModulesPermissive);
+        m_modulesPermissive.store(snap.modulesPermissive);
     }
 
     Logger::warning("PGS: loaded persisted archive entries=" + std::to_string(m_persistedGuards.size()) +
-                    ", state-file=" + m_stateFilePath);
-    if (groupCount != 0 && groupCount != parsedGroupLines)
+                    ", state-file=" + m_stateFilePath +
+                    (fromSqlite ? ", backend=sqlite" : ", backend=text"));
+
+    // One-time migration: persist the parsed legacy snapshot into SQLite and
+    // retire the text file. On failure keep the text file as the source of
+    // truth; the next successful persist will retry the conversion.
+    if (!fromSqlite)
     {
-        Logger::warning("PGS: persisted group count mismatch, parsed=" + std::to_string(parsedGroupLines) +
-                        ", declared=" + std::to_string(groupCount));
+        std::string migrateErr;
+        if (db.open(m_stateFilePath, migrateErr) && db.saveAll(snap, migrateErr))
+        {
+            std::error_code ec;
+            const std::filesystem::path textPath(m_stateFilePath);
+            const std::filesystem::path retired = textPath.parent_path() /
+                (textPath.filename().string() + ".text-imported");
+            std::filesystem::rename(textPath, retired, ec);
+            Logger::warning("PGS: migrated legacy text archive to sqlite" +
+                            std::string(ec ? " (rename of old file failed: keep manually)" : ", old file renamed to .text-imported"));
+        }
+        else
+        {
+            Logger::warning("PGS: sqlite migration deferred: " + migrateErr);
+        }
     }
     return true;
 }
 
-
 void PGS::persistState()
 {
-    // Persist a snapshot, never a live structure. We first copy the archive
-    // under lock, then write outside the lock, then atomically replace the
-    // old file. That keeps the runtime hot path short and avoids half-written
-    // files when the service is interrupted mid-write.
+    // Persist a snapshot, never a live structure. We copy the archive under
+    // lock, then write outside the guards lock through one SQLite transaction
+    // (BEGIN IMMEDIATE ... COMMIT), which is atomic on disk: an interrupted
+    // service leaves the previous snapshot intact instead of a torn file.
     std::lock_guard<std::mutex> persistLock(m_persistMutex);
     std::string authHash;
     {
@@ -635,30 +352,33 @@ void PGS::persistState()
         authHash = m_authTokenHash;
     }
 
-    std::uint64_t nextGuardId = 1;
-    std::vector<PersistedGuardState> snapshot;
-    std::unordered_map<std::uint64_t, RestartPolicyState> policySnapshot;
-    std::vector<GuardGroupState> groupSnapshot;
+    StateSnapshot snapshot;
+    snapshot.version = PGS_SQLITE_STATE_VERSION;
+    snapshot.authTokenHash = authHash;
+    snapshot.serverPort = m_serverPort;
+    snapshot.modulesPermissive = m_modulesPermissive.load();
     {
         std::lock_guard<std::mutex> guardsLock(m_guardsMutex);
-        nextGuardId = m_nextGuardId.load();
-        snapshot.reserve(m_persistedGuards.size());
+        snapshot.nextGuardId = m_nextGuardId.load();
+        snapshot.guards.reserve(m_persistedGuards.size());
         for (const auto &entry : m_persistedGuards)
         {
-            snapshot.push_back(entry.second);
+            snapshot.guards.push_back(entry.second);
         }
-        policySnapshot = m_policyByGuardId;
-        groupSnapshot.reserve(m_guardGroups.size());
+        for (const auto &entry : m_policyByGuardId)
+        {
+            snapshot.policy.emplace_back(entry.first, entry.second);
+        }
         for (const auto &entry : m_guardGroups)
         {
-            groupSnapshot.push_back(entry.second);
+            snapshot.groups.push_back(entry.second);
         }
     }
 
-    std::sort(snapshot.begin(), snapshot.end(), [](const PersistedGuardState &a, const PersistedGuardState &b) {
+    std::sort(snapshot.guards.begin(), snapshot.guards.end(), [](const PersistedGuardState &a, const PersistedGuardState &b) {
         return a.guardId < b.guardId;
     });
-    std::sort(groupSnapshot.begin(), groupSnapshot.end(), [](const GuardGroupState &a, const GuardGroupState &b) {
+    std::sort(snapshot.groups.begin(), snapshot.groups.end(), [](const GuardGroupState &a, const GuardGroupState &b) {
         return a.name < b.name;
     });
 
@@ -667,104 +387,21 @@ void PGS::persistState()
         return;
     }
 
-    const std::filesystem::path statePath(m_stateFilePath);
-    const std::filesystem::path tempPath = statePath.parent_path() / (statePath.filename().string() + ".tmp");
     std::error_code ec;
+    const std::filesystem::path statePath(m_stateFilePath);
     if (!statePath.parent_path().empty())
     {
         std::filesystem::create_directories(statePath.parent_path(), ec);
     }
 
-    std::ofstream out(tempPath, std::ios::out | std::ios::binary | std::ios::trunc);
-    if (!out.is_open())
+    PGSStateDb db;
+    std::string dbErr;
+    if (!db.open(m_stateFilePath, dbErr) || !db.saveAll(snapshot, dbErr))
     {
-        Logger::error("PGS: failed to open temp state file for write: " + tempPath.string());
-        return;
-    }
-
-    out << "VERSION\t" << kStateFileVersion << "\n";
-    out << "NEXT_GUARD_ID\t" << std::max<std::uint64_t>(1ull, nextGuardId) << "\n";
-    out << "AUTH_TOKEN_HASH\t" << authHash << "\n";
-    out << "SERVER_PORT\t" << m_serverPort << "\n";
-    out << "MODULES_PERMISSIVE\t" << (m_modulesPermissive.load() ? "1" : "0") << "\n";
-    out << "GROUP_COUNT\t" << groupSnapshot.size() << "\n";
-    for (const auto &group : groupSnapshot)
-    {
-        out << "GROUP\t"
-            << base64Encode(group.name) << "\t"
-            << (group.paused ? "1" : "0") << "\t"
-            << group.startupOrder << "\t"
-            << (group.dependencies.empty() ? "-" : base64Encode(joinCsv(group.dependencies))) << "\n";
-    }
-    for (const auto &guard : snapshot)
-    {
-        out << "GUARD\t"
-            << guard.guardId << "\t"
-            << guard.lastKnownPid << "\t"
-            << guard.sessionId << "\t"
-            << maxRestartsLabel(guard.maxRestarts) << "\t"
-            << base64Encode(guard.path) << "\t"
-            << base64Encode(guard.restartArgs) << "\t"
-            << (guard.fileHash.empty() ? "-" : guard.fileHash) << "\t"
-            << (guard.intentional ? "1" : "0") << "\t"
-            << (guard.hashVerified ? "1" : "0") << "\t"
-            << (guard.appKind == AppKind::WinApp ? "winapp" : "win32") << "\t"
-            << (guard.aumid.empty() ? "-" : base64Encode(guard.aumid)) << "\t"
-            << guard.restartWindowSec << "\t"
-            << guard.restartDelayMs << "\t"
-            << (guard.backoff ? "1" : "0") << "\t"
-            << guard.hangTimeoutMs << "\t"
-            << (guard.killOnExit ? "1" : "0") << "\t"
-            << (guard.healthCheckJson.empty() ? "-" : base64Encode(guard.healthCheckJson)) << "\t"
-            << (guard.groupName.empty() ? "-" : base64Encode(guard.groupName)) << "\t"
-            << (guard.paused ? "1" : "0") << "\t"
-            << guard.createdAtMs << "\t"
-            << guard.lastStartMs << "\t"
-            << guard.lastExitMs << "\t"
-            << guard.lastExitCode << "\t"
-            << guard.cumulativeRunMs << "\t"
-            << guard.restartIntervalSumMs << "\t"
-            << guard.restartIntervalCount << "\t"
-            << (guard.crashLoop ? "1" : "0") << "\t"
-            << (guard.restartHookJson.empty() ? "-" : base64Encode(guard.restartHookJson)) << "\t"
-            << (guard.quarantined ? "1" : "0") << "\t"
-            << (guard.lastFailure.empty() ? "-" : base64Encode(guard.lastFailure)) << "\t"
-            << guard.nextRetryMs << "\t"
-            << guard.failureCount << "\t"
-            << (guard.lastFailureCode.empty() ? "-" : guard.lastFailureCode) << "\n";
-        const auto pit = policySnapshot.find(guard.guardId);
-        if (pit != policySnapshot.end())
-        {
-            if (pit->second.restartCount > 0)
-            {
-                out << "RESTART_COUNT\t" << guard.guardId << "\t" << pit->second.restartCount << "\n";
-            }
-            if (guard.restartWindowSec > 0)
-            {
-                const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
-                const auto recent = util::pruneRestartWindow(
-                    pit->second.recentRestartMs, nowMs, guard.restartWindowSec);
-                for (const std::int64_t t : recent)
-                {
-                    out << "RESTART\t" << guard.guardId << "\t" << t << "\n";
-                }
-            }
-        }
-    }
-    out.flush();
-    out.close();
-
-    if (!MoveFileExW(utf8ToWide(tempPath.string()).c_str(),
-                     utf8ToWide(statePath.string()).c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    {
-        Logger::error("PGS: failed to replace persisted state file, error=" + std::to_string(GetLastError()));
-        DeleteFileW(utf8ToWide(tempPath.string()).c_str());
+        Logger::error("PGS: failed to persist state archive: " + dbErr);
         return;
     }
 }
-
 
 bool PGS::tryAttachPersistedGuard(const PersistedGuardState &persisted, GuardInfo &outGuard)
 {
