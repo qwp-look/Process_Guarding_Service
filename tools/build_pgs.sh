@@ -119,6 +119,10 @@ echo "[1/$TOTAL_STEPS] Compiling logger..."
 
 echo "[2/$TOTAL_STEPS] Compiling PGS core..."
 "$GXX" $CXXFLAGS -c src/service/PGS.cpp -o "$BUILD_DIR/PGS.o"
+"$GXX" $CXXFLAGS -c src/service/PGSServer.cpp -o "$BUILD_DIR/PGSServer.o"
+"$GXX" $CXXFLAGS -c src/service/PGSMonitor.cpp -o "$BUILD_DIR/PGSMonitor.o"
+"$GXX" $CXXFLAGS -c src/service/PGSHealth.cpp -o "$BUILD_DIR/PGSHealth.o"
+"$GXX" $CXXFLAGS -c src/service/PGSGuardStore.cpp -o "$BUILD_DIR/PGSGuardStore.o"
 
 # Module system: ModuleManager is linked into pgs_service.exe.
 echo "[3/$TOTAL_STEPS] Compiling module manager..."
@@ -126,6 +130,7 @@ echo "[3/$TOTAL_STEPS] Compiling module manager..."
 
 echo "[4/$TOTAL_STEPS] Compiling PGS protocol and module install handlers..."
 "$GXX" $CXXFLAGS -c src/service/PGSProtocol.cpp -o "$BUILD_DIR/PGSProtocol.o"
+"$GXX" $CXXFLAGS -c src/service/PGSOperationStore.cpp -o "$BUILD_DIR/PGSOperationStore.o"
 "$GXX" $CXXFLAGS -c src/service/PGSModuleInstall.cpp -o "$BUILD_DIR/PGSModuleInstall.o"
 
 echo "[5/$TOTAL_STEPS] Compiling service host..."
@@ -133,7 +138,7 @@ echo "[5/$TOTAL_STEPS] Compiling service host..."
 
 echo "[6/$TOTAL_STEPS] Linking pgs_service.exe..."
 "$GXX" -std=c++17 -Wall -Wextra -O2 \
-  "$BUILD_DIR/PGLogger.o" "$BUILD_DIR/PGS.o" "$BUILD_DIR/PGSProtocol.o" "$BUILD_DIR/PGSModuleInstall.o" "$BUILD_DIR/ModuleManager.o" "$BUILD_DIR/pgs_service.o" \
+  "$BUILD_DIR/PGLogger.o" "$BUILD_DIR/PGS.o" "$BUILD_DIR/PGSServer.o" "$BUILD_DIR/PGSMonitor.o" "$BUILD_DIR/PGSHealth.o" "$BUILD_DIR/PGSGuardStore.o" "$BUILD_DIR/PGSProtocol.o" "$BUILD_DIR/PGSOperationStore.o" "$BUILD_DIR/PGSModuleInstall.o" "$BUILD_DIR/ModuleManager.o" "$BUILD_DIR/pgs_service.o" \
   -o "$BUILD_DIR/pgs_service.exe" \
   -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
 

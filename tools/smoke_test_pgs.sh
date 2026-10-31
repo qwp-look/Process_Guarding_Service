@@ -243,12 +243,24 @@ run_bootstrap_token_smoke() {
 
   for _ in $(seq 1 40); do
     if [[ -s "$bootstrap_token_file" ]]; then
-      bootstrap_token="$(tr -d '\r\n' <"$bootstrap_token_file")"
+      bootstrap_token="$(tr -d '\r\n' <"$bootstrap_token_file" 2>/dev/null || true)"
       break
     fi
     sleep 0.25
   done
   if [[ ! "$bootstrap_token" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    if [[ -f "$bootstrap_token_file" ]] && ! cat "$bootstrap_token_file" >/dev/null 2>&1; then
+      # P0-04 hardening: the bootstrap token file DACL is SYSTEM+Administrators
+      # only. A non-elevated smoke shell cannot read it back, so skip this
+      # section gracefully instead of failing; CI runs elevated and covers it.
+      echo "[Smoke] SKIP bootstrap token read check (token file ACL is SYSTEM+Administrators only;"
+      echo "[Smoke]       rerun from an elevated shell to exercise this section)"
+      force_stop_process "$bootstrap_service_pid"
+      kill "$bootstrap_service_job_pid" >/dev/null 2>&1 || true
+      bootstrap_service_pid=""
+      bootstrap_service_job_pid=""
+      return 0
+    fi
     echo "[Smoke] bootstrap token file was not written with a 64-hex token"
     echo "[Smoke] token path: $bootstrap_token_file"
     exit 1
@@ -476,7 +488,6 @@ if [[ ! "$policy_list" =~ TEMPLATE[[:space:]]name=smoke_policy ]]; then
   exit 1
 fi
 bless policy-template remove --name smoke_policy >/dev/null
-fi
 echo "[Smoke] high-risk module negative checks..."
 expect_bless_failure_contains "dump collect requires confirm=1" dump collect --pid "$service_pid"
 expect_bless_failure_contains "service mutation requires confirm=1" service-guard start --name EventLog

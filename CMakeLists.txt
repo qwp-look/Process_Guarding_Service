@@ -52,7 +52,12 @@ target_link_libraries(pgs_module_manager PUBLIC pgs_logger wintrust ole32 bcrypt
 
 add_library(pgs_core STATIC
     src/service/PGS.cpp
+    src/service/PGSServer.cpp
+    src/service/PGSMonitor.cpp
+    src/service/PGSHealth.cpp
+    src/service/PGSGuardStore.cpp
     src/service/PGSProtocol.cpp
+    src/service/PGSOperationStore.cpp
     src/service/PGSModuleInstall.cpp)
 target_include_directories(pgs_core PUBLIC include)
 target_link_libraries(pgs_core PUBLIC pgs_logger pgs_module_manager ws2_32 winhttp advapi32 wtsapi32 userenv bcrypt wintrust ole32 shell32)
