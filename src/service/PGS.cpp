@@ -1017,15 +1017,13 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     }
 
     // Prepare <exe>\modules before marking the service initialised. Module
-    // loading is now a general opt-in; kernel/PPL modules require the separate
-    // high-risk switch. Compatibility --enable-ppl sets both.
+    // loading is a general opt-in via --enable-modules.
     //
     // P0-03 fail-closed: startup only *audits* the modules tree. It must NOT
     // auto-repair ACLs (that would hide an insecure install). Explicit repair
     // is `pgs_bless doctor repair-modules-acl` only.
     m_modulesDir = moduleDirectoryOfSelf();
-    const bool highRiskModulesEnabled = m_kernelModulesEnabled || m_pplEnabled;
-    const bool wantModules = m_modulesEnabled || m_modulesPermissive.load() || highRiskModulesEnabled;
+    const bool wantModules = m_modulesEnabled || m_modulesPermissive.load();
     if (!m_modulesDir.empty())
     {
         // Create the directory if missing so doctor/load paths have a root, but
@@ -1082,9 +1080,7 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
     m_modules.setServices(svc);
     }
     m_modules.setPermissive(m_modulesPermissive.load());
-    std::vector<std::string> enabledModules = highRiskModulesEnabled ?
-        std::vector<std::string>{"*"} : std::vector<std::string>{"*", "!ppl"};
-    m_modules.setEnabledModules(enabledModules);
+    m_modules.setEnabledModules(std::vector<std::string>{"*"});
     {
         const bool permissive = m_modulesPermissive.load();
         // Production: require clean ACL audit. Permissive: allow load with warning.
@@ -1111,7 +1107,7 @@ bool PGS::initialize(const std::string &logFilePath, const std::string &authToke
         }
         else
         {
-            Logger::warning("PGS: module loading disabled (set --enable-modules for normal modules; --enable-kernel-modules or --enable-ppl for PPL)");
+            Logger::warning("PGS: module loading disabled (set --enable-modules to enable module loading)");
         }
     }
     m_initialized = true;

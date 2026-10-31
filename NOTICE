@@ -2,37 +2,5 @@ Process_Guarding_Service (PGS)
 Copyright (c) Process_Guarding_Service contributors.
 Licensed under the Apache License, Version 2.0.
 
-================================================================================
-Third-party components
-================================================================================
-
-This product includes components derived from StarlightGUI
-(https://github.com/OpenStarlight/StarlightGUI), Copyright (c) StarlightGUI
-contributors (author "Stars"), licensed under the Apache License, Version 2.0.
-
-1. Sirius.sys
-   A prebuilt Windows kernel driver binary (original location:
-   StarlightGUI/Assets/Sirius.sys). Redistributed unmodified in Object form
-   under Apache-2.0 §3. PGS loads it via the Service Control Manager and
-   communicates through its existing IOCTL contract.
-
-2. SiriusIO.h
-   The Sirius driver IOCTL/structure definitions (modules/ppl/SiriusIO.h).
-   Adapted for MinGW-w64: MSVC-specific `#pragma warning` directives are
-   wrapped under `_MSC_VER`. No protocol definitions were changed.
-
-3. SiriusDriverClient.h
-   The driver client logic (modules/ppl/SiriusDriverClient.h) is derived from
-   StarlightGUI's DriverUtils::LoadKernelDriver and
-   KernelInstance::GetDriverDevice / SetPPL / SiQueryProcessInformation.
-
-Per Apache-2.0 §4(b), the following PGS source files were modified to add
-module-system support and are marked accordingly in their headers/comments:
-  - include/Process_Guard/PGS.h
-  - src/service/PGS.cpp
-  - tools/pgs_bless.cpp
-  - tools/build_pgs.bat
-  - tools/build_pgs.sh
-
 The Apache License, Version 2.0 text is available at:
   http://www.apache.org/licenses/LICENSE-2.0

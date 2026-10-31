@@ -27,7 +27,7 @@ set "TMP=!CD!\%BUILD_DIR%\tmp"
 set "TEMP=!TMP!"
 set "TMPDIR=!TMP!"
 
-echo [1/26] Compiling logger...
+echo [1/22] Compiling logger...
 "%COMPILER%" %CXXFLAGS% -c src\common\PGLogger.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGLogger.o
 if errorlevel 1 (
     echo Failed: src\common\PGLogger.cpp
@@ -35,7 +35,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [2/26] Compiling PGS core...
+echo [2/22] Compiling PGS core...
 "%COMPILER%" %CXXFLAGS% -c src\service\PGS.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGS.o
 if errorlevel 1 (
     echo Failed: src\service\PGS.cpp
@@ -44,7 +44,7 @@ if errorlevel 1 (
 )
 
 REM Module system: ModuleManager is linked into pgs_service.exe.
-echo [3/26] Compiling module manager...
+echo [3/22] Compiling module manager...
 "%COMPILER%" %CXXFLAGS% -c src\modules\ModuleManager.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\ModuleManager.o
 if errorlevel 1 (
     echo Failed: src\modules\ModuleManager.cpp
@@ -52,7 +52,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [4/26] Compiling PGS protocol and module install handlers...
+echo [4/22] Compiling PGS protocol and module install handlers...
 "%COMPILER%" %CXXFLAGS% -c src\service\PGSProtocol.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGSProtocol.o
 if errorlevel 1 (
     echo Failed: src\service\PGSProtocol.cpp
@@ -66,7 +66,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [5/26] Compiling service host...
+echo [5/22] Compiling service host...
 "%COMPILER%" %CXXFLAGS% -c src\service\pgs_service.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\pgs_service.o
 if errorlevel 1 (
     echo Failed: src\service\pgs_service.cpp
@@ -74,7 +74,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [6/26] Linking pgs_service.exe...
+echo [6/22] Linking pgs_service.exe...
 "%COMPILER%" -o %BUILD_DIR%\pgs_service.exe %BUILD_DIR%\PGLogger.o %BUILD_DIR%\PGS.o %BUILD_DIR%\PGSProtocol.o %BUILD_DIR%\PGSModuleInstall.o %BUILD_DIR%\ModuleManager.o %BUILD_DIR%\pgs_service.o -lws2_32 -lwinhttp -ladvapi32 -lwtsapi32 -luserenv -lbcrypt -lwintrust -lole32 -lshell32
 if errorlevel 1 (
     echo Failed: link pgs_service.exe
@@ -82,7 +82,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [7/26] Building guard_example.exe...
+echo [7/22] Building guard_example.exe...
 "%COMPILER%" %CXXFLAGS% -o %BUILD_DIR%\guard_example.exe examples\guard_example.cpp -I %INCLUDE_DIR% -lws2_32 -ladvapi32 -lbcrypt
 if errorlevel 1 (
     echo Failed: examples\guard_example.cpp
@@ -90,7 +90,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [8/26] Building quick_start.exe...
+echo [8/22] Building quick_start.exe...
 "%COMPILER%" %CXXFLAGS% -o %BUILD_DIR%\quick_start.exe examples\quick_start.cpp -I %INCLUDE_DIR% -lws2_32 -ladvapi32 -lbcrypt
 if errorlevel 1 (
     echo Failed: examples\quick_start.cpp
@@ -98,7 +98,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [9/26] Building smoke_worker.exe...
+echo [9/22] Building smoke_worker.exe...
 "%COMPILER%" %CXXFLAGS% -o %BUILD_DIR%\smoke_worker.exe examples\smoke_worker.cpp -I %INCLUDE_DIR% -lws2_32
 if errorlevel 1 (
     echo Failed: examples\smoke_worker.cpp
@@ -106,7 +106,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [10/26] Building pgs_bless.exe (links shared PGSClient)...
+echo [10/22] Building pgs_bless.exe (links shared PGSClient)...
 "%COMPILER%" %CXXFLAGS% -c src\common\PGSClient.cpp -I %INCLUDE_DIR% -o %BUILD_DIR%\PGSClient.o
 if errorlevel 1 (
     echo Failed: src\common\PGSClient.cpp
@@ -127,7 +127,7 @@ if errorlevel 1 (
 )
 
 REM Schedule module: cron/once/interval scheduler (ABI v2, calls back into PGS).
-echo [11/26] Building pgs_sched_module.dll...
+echo [11/22] Building pgs_sched_module.dll...
 if not exist "%BUILD_DIR%\modules\sched" mkdir "%BUILD_DIR%\modules\sched"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\sched\pgs_sched_module.dll" modules\sched\SchedCron.cpp modules\sched\pgs_sched_module.cpp -I %INCLUDE_DIR%
 if errorlevel 1 (
@@ -143,7 +143,7 @@ copy /Y modules\sched\module.manifest "%BUILD_DIR%\modules\sched\module.manifest
 copy /Y modules\sched\module.manifest.json "%BUILD_DIR%\modules\sched\module.manifest.json" >nul
 
 REM Health module: lightweight service status wrapper around stats/list/events.
-echo [12/26] Building pgs_health_module.dll...
+echo [12/22] Building pgs_health_module.dll...
 if not exist "%BUILD_DIR%\modules\health" mkdir "%BUILD_DIR%\modules\health"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\health\pgs_health_module.dll" modules\health\pgs_health_module.cpp -I %INCLUDE_DIR%
 if errorlevel 1 (
@@ -159,7 +159,7 @@ copy /Y modules\health\module.manifest "%BUILD_DIR%\modules\health\module.manife
 copy /Y modules\health\module.manifest.json "%BUILD_DIR%\modules\health\module.manifest.json" >nul
 
 REM Profile module: named restart-policy profiles, persisted beside the module.
-echo [13/26] Building pgs_profile_module.dll...
+echo [13/22] Building pgs_profile_module.dll...
 if not exist "%BUILD_DIR%\modules\profile" mkdir "%BUILD_DIR%\modules\profile"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\profile\pgs_profile_module.dll" modules\profile\pgs_profile_module.cpp -I %INCLUDE_DIR%
 if errorlevel 1 (
@@ -175,7 +175,7 @@ copy /Y modules\profile\module.manifest "%BUILD_DIR%\modules\profile\module.mani
 copy /Y modules\profile\module.manifest.json "%BUILD_DIR%\modules\profile\module.manifest.json" >nul
 
 REM Report module: base64 snapshots/backup exports from stats/list/events.
-echo [14/26] Building pgs_report_module.dll...
+echo [14/22] Building pgs_report_module.dll...
 if not exist "%BUILD_DIR%\modules\report" mkdir "%BUILD_DIR%\modules\report"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\report\pgs_report_module.dll" modules\report\pgs_report_module.cpp -I %INCLUDE_DIR%
 if errorlevel 1 (
@@ -191,7 +191,7 @@ copy /Y modules\report\module.manifest "%BUILD_DIR%\modules\report\module.manife
 copy /Y modules\report\module.manifest.json "%BUILD_DIR%\modules\report\module.manifest.json" >nul
 
 REM Notify module: Windows-native Event Log and optional local popup notifications.
-echo [15/26] Building pgs_notify_module.dll...
+echo [15/22] Building pgs_notify_module.dll...
 if not exist "%BUILD_DIR%\modules\notify" mkdir "%BUILD_DIR%\modules\notify"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\notify\pgs_notify_module.dll" modules\notify\pgs_notify_module.cpp -I %INCLUDE_DIR% -ladvapi32 -luser32
 if errorlevel 1 (
@@ -207,7 +207,7 @@ copy /Y modules\notify\module.manifest "%BUILD_DIR%\modules\notify\module.manife
 copy /Y modules\notify\module.manifest.json "%BUILD_DIR%\modules\notify\module.manifest.json" >nul
 
 REM Metrics module: local guard/service metrics in KV, JSON, and Prometheus text.
-echo [16/26] Building pgs_metrics_module.dll...
+echo [16/22] Building pgs_metrics_module.dll...
 if not exist "%BUILD_DIR%\modules\metrics" mkdir "%BUILD_DIR%\modules\metrics"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\metrics\pgs_metrics_module.dll" modules\metrics\pgs_metrics_module.cpp -I %INCLUDE_DIR%
 if errorlevel 1 (
@@ -223,7 +223,7 @@ copy /Y modules\metrics\module.manifest "%BUILD_DIR%\modules\metrics\module.mani
 copy /Y modules\metrics\module.manifest.json "%BUILD_DIR%\modules\metrics\module.manifest.json" >nul
 
 REM Backup module: local ProgramData state snapshot and optional ArtifactStore output.
-echo [17/26] Building pgs_backup_module.dll...
+echo [17/22] Building pgs_backup_module.dll...
 if not exist "%BUILD_DIR%\modules\backup" mkdir "%BUILD_DIR%\modules\backup"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\backup\pgs_backup_module.dll" modules\backup\pgs_backup_module.cpp -I %INCLUDE_DIR%
 if errorlevel 1 (
@@ -239,7 +239,7 @@ copy /Y modules\backup\module.manifest "%BUILD_DIR%\modules\backup\module.manife
 copy /Y modules\backup\module.manifest.json "%BUILD_DIR%\modules\backup\module.manifest.json" >nul
 
 REM Eventlog module: read-only local Windows Application Event Log queries.
-echo [18/26] Building pgs_eventlog_module.dll...
+echo [18/22] Building pgs_eventlog_module.dll...
 if not exist "%BUILD_DIR%\modules\eventlog" mkdir "%BUILD_DIR%\modules\eventlog"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\eventlog\pgs_eventlog_module.dll" modules\eventlog\pgs_eventlog_module.cpp -I %INCLUDE_DIR% -ladvapi32
 if errorlevel 1 (
@@ -255,7 +255,7 @@ copy /Y modules\eventlog\module.manifest "%BUILD_DIR%\modules\eventlog\module.ma
 copy /Y modules\eventlog\module.manifest.json "%BUILD_DIR%\modules\eventlog\module.manifest.json" >nul
 
 REM Dump module: explicit local minidump collection into ArtifactStore.
-echo [19/26] Building pgs_dump_module.dll...
+echo [19/22] Building pgs_dump_module.dll...
 if not exist "%BUILD_DIR%\modules\dump" mkdir "%BUILD_DIR%\modules\dump"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\dump\pgs_dump_module.dll" modules\dump\pgs_dump_module.cpp -I %INCLUDE_DIR% -ldbghelp
 if errorlevel 1 (
@@ -271,7 +271,7 @@ copy /Y modules\dump\module.manifest "%BUILD_DIR%\modules\dump\module.manifest" 
 copy /Y modules\dump\module.manifest.json "%BUILD_DIR%\modules\dump\module.manifest.json" >nul
 
 REM Service guard module: local Windows SCM query/start/stop helper.
-echo [20/26] Building pgs_service_guard_module.dll...
+echo [20/22] Building pgs_service_guard_module.dll...
 if not exist "%BUILD_DIR%\modules\service_guard" mkdir "%BUILD_DIR%\modules\service_guard"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\service_guard\pgs_service_guard_module.dll" modules\service_guard\pgs_service_guard_module.cpp -I %INCLUDE_DIR% -ladvapi32
 if errorlevel 1 (
@@ -287,7 +287,7 @@ copy /Y modules\service_guard\module.manifest "%BUILD_DIR%\modules\service_guard
 copy /Y modules\service_guard\module.manifest.json "%BUILD_DIR%\modules\service_guard\module.manifest.json" >nul
 
 REM File watch module: demand-driven local file change detector.
-echo [21/26] Building pgs_file_watch_module.dll...
+echo [21/22] Building pgs_file_watch_module.dll...
 if not exist "%BUILD_DIR%\modules\file_watch" mkdir "%BUILD_DIR%\modules\file_watch"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\file_watch\pgs_file_watch_module.dll" modules\file_watch\pgs_file_watch_module.cpp -I %INCLUDE_DIR% -lbcrypt
 if errorlevel 1 (
@@ -303,7 +303,7 @@ copy /Y modules\file_watch\module.manifest "%BUILD_DIR%\modules\file_watch\modul
 copy /Y modules\file_watch\module.manifest.json "%BUILD_DIR%\modules\file_watch\module.manifest.json" >nul
 
 REM Policy module: named guard-policy templates.
-echo [22/26] Building pgs_policy_module.dll...
+echo [22/22] Building pgs_policy_module.dll...
 if not exist "%BUILD_DIR%\modules\policy" mkdir "%BUILD_DIR%\modules\policy"
 "%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\policy\pgs_policy_module.dll" modules\policy\pgs_policy_module.cpp -I %INCLUDE_DIR%
 if errorlevel 1 (
@@ -318,98 +318,6 @@ copy /Y modules\policy\module.html "%BUILD_DIR%\modules\policy\module.html" >nul
 copy /Y modules\policy\module.manifest "%BUILD_DIR%\modules\policy\module.manifest" >nul
 copy /Y modules\policy\module.manifest.json "%BUILD_DIR%\modules\policy\module.manifest.json" >nul
 
-REM Remote agent module: local node heartbeat metadata, no listener.
-echo [23/26] Building pgs_remote_agent_module.dll...
-if not exist "%BUILD_DIR%\modules\remote_agent" mkdir "%BUILD_DIR%\modules\remote_agent"
-"%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\remote_agent\pgs_remote_agent_module.dll" modules\remote_agent\pgs_remote_agent_module.cpp -I %INCLUDE_DIR%
-if errorlevel 1 (
-    echo Failed: modules\remote_agent\pgs_remote_agent_module.cpp
-    popd
-    exit /b 1
-)
-copy /Y "%MINGW_BIN%\libstdc++-6.dll" "%BUILD_DIR%\modules\remote_agent\libstdc++-6.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\remote_agent\libgcc_s_seh-1.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\remote_agent\libwinpthread-1.dll" >nul 2>&1
-copy /Y modules\remote_agent\module.html "%BUILD_DIR%\modules\remote_agent\module.html" >nul
-copy /Y modules\remote_agent\module.manifest "%BUILD_DIR%\modules\remote_agent\module.manifest" >nul
-copy /Y modules\remote_agent\module.manifest.json "%BUILD_DIR%\modules\remote_agent\module.manifest.json" >nul
-
-REM Update module: local release manifest verification only.
-echo [24/26] Building pgs_update_module.dll...
-if not exist "%BUILD_DIR%\modules\update" mkdir "%BUILD_DIR%\modules\update"
-"%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\update\pgs_update_module.dll" modules\update\pgs_update_module.cpp -I %INCLUDE_DIR% -lbcrypt
-if errorlevel 1 (
-    echo Failed: modules\update\pgs_update_module.cpp
-    popd
-    exit /b 1
-)
-copy /Y "%MINGW_BIN%\libstdc++-6.dll" "%BUILD_DIR%\modules\update\libstdc++-6.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\update\libgcc_s_seh-1.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\update\libwinpthread-1.dll" >nul 2>&1
-copy /Y modules\update\module.html "%BUILD_DIR%\modules\update\module.html" >nul
-copy /Y modules\update\module.manifest "%BUILD_DIR%\modules\update\module.manifest" >nul
-copy /Y modules\update\module.manifest.json "%BUILD_DIR%\modules\update\module.manifest.json" >nul
-
-REM Script runner module: disabled-by-default restricted local script runner.
-echo [25/26] Building pgs_script_runner_module.dll...
-if not exist "%BUILD_DIR%\modules\script_runner" mkdir "%BUILD_DIR%\modules\script_runner"
-"%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\script_runner\pgs_script_runner_module.dll" modules\script_runner\pgs_script_runner_module.cpp -I %INCLUDE_DIR% -lbcrypt
-if errorlevel 1 (
-    echo Failed: modules\script_runner\pgs_script_runner_module.cpp
-    popd
-    exit /b 1
-)
-copy /Y "%MINGW_BIN%\libstdc++-6.dll" "%BUILD_DIR%\modules\script_runner\libstdc++-6.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\script_runner\libgcc_s_seh-1.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\script_runner\libwinpthread-1.dll" >nul 2>&1
-copy /Y modules\script_runner\module.html "%BUILD_DIR%\modules\script_runner\module.html" >nul
-copy /Y modules\script_runner\module.manifest "%BUILD_DIR%\modules\script_runner\module.manifest" >nul
-copy /Y modules\script_runner\module.manifest.json "%BUILD_DIR%\modules\script_runner\module.manifest.json" >nul
-
-REM PPL module: built as a separate DLL (-shared) into build\modules, then
-REM Sirius.sys and the MinGW runtime DLLs are copied next to it so PGS can
-REM auto-load the module and the module can load the driver at runtime.
-echo [26/26] Building pgs_ppl_module.dll...
-REM v3: ship a default allowlist that permits the bundled modules.
-REM Operators add lines "name[|sha256|signed]" to <exe>\modules\modules.allow to approve more.
-echo ppl> "%BUILD_DIR%\modules\modules.allow"
-echo sched>> "%BUILD_DIR%\modules\modules.allow"
-echo health>> "%BUILD_DIR%\modules\modules.allow"
-echo profile>> "%BUILD_DIR%\modules\modules.allow"
-echo report>> "%BUILD_DIR%\modules\modules.allow"
-echo notify>> "%BUILD_DIR%\modules\modules.allow"
-echo metrics>> "%BUILD_DIR%\modules\modules.allow"
-echo backup>> "%BUILD_DIR%\modules\modules.allow"
-echo eventlog>> "%BUILD_DIR%\modules\modules.allow"
-echo dump>> "%BUILD_DIR%\modules\modules.allow"
-echo service_guard>> "%BUILD_DIR%\modules\modules.allow"
-echo file_watch>> "%BUILD_DIR%\modules\modules.allow"
-echo policy>> "%BUILD_DIR%\modules\modules.allow"
-echo remote_agent>> "%BUILD_DIR%\modules\modules.allow"
-echo update>> "%BUILD_DIR%\modules\modules.allow"
-echo script_runner>> "%BUILD_DIR%\modules\modules.allow"
-REM Per-folder module layout: build\modules\<name>\<name>.dll + module.html + assets.
-REM The folder name MUST match the module PG_GetName() return value so the
-REM Qt UI and `module call --name <folder>` resolve correctly.
-if not exist "%BUILD_DIR%\modules\ppl" mkdir "%BUILD_DIR%\modules\ppl"
-"%COMPILER%" %CXXFLAGS% -shared -o "%BUILD_DIR%\modules\ppl\pgs_ppl_module.dll" modules\ppl\pgs_ppl_module.cpp -I %INCLUDE_DIR% -ladvapi32
-if errorlevel 1 (
-    echo Failed: modules\ppl\pgs_ppl_module.cpp
-    popd
-    exit /b 1
-)
-copy /Y modules\ppl\Sirius.sys "%BUILD_DIR%\modules\ppl\Sirius.sys" >nul
-copy /Y modules\ppl\module.html "%BUILD_DIR%\modules\ppl\module.html" >nul
-copy /Y modules\ppl\module.manifest "%BUILD_DIR%\modules\ppl\module.manifest" >nul
-copy /Y modules\ppl\module.manifest.json "%BUILD_DIR%\modules\ppl\module.manifest.json" >nul
-REM MinGW runtime DLLs: copy into build\ and build\modules\ so the .exe and the
-REM pgs_ppl_module.dll can run without MSYS2 in PATH.
-copy /Y "%MINGW_BIN%\libstdc++-6.dll" "%BUILD_DIR%\libstdc++-6.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\libgcc_s_seh-1.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\libwinpthread-1.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libstdc++-6.dll" "%BUILD_DIR%\modules\ppl\libstdc++-6.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libgcc_s_seh-1.dll" "%BUILD_DIR%\modules\ppl\libgcc_s_seh-1.dll" >nul 2>&1
-copy /Y "%MINGW_BIN%\libwinpthread-1.dll" "%BUILD_DIR%\modules\ppl\libwinpthread-1.dll" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\write_modules_lock.ps1 -ModulesRoot "%BUILD_DIR%\modules" -Output "%BUILD_DIR%\modules\modules.lock" -GeneratedAt build
 if errorlevel 1 (
     echo Failed: write modules.lock
@@ -436,12 +344,6 @@ echo - %BUILD_DIR%\modules\dump\pgs_dump_module.dll
 echo - %BUILD_DIR%\modules\service_guard\pgs_service_guard_module.dll
 echo - %BUILD_DIR%\modules\file_watch\pgs_file_watch_module.dll
 echo - %BUILD_DIR%\modules\policy\pgs_policy_module.dll
-echo - %BUILD_DIR%\modules\remote_agent\pgs_remote_agent_module.dll
-echo - %BUILD_DIR%\modules\update\pgs_update_module.dll
-echo - %BUILD_DIR%\modules\script_runner\pgs_script_runner_module.dll
-echo - %BUILD_DIR%\modules\ppl\pgs_ppl_module.dll
-echo - %BUILD_DIR%\modules\ppl\Sirius.sys
-echo - %BUILD_DIR%\modules\ppl\module.html
 
 popd
 exit /b 0

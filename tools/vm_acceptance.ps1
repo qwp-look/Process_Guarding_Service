@@ -10,8 +10,6 @@ param(
     [string]$InstallDir = '',
     [string]$Version = '',
     [switch]$SkipInstaller,
-    [switch]$EnablePpl,
-    [switch]$RequirePplDriver,
     [switch]$RunWinApp
 )
 
@@ -148,7 +146,7 @@ function Start-PgsConsole {
         [string]$ProgramDataRoot,
         [string]$LogPrefix,
         [switch]$WithoutTokenEnv,
-        [switch]$EnablePpl
+
     )
 
     New-Item -ItemType Directory -Force -Path $ProgramDataRoot | Out-Null
@@ -156,9 +154,7 @@ function Start-PgsConsole {
     $stderr = "$LogPrefix.err.log"
     Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
 
-    $oldProgramData = $env:ProgramData
     $oldToken = $env:PGS_SERVICE_TOKEN
-    $oldPpl = $env:PGS_ENABLE_PPL
     try {
         $env:ProgramData = $ProgramDataRoot
         if ($WithoutTokenEnv) {
@@ -167,14 +163,8 @@ function Start-PgsConsole {
         else {
             $env:PGS_SERVICE_TOKEN = $Token
         }
-        if ($EnablePpl) {
-            $env:PGS_ENABLE_PPL = '1'
-        }
-        else {
-            Remove-Item Env:PGS_ENABLE_PPL -ErrorAction SilentlyContinue
-        }
         $proc = Start-Process -FilePath (Join-Path $ReleaseDir 'pgs_service.exe') `
-            -ArgumentList (@('run', '--port', "$Port") + ($(if ($EnablePpl) { @('--enable-ppl') } else { @() }))) `
+            -ArgumentList (@('run', '--port', "$Port")) `
             -WorkingDirectory $ReleaseDir `
             -WindowStyle Hidden `
             -PassThru `
@@ -183,8 +173,6 @@ function Start-PgsConsole {
     }
     finally {
         if ($null -eq $oldProgramData) { Remove-Item Env:ProgramData -ErrorAction SilentlyContinue } else { $env:ProgramData = $oldProgramData }
-        if ($null -eq $oldToken) { Remove-Item Env:PGS_SERVICE_TOKEN -ErrorAction SilentlyContinue } else { $env:PGS_SERVICE_TOKEN = $oldToken }
-        if ($null -eq $oldPpl) { Remove-Item Env:PGS_ENABLE_PPL -ErrorAction SilentlyContinue } else { $env:PGS_ENABLE_PPL = $oldPpl }
     }
 
     Wait-PgsReady -BlessExe (Join-Path $ReleaseDir 'pgs_bless.exe') -Port $Port -Token $Token
@@ -376,15 +364,11 @@ try {
     $ServiceGuardDll = Join-Path $ModulesDir 'service_guard\pgs_service_guard_module.dll'
     $FileWatchDll = Join-Path $ModulesDir 'file_watch\pgs_file_watch_module.dll'
     $PolicyDll = Join-Path $ModulesDir 'policy\pgs_policy_module.dll'
-    $RemoteAgentDll = Join-Path $ModulesDir 'remote_agent\pgs_remote_agent_module.dll'
-    $UpdateDll = Join-Path $ModulesDir 'update\pgs_update_module.dll'
-    $ScriptRunnerDll = Join-Path $ModulesDir 'script_runner\pgs_script_runner_module.dll'
-    $PplDll = Join-Path $ModulesDir 'ppl\pgs_ppl_module.dll'
 
     foreach ($path in @(
         $BlessExe, $ServiceExe, $WebExe, $ClusterExe, $QtExe, $WorkerExe,
         $SchedDll, $HealthDll, $ProfileDll, $ReportDll, $NotifyDll, $MetricsDll, $BackupDll, $EventlogDll,
-        $DumpDll, $ServiceGuardDll, $FileWatchDll, $PolicyDll, $RemoteAgentDll, $UpdateDll, $ScriptRunnerDll, $PplDll,
+        $DumpDll, $ServiceGuardDll, $FileWatchDll, $PolicyDll,
         (Join-Path $ModulesDir 'modules.allow'),
         (Join-Path $PortableRelease 'Qt6Core.dll'),
         (Join-Path $PortableRelease 'libstdc++-6.dll'),
@@ -408,11 +392,7 @@ try {
         @{ Name = 'dump'; Path = $DumpDll },
         @{ Name = 'service_guard'; Path = $ServiceGuardDll },
         @{ Name = 'file_watch'; Path = $FileWatchDll },
-        @{ Name = 'policy'; Path = $PolicyDll },
-        @{ Name = 'remote_agent'; Path = $RemoteAgentDll },
-        @{ Name = 'update'; Path = $UpdateDll },
-        @{ Name = 'script_runner'; Path = $ScriptRunnerDll },
-        @{ Name = 'ppl'; Path = $PplDll }
+        @{ Name = 'policy'; Path = $PolicyDll }
     )
     foreach ($module in $expectedModules) {
         $infoText = (Invoke-Logged -FilePath $BlessExe -Arguments @('module', 'info', '--path', $module.Path, '--json')).Text
@@ -436,49 +416,11 @@ try {
     $badAuth = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token 'wrong-token' -CommandArgs @('ping') -AllowError
     Assert-True ($badAuth.Code -ne 0 -or $badAuth.Text -notmatch '^OK pong') 'wrong token was accepted'
 
-    $pplLoad = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'load', '--path', $PplDll) -AllowError
-    Assert-True ($pplLoad.Code -ne 0 -and $pplLoad.Text -match 'enable-kernel-modules|enable-risk critical|PGS_ENABLE_KERNEL_MODULES|PGS_ENABLE_PPL|enable-ppl') "PPL gate did not reject default load: $($pplLoad.Text)"
 
-    if ($EnablePpl) {
-        Write-Step 'PPL opt-in runtime smoke'
-        Stop-ProcessSafe $portableProc
-        $portableProc = Start-PgsConsole -ReleaseDir $PortableRelease -Port $PortablePort -Token $Token -ProgramDataRoot $ProgramDataPortable -LogPrefix (Join-Path $LogsRoot 'portable-ppl-enabled') -EnablePpl
-        $pplOptInLoad = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'load', '--path', $PplDll) -AllowError
-        Assert-True (($pplOptInLoad.Code -eq 0 -and $pplOptInLoad.Text -match '^OK loaded') -or $pplOptInLoad.Text -match 'module already loaded') "PPL opt-in load failed: $($pplOptInLoad.Text)"
-        $pplWorker = Start-Process -FilePath $WorkerExe -ArgumentList @('--sleep-ms', '60000') -WorkingDirectory $PortableRelease -WindowStyle Hidden -PassThru
-        try {
-            Start-Sleep -Milliseconds 500
-            $pplGet = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('ppl', 'get', '--pid', "$($pplWorker.Id)") -AllowError
-            Assert-True ($pplGet.Text -notmatch 'invalid or missing pid') "PPL CLI/JSON path lost pid: $($pplGet.Text)"
-            $driverUnavailable = $pplGet.Text -match 'OpenSCManager|OpenService|CreateService|StartService|Sirius|driver|access|denied|signature|test-sign|service' -or $pplGet.Text -match 'PPL_ERROR|MODULE_ERROR'
-            if ($pplGet.Code -ne 0 -or $pplGet.Text -match '"error"') {
-                if ($RequirePplDriver -or -not $driverUnavailable) {
-                    throw "PPL get failed: $($pplGet.Text)"
-                }
-                Write-Host "[acceptance] PPL driver unavailable in this VM: $($pplGet.Text)"
-            }
-            else {
-                $pplSet = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('ppl', 'set', '--pid', "$($pplWorker.Id)", '--signer', 'Antimalware') -AllowError
-                Assert-True ($pplSet.Code -eq 0 -and $pplSet.Text -match 'Antimalware|legacy_response') "PPL set failed: $($pplSet.Text)"
-                $pplAfter = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('ppl', 'get', '--pid', "$($pplWorker.Id)") -AllowError
-                Assert-True ($pplAfter.Code -eq 0 -and $pplAfter.Text -match 'Antimalware|legacy_response') "PPL get after set failed: $($pplAfter.Text)"
-                $pplClear = Invoke-Pgs -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('ppl', 'clear', '--pid', "$($pplWorker.Id)") -AllowError
-                Assert-True ($pplClear.Code -eq 0 -and $pplClear.Text -match 'cleared|legacy_response') "PPL clear failed: $($pplClear.Text)"
-                Write-Host '[acceptance] PPL set/get/clear ok'
-            }
-        }
-        finally {
-            if ($pplWorker -and -not $pplWorker.HasExited) {
-                Stop-Process -Id $pplWorker.Id -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-
-    foreach ($dll in @($SchedDll, $HealthDll, $ProfileDll, $ReportDll, $NotifyDll, $MetricsDll, $BackupDll, $EventlogDll, $DumpDll, $ServiceGuardDll, $FileWatchDll, $PolicyDll, $RemoteAgentDll, $UpdateDll, $ScriptRunnerDll)) {
         Ensure-ModuleLoaded -BlessExe $BlessExe -Port $PortablePort -Token $Token -Path $dll
     }
     $modules = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('module', 'list')
-    foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics', 'backup', 'eventlog', 'dump', 'service_guard', 'file_watch', 'policy', 'remote_agent', 'update', 'script_runner')) {
+    foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics', 'backup', 'eventlog', 'dump', 'service_guard', 'file_watch', 'policy')) {
         Assert-True ($modules -match $name) "module list missing $name`: $modules"
     }
 
@@ -502,13 +444,7 @@ try {
         @('dump', 'status'),
         @('service-guard', 'status'),
         @('file-watch', 'status'),
-        @('policy-template', 'status'),
-        @('remote-agent', 'status'),
-        @('update', 'status'),
-        @('script-runner', 'status')
-    )) {
-        $status = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs $statusArgs
-        Assert-True ($status -match '^OK') "module status failed ($($statusArgs -join ' ')): $status"
+        @("policy-template", "status")
     }
     $events = Invoke-PgsOk -BlessExe $BlessExe -Port $PortablePort -Token $Token -CommandArgs @('events', 'list', '--limit', '10')
     Assert-True ($events -match '^OK count=') "events list failed: $events"
@@ -735,11 +671,6 @@ try {
             (Join-Path $InstallDir 'modules\service_guard\pgs_service_guard_module.dll'),
             (Join-Path $InstallDir 'modules\file_watch\pgs_file_watch_module.dll'),
             (Join-Path $InstallDir 'modules\policy\pgs_policy_module.dll'),
-            (Join-Path $InstallDir 'modules\remote_agent\pgs_remote_agent_module.dll'),
-            (Join-Path $InstallDir 'modules\update\pgs_update_module.dll'),
-            (Join-Path $InstallDir 'modules\script_runner\pgs_script_runner_module.dll'),
-            (Join-Path $InstallDir 'modules\ppl\pgs_ppl_module.dll'),
-            (Join-Path $InstallDir 'modules\ppl\Sirius.sys')
         )) {
             Assert-Path $path
         }

@@ -5,7 +5,7 @@
  * Split out of PGS.cpp so the core (PGS.cpp) keeps only lifecycle, monitor,
  * persistence and socket transport. This file owns the line-oriented command
  * dispatcher (processMessage), the per-command handlers (register / list /
- * get / policy / token / module / ppl), the auth envelope and the guard
+ * get / policy / token / module), the auth envelope and the guard
  * summary formatter. All functions are PGS members; definitions may live in
  * any TU that includes PGS.h.
  *
@@ -1056,11 +1056,6 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
         return handleModuleCommand(args);
     }
 
-    if (command == "ppl")
-    {
-        return handlePplCommand(args);
-    }
-
     if (command == "health-check")
     {
         return handleHealthCheckCommand(args);
@@ -1968,13 +1963,8 @@ std::string PGS::handleModuleCommand(const std::string &args)
             return "ERR module load restricted to modules directory";
         }
         const std::string allowKey = ModuleManager::allowlistKeyForPath(path);
-        if (!(m_kernelModulesEnabled || m_pplEnabled) && allowKey == "ppl")
-        {
-            return "ERR ppl module loading requires --enable-kernel-modules, --enable-risk critical, PGS_ENABLE_KERNEL_MODULES=1, or legacy --enable-ppl";
-        }
-        // Startup may skip directory scanning unless PPL/module loading is
-        // explicitly enabled, but a direct module load must still honor the
-        // same fail-closed allowlist gate.
+        // A direct module load must honor the same fail-closed allowlist gate
+        // as the startup scan.
         m_modules.ensureAllowlistLoaded(m_modulesDir);
 
         // P0-03: refuse (or warn in permissive mode) when modules tree ACL is insecure.
@@ -2124,8 +2114,7 @@ std::string PGS::handleModuleCommand(const std::string &args)
                ";modules_lock=" + (lockExists ? "1" : "0") +
                ";modules_staging=" + (stagingExists ? "1" : "0") +
                ";module_managers=" + (managerExists ? "1" : "0") +
-               ";permissive=" + (m_modulesPermissive.load() ? "1" : "0") +
-               ";kernel_enabled=" + ((m_kernelModulesEnabled || m_pplEnabled) ? "1" : "0");
+               ";permissive=" + (m_modulesPermissive.load() ? "1" : "0");
     }
 
     if (sub == "reload")
@@ -3298,64 +3287,6 @@ std::string PGS::handleGuardCommand(const std::string &args)
         return sub == "retry" ? retryQuarantinedGuard(guardId) : clearQuarantinedGuard(guardId);
     }
     return "ERR unknown guard subcommand";
-}
-
-
-// "ppl" convenience dispatcher. Routes to the ppl module so callers do not
-// need the module-call syntax. If the ppl module is not loaded, returns
-// "ERR ppl module not loaded" instead of a transport error.
-std::string PGS::handlePplCommand(const std::string &args)
-{
-    // Convenience wrapper that routes to the "ppl" module so callers do not
-    // need to remember the module-call syntax:
-    //   ppl set <pid> <signer>
-    //   ppl get <pid>
-    //   ppl clear <pid>
-    const auto spacePos = args.find(' ');
-    const std::string sub = (spacePos == std::string::npos) ? args : args.substr(0, spacePos);
-    const std::string rest = (spacePos == std::string::npos) ? std::string() : trim(args.substr(spacePos + 1));
-
-    if (sub == "set")
-    {
-        // "set <pid> <signer>"
-        const auto sp = rest.find(' ');
-        if (sp == std::string::npos)
-        {
-            return "ERR ppl set requires <pid> <signer>";
-        }
-        DWORD pid = 0;
-        if (!parsePid(trim(rest.substr(0, sp)), pid))
-        {
-            return "ERR invalid pid for ppl set";
-        }
-        const std::string signer = trim(rest.substr(sp + 1));
-        if (signer.empty())
-        {
-            return "ERR ppl set requires a signer";
-        }
-        const std::string params = "{\"pid\":" + std::to_string(pid) + ",\"signer\":\"" + jsonEscapeLocal(signer) + "\"}";
-        const std::string response = handleModuleCommand("invoke ppl ppl.set " + base64Encode(params));
-        recordEvent(response.rfind("ERR", 0) == 0 ? "ppl.set-failed" : "ppl.set",
-                    "pid=" + std::to_string(pid) + ";signer=" + signer +
-                    ";response_b64=" + base64Encode(response));
-        return response;
-    }
-
-    if (sub == "get" || sub == "clear")
-    {
-        DWORD pid = 0;
-        if (!parsePid(rest, pid))
-        {
-            return "ERR invalid pid for ppl " + sub;
-        }
-        const std::string params = "{\"pid\":" + std::to_string(pid) + "}";
-        const std::string response = handleModuleCommand("invoke ppl ppl." + sub + " " + base64Encode(params));
-        recordEvent(response.rfind("ERR", 0) == 0 ? ("ppl." + sub + "-failed") : ("ppl." + sub),
-                    "pid=" + std::to_string(pid) + ";response_b64=" + base64Encode(response));
-        return response;
-    }
-
-    return "ERR unknown ppl subcommand";
 }
 
 std::string PGS::handleHealthCheckCommand(const std::string &args)

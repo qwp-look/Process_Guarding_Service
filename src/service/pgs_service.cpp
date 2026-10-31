@@ -63,15 +63,10 @@ public:
         {
             m_pgs.setModulesEnabled(true);
         }
-        // Compatibility: --enable-ppl still works, but the new model names the
-        // real risk boundary as kernel/high-risk modules.
-        if (args.enablePpl || args.enableKernelModules ||
-            std::getenv("PGS_ENABLE_PPL") != nullptr ||
-            std::getenv("PGS_ENABLE_KERNEL_MODULES") != nullptr)
-        {
-            m_pgs.setKernelModulesEnabled(true);
-            m_pgs.setPplEnabled(true);
-        }
+        // Legacy --enable-ppl / --enable-kernel-modules / PGS_ENABLE_PPL /
+        // PGS_ENABLE_KERNEL_MODULES are accepted by parseArguments as deprecated
+        // aliases that enable module loading; the kernel/PPL module itself no
+        // longer exists.
 
         // v3: apply host-supplied policy overrides BEFORE initialize() so the
         // core honours them at startup. setModulesPermissive marks the choice
@@ -115,6 +110,8 @@ private:
         std::string command;
         bool hasToken{false};
         std::string token;
+        // Deprecated aliases (--enable-ppl / --enable-kernel-modules /
+        // --enable-risk critical) land here as plain module-loading opt-in.
         bool enablePpl{false};
         bool enableModules{false};
         bool enableKernelModules{false};
@@ -175,13 +172,11 @@ private:
         {
             binPath += L" --enable-modules";
         }
-        if (args.enablePpl)
+        // Deprecated --enable-ppl / --enable-kernel-modules flags are no longer
+        // written into the service binPath; enable-modules covers module load.
+        if (args.enablePpl || args.enableKernelModules)
         {
-            binPath += L" --enable-ppl";
-        }
-        if (args.enableKernelModules)
-        {
-            binPath += L" --enable-kernel-modules";
+            binPath += L" --enable-modules";
         }
         if (args.allowAllModules)
         {
@@ -448,9 +443,9 @@ private:
     {
         std::cout
             << "Usage: " << exe << " [install|uninstall|start|stop|status|run|--service] [options]\n"
-            << "Options: --token <value> --port <1-65535> --enable-modules --enable-kernel-modules\n"
-            << "         --enable-risk critical --enable-ppl (legacy alias) --allow-all-modules --no-allow-all-modules\n"
-            << "       Set PGS_SERVICE_TOKEN to provide the service token without exposing it on the command line.\n";
+            << "Options: --token <value> --port <1-65535> --enable-modules --allow-all-modules --no-allow-all-modules\n"
+            << "       Set PGS_SERVICE_TOKEN to provide the service token without exposing it on the command line.\n"
+            << "       Deprecated: --enable-ppl / --enable-kernel-modules / --enable-risk critical are accepted as aliases of --enable-modules.\n";
         return 1;
     }
 
@@ -699,6 +694,7 @@ private:
             if (arg == "--enable-ppl")
             {
                 out.enablePpl = true;
+                out.enableModules = true; // deprecated alias
                 continue;
             }
 
@@ -710,8 +706,7 @@ private:
 
             if (arg == "--enable-kernel-modules")
             {
-                out.enableModules = true;
-                out.enableKernelModules = true;
+                out.enableModules = true; // deprecated alias
                 continue;
             }
 
@@ -724,8 +719,7 @@ private:
                 const std::string level = argv[++i];
                 if (level == "critical" || level == "kernel")
                 {
-                    out.enableModules = true;
-                    out.enableKernelModules = true;
+                    out.enableModules = true; // deprecated alias
                     continue;
                 }
                 return false;

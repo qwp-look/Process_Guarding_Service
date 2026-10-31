@@ -13,7 +13,7 @@ set "BUILD_DIR=%PGS_BUILD_DIR%"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 echo [unit:core] Compiling tests\test_pgs_core.cpp...
-"%CXX%" -std=c++17 -Wall -Wextra -O2 -DPGS_ENABLE_TEST_HOOKS -Iinclude tests\test_pgs_core.cpp modules\sched\pgs_sched_module.cpp modules\ppl\pgs_ppl_module.cpp -o "%BUILD_DIR%\test_pgs_core.exe" -lbcrypt -ladvapi32
+"%CXX%" -std=c++17 -Wall -Wextra -O2 -DPGS_ENABLE_TEST_HOOKS -Iinclude tests\test_pgs_core.cpp modules\sched\pgs_sched_module.cpp -o "%BUILD_DIR%\test_pgs_core.exe" -lbcrypt -ladvapi32
 if errorlevel 1 (
     echo Failed to compile core unit tests
     popd

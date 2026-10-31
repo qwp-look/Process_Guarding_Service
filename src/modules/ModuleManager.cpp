@@ -102,7 +102,6 @@ namespace ProcessGuard
             if (verb == "group") return hasCapability(caps, "guard.group");
             if (verb == "restart-hook") return hasCapability(caps, "guard.hook");
             if (verb == "module") return hasCapability(caps, "module.invoke");
-            if (verb == "ppl") return hasCapability(caps, "driver.kernel");
             return false;
         }
 

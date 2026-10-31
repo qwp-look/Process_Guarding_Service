@@ -5,7 +5,7 @@
  * @section role Role
  * ModuleManager discovers, loads, unloads, and dispatches calls to module
  * DLLs that implement the PGModule C ABI (see PGModule.h). It is owned by the
- * PGS service core (PGS::m_modules) and used by the "module" / "ppl"
+ * PGS service core (PGS::m_modules) and used by the "module"
  * management commands.
  *
  * @section threading Threading
@@ -68,14 +68,14 @@ namespace ProcessGuard
          * Load a single module DLL by absolute/relative path. Returns true on
          * success. On failure returns false and sets err to a human-readable
          * reason (e.g. "LoadLibrary failed, error=126", "missing required PG_
-         * exports", "module already loaded: ppl", "PG_Init failed, rc=1").
+         * exports", "module already loaded: sched", "PG_Init failed, rc=1").
          */
         bool load(const std::string &path, std::string &err);
 
         /*
          * Ensure the module allowlist from <dir>\modules.allow has been read.
          * Explicit module load commands use this because normal startup may
-         * skip directory scanning when PPL/module loading is not opted in.
+         * skip directory scanning when module loading is not opted in.
          */
         void ensureAllowlistLoaded(const std::string &dir);
 
@@ -85,7 +85,7 @@ namespace ProcessGuard
 
         /* Optional advisory metadata parsed from PG_GetManifest. The manifest
          * uses the same UTF-8 "key=value;..." style as module requests:
-         *   name=ppl;version=1.0.0;abi=2;summary=...;capabilities=a,b,c
+         *   name=sched;version=1.0.0;abi=2;summary=...;capabilities=a,b,c
          * Capabilities are groundwork for future host-enforced policy; current
          * loading only validates name/ABI consistency when present. */
         struct ModuleManifest

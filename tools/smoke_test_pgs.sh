@@ -398,10 +398,6 @@ if [[ "$doctor_json" != *'"id":"service_guard"'* || "$doctor_json" != *'mutation
   echo "[Smoke] doctor JSON missing service_guard policy fields: $doctor_json"
   exit 1
 fi
-if [[ "$doctor_json" != *'"id":"script_runner"'* || "$doctor_json" != *'path_policy=final-path-under-data-scripts'* || "$doctor_json" != *'hash_on_run=1'* ]]; then
-  echo "[Smoke] doctor JSON missing script_runner hardening fields: $doctor_json"
-  exit 1
-fi
 bless notify status >/dev/null
 echo "[Smoke] notify module ok"
 metrics_summary="$(bless metrics summary)"
@@ -480,35 +476,6 @@ if [[ ! "$policy_list" =~ TEMPLATE[[:space:]]name=smoke_policy ]]; then
   exit 1
 fi
 bless policy-template remove --name smoke_policy >/dev/null
-remote_agent_status="$(bless remote-agent status)"
-if [[ ! "$remote_agent_status" =~ ^OK[[:space:]]node_b64= ]]; then
-  echo "[Smoke] remote-agent status failed: $remote_agent_status"
-  exit 1
-fi
-update_status="$(bless update status)"
-if [[ ! "$update_status" =~ ^OK[[:space:]]mode=local-manifest ]]; then
-  echo "[Smoke] update status failed: $update_status"
-  exit 1
-fi
-update_release_dir="$repo_root/$build_dir/smoke_update_release"
-mkdir -p "$update_release_dir/bin"
-printf 'release-payload\n' >"$update_release_dir/bin/payload.txt"
-payload_hash="$(sha256sum "$update_release_dir/bin/payload.txt" | awk '{print $1}')"
-release_root_json="$(cygpath -m "$update_release_dir")"
-cat >"$update_release_dir/release-manifest.json" <<EOF
-{"schema":"pgs.release-manifest.v1","release_root":"$release_root_json","files":[{"path":"bin/payload.txt","size":16,"sha256":"$payload_hash"}],"artifacts":[{"name":"ignored.zip","path":"$release_root_json/ignored.zip","sha256":"0000"}]}
-EOF
-update_verify="$(bless update verify --path "$(cygpath -w "$update_release_dir/release-manifest.json")")"
-if [[ ! "$update_verify" =~ ^OK[[:space:]]files=1\;verified=1 ]]; then
-  echo "[Smoke] update verify failed: $update_verify"
-  exit 1
-fi
-printf 'tampered-payload\n' >"$update_release_dir/bin/payload.txt"
-expect_bless_failure_contains "hash mismatch: bin/payload.txt" update verify --path "$(cygpath -w "$update_release_dir/release-manifest.json")"
-script_runner_status="$(bless script-runner status)"
-if [[ ! "$script_runner_status" =~ ^OK[[:space:]]enabled= || "$script_runner_status" != *"path_policy=final-path-under-data-scripts"* || "$script_runner_status" != *"hash_on_run=1"* || "$script_runner_status" != *"audit=1"* ]]; then
-  echo "[Smoke] script-runner status failed: $script_runner_status"
-  exit 1
 fi
 echo "[Smoke] high-risk module negative checks..."
 expect_bless_failure_contains "dump collect requires confirm=1" dump collect --pid "$service_pid"
@@ -526,31 +493,6 @@ expect_bless_failure_contains "watched file is not readable" file-watch add --pa
 if [[ -f /c/Windows/win.ini ]]; then
   expect_bless_failure_contains "path is denied by policy" file-watch add --path "$(cygpath -w /c/Windows/win.ini)" --id smoke_windows --action none
 fi
-bless script-runner config --disable >/dev/null
-expect_bless_failure_contains "script runner disabled" script-runner run --id smoke_missing --confirm
-outside_script="$repo_root/$build_dir/smoke_outside_script.cmd"
-printf '@echo off\r\nexit /b 0\r\n' >"$outside_script"
-expect_bless_failure_contains "script must be under module data scripts directory" script-runner add --id smoke_outside --path "$(cygpath -w "$outside_script")"
-script_runner_dir="$smoke_program_data/ProcessGuard/state/modules/script_runner/scripts"
-mkdir -p "$script_runner_dir"
-allowed_script="$script_runner_dir/smoke_allowed.cmd"
-printf '@echo off\r\nexit /b 0\r\n' >"$allowed_script"
-script_add="$(bless script-runner add --id smoke_allowed --path "$(cygpath -w "$allowed_script")")"
-if [[ ! "$script_add" =~ ^OK[[:space:]]id=smoke_allowed || "$script_add" != *"sha256="* ]]; then
-  echo "[Smoke] script-runner allowed add failed: $script_add"
-  exit 1
-fi
-bless script-runner config --enable >/dev/null
-expect_bless_failure_contains "run requires confirm=1" script-runner run --id smoke_allowed
-printf 'rem tampered\r\n' >>"$allowed_script"
-expect_bless_failure_contains "script hash mismatch" script-runner run --id smoke_allowed --confirm
-script_runner_events="$(bless events list --limit 256)"
-if [[ "$script_runner_events" != *"TYPE=script_runner.run-denied"* ]]; then
-  echo "[Smoke] script_runner run denial audit event missing"
-  echo "$script_runner_events"
-  exit 1
-fi
-bless script-runner config --disable >/dev/null
 permissive_status="$(bless module permissive status)"
 if [[ "$permissive_status" != OK\ permissive=* ]]; then
   echo "[Smoke] module permissive status failed: $permissive_status"

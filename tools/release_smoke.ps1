@@ -83,7 +83,6 @@ if (-not (Test-Path -LiteralPath $worker)) {
     $worker = Join-Path $Release 'smoke_worker.exe'
 }
 $schedPath = Join-Path $Release 'modules\sched\pgs_sched_module.dll'
-$pplPath = Join-Path $Release 'modules\ppl\pgs_ppl_module.dll'
 $healthPath = Join-Path $Release 'modules\health\pgs_health_module.dll'
 $profilePath = Join-Path $Release 'modules\profile\pgs_profile_module.dll'
 $profileDb = Join-Path $Release 'modules\profile\pgs_profiles.db'
@@ -95,11 +94,8 @@ $dumpPath = Join-Path $Release 'modules\dump\pgs_dump_module.dll'
 $serviceGuardPath = Join-Path $Release 'modules\service_guard\pgs_service_guard_module.dll'
 $fileWatchPath = Join-Path $Release 'modules\file_watch\pgs_file_watch_module.dll'
 $policyPath = Join-Path $Release 'modules\policy\pgs_policy_module.dll'
-$remoteAgentPath = Join-Path $Release 'modules\remote_agent\pgs_remote_agent_module.dll'
-$updatePath = Join-Path $Release 'modules\update\pgs_update_module.dll'
-$scriptRunnerPath = Join-Path $Release 'modules\script_runner\pgs_script_runner_module.dll'
 
-foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $pplPath, $healthPath, $profilePath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath, $remoteAgentPath, $updatePath, $scriptRunnerPath)) {
+foreach ($required in @($BlessExe, $serviceExe, $worker, $schedPath, $healthPath, $profilePath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "required release artifact missing: $required"
     }
@@ -119,7 +115,6 @@ $serviceErr = Join-Path (Split-Path $ProgramDataRoot -Parent) 'release_smoke_ser
 
 $oldProgramData = $env:ProgramData
 $oldServiceToken = $env:PGS_SERVICE_TOKEN
-$oldEnablePpl = $env:PGS_ENABLE_PPL
 $serviceProc = $null
 $guardPid = $null
 
@@ -129,7 +124,6 @@ try {
 
     $env:ProgramData = $ProgramDataRoot
     $env:PGS_SERVICE_TOKEN = $Token
-    Remove-Item Env:PGS_ENABLE_PPL -ErrorAction SilentlyContinue
     $serviceProc = Start-Process -FilePath $serviceExe `
         -ArgumentList @('run', '--port', "$Port") `
         -WorkingDirectory $Release `
@@ -162,12 +156,6 @@ try {
     }
     Write-Host '[release-smoke] sched load ok'
 
-    $pplLoad = Invoke-Pgs -CommandArgs @('module', 'load', '--path', $pplPath) -AllowError
-    if ($pplLoad.Code -eq 0 -or $pplLoad.Text -notmatch 'enable-kernel-modules|enable-risk critical|PGS_ENABLE_KERNEL_MODULES|PGS_ENABLE_PPL|enable-ppl') {
-        throw "unexpected PPL gate response code=$($pplLoad.Code): $($pplLoad.Text)"
-    }
-    Write-Host '[release-smoke] ppl gate ok'
-
     $moduleList = Invoke-PgsOk @('module', 'list')
     if ($moduleList -notmatch 'sched') {
         throw "sched module missing after load: $moduleList"
@@ -179,7 +167,7 @@ try {
     }
     Write-Host '[release-smoke] sched call ok'
 
-    foreach ($modulePath in @($healthPath, $profilePath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath, $remoteAgentPath, $updatePath, $scriptRunnerPath)) {
+    foreach ($modulePath in @($healthPath, $profilePath, $reportPath, $metricsPath, $backupPath, $eventlogPath, $dumpPath, $serviceGuardPath, $fileWatchPath, $policyPath)) {
         $load = Invoke-PgsOk @('module', 'load', '--path', $modulePath)
         if ($load -notmatch '^OK loaded') {
             throw "unexpected module load response for ${modulePath}: $load"
@@ -219,10 +207,7 @@ try {
         @('dump', 'status'),
         @('service-guard', 'status'),
         @('file-watch', 'status'),
-        @('policy-template', 'status'),
-        @('remote-agent', 'status'),
-        @('update', 'status'),
-        @('script-runner', 'status')
+        @('policy-template', 'status')
     )) {
         $status = Invoke-PgsOk $statusCheck
         if ($status -notmatch '^OK') {
@@ -280,9 +265,4 @@ finally {
         $env:PGS_SERVICE_TOKEN = $oldServiceToken
     }
 
-    if ($null -eq $oldEnablePpl) {
-        Remove-Item Env:PGS_ENABLE_PPL -ErrorAction SilentlyContinue
-    } else {
-        $env:PGS_ENABLE_PPL = $oldEnablePpl
-    }
 }

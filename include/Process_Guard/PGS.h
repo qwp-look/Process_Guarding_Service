@@ -199,11 +199,8 @@ namespace ProcessGuard
         bool start();
         void stop();
         bool isRunning() const;
-        // Compatibility opt-in toggle for PPL/module loading (default off).
-        // New code should use setModulesEnabled()/setKernelModulesEnabled().
-        void setPplEnabled(bool enabled) { m_pplEnabled = enabled; if (enabled) m_modulesEnabled = true; }
+        // Module loading opt-in (default off). Enable via --enable-modules.
         void setModulesEnabled(bool enabled) { m_modulesEnabled = enabled; }
-        void setKernelModulesEnabled(bool enabled) { m_kernelModulesEnabled = enabled; if (enabled) m_modulesEnabled = true; }
         // Override the listen port (default kServerPort); must be set before
         // initialize()/start(). Honoured by createListenSocket().
         void setServerPort(std::uint16_t port) { m_serverPort = port ? port : kServerPort; m_serverPortUserSet = true; }
@@ -357,9 +354,7 @@ namespace ProcessGuard
         // Modules: loaded DLL plugins discovered under m_modulesDir.
         ModuleManager m_modules;
         std::string m_modulesDir;
-        bool m_pplEnabled{false}; // legacy alias for kernel/PPL module opt-in
         bool m_modulesEnabled{false};
-        bool m_kernelModulesEnabled{false};
         std::string m_dataDirCache;
         // When false (default), ModuleManager refuses any DLL not listed in
         // <exe>\modules\modules.allow. When true, the legacy permissive load-all
@@ -435,8 +430,6 @@ namespace ProcessGuard
         std::string handleArtifactCleanupCommand(const std::string &args);
         std::string handleArtifactStatusCommand(const std::string &args);
         std::string handleArtifactPolicyCommand(const std::string &args);
-        // "ppl set|get|clear" convenience wrapper that routes to the ppl module.
-        std::string handlePplCommand(const std::string &args);
         // Phase 8 guard metadata and batch-control commands.
         std::string handleHealthCheckCommand(const std::string &args);
         std::string handleGroupCommand(const std::string &args);

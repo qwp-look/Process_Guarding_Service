@@ -4,8 +4,8 @@
  *
  * Created per module folder found under the modules directory. Renders the
  * folder's module.html in a QTextBrowser and exposes generic
- * `module call --name <folder>` plus, for the ppl module, set/get/clear
- * convenience buttons. All commands run through pgs_bless (which talks to the
+ * `module call --name <folder>` plus convenience buttons for the bundled
+ * modules. All commands run through pgs_bless (which talks to the
  * running pgs_service).
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -45,7 +45,6 @@ private:
     void appendOutput(const QString &text);
     QString trUi(const QString &en, const QString &zh) const;
     QString defaultMethod() const;
-    QString pidArg() const;
     QString textOf(QLineEdit *edit) const;
 
     const QString m_folder;
@@ -58,20 +57,11 @@ private:
     QTextEdit *m_output = nullptr;
     QLineEdit *m_methodEdit = nullptr;
     QLineEdit *m_requestEdit = nullptr;
-    QLineEdit *m_pidEdit = nullptr;
-    QComboBox *m_signerCombo = nullptr;
-    QLabel *m_riskLabel = nullptr;
-    QLabel *m_lblPid = nullptr;
-    QLabel *m_lblSigner = nullptr;
     QLabel *m_lblMethod = nullptr;
     QLabel *m_lblRequest = nullptr;
     QPushButton *m_btnReload = nullptr;
     QPushButton *m_btnList = nullptr;
     QPushButton *m_btnCall = nullptr;
-    QPushButton *m_btnPplSet = nullptr;
-    QPushButton *m_btnPplGet = nullptr;
-    QPushButton *m_btnPplClear = nullptr;
-    QGroupBox *m_pplBox = nullptr;
     QGroupBox *m_schedBox = nullptr;
     QComboBox *m_schedTypeCombo = nullptr;
     QLineEdit *m_schedExprEdit = nullptr;
@@ -134,7 +124,6 @@ private:
     QComboBox *m_shortcutStateCombo = nullptr;
     QComboBox *m_shortcutActionCombo = nullptr;
     QCheckBox *m_shortcutConfirmCheck = nullptr;
-    QCheckBox *m_shortcutEnableCheck = nullptr;
     QCheckBox *m_shortcutBackoffCheck = nullptr;
     QCheckBox *m_shortcutKillCheck = nullptr;
     QPushButton *m_btnShortcutStatus = nullptr;

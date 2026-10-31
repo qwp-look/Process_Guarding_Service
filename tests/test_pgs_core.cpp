@@ -13,7 +13,7 @@
  * Build (MSYS2 MinGW64):
  *   g++ -std=c++17 -DPGS_ENABLE_TEST_HOOKS -Iinclude \
  *       tests/test_pgs_core.cpp modules/sched/pgs_sched_module.cpp \
- *       modules/ppl/pgs_ppl_module.cpp -lbcrypt \
+ *       -lbcrypt \
  *       -o build/test_pgs_core.exe
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -39,12 +39,6 @@ bool parseIntervalSecondsForTest(const std::string &s, long long &out);
 long long intervalSecondsLimitForTest();
 } // namespace pgs_sched_test
 
-namespace pgs_ppl_test
-{
-bool parsePidForTest(const std::string &text, ULONG &out);
-bool parseSignerForTest(const std::string &text, UCHAR &out);
-const char *signerNameForTest(UCHAR value);
-} // namespace pgs_ppl_test
 #endif
 
 namespace
@@ -137,28 +131,6 @@ void test_sched_module_parsers()
     CHECK(!pgs_sched_test::parseIntervalSecondsForTest("0", interval));
     CHECK(!pgs_sched_test::parseIntervalSecondsForTest(std::to_string(limit + 1), interval));
     CHECK(!pgs_sched_test::parseIntervalSecondsForTest("9999999999999999", interval));
-}
-
-void test_ppl_module_parsers()
-{
-    ULONG pid = 0;
-    CHECK(pgs_ppl_test::parsePidForTest("1", pid) && pid == 1);
-    CHECK(pgs_ppl_test::parsePidForTest("4294967295", pid) && pid == 0xFFFFFFFFul);
-    CHECK(!pgs_ppl_test::parsePidForTest("0", pid));
-    CHECK(!pgs_ppl_test::parsePidForTest("4294967296", pid));
-    CHECK(!pgs_ppl_test::parsePidForTest("18446744073709551615", pid));
-    CHECK(!pgs_ppl_test::parsePidForTest("abc", pid));
-
-    UCHAR signer = 0;
-    CHECK(pgs_ppl_test::parseSignerForTest("Antimalware", signer));
-    CHECK_EQ(std::string(pgs_ppl_test::signerNameForTest(signer)), std::string("Antimalware"));
-    CHECK(pgs_ppl_test::parseSignerForTest("Codegen", signer));
-    CHECK_EQ(std::string(pgs_ppl_test::signerNameForTest(signer)), std::string("CodeGen"));
-    CHECK(pgs_ppl_test::parseSignerForTest("winsystem", signer));
-    CHECK_EQ(std::string(pgs_ppl_test::signerNameForTest(signer)), std::string("WinSystem"));
-    CHECK(!pgs_ppl_test::parseSignerForTest("0", signer));
-    CHECK(!pgs_ppl_test::parseSignerForTest("255", signer));
-    CHECK(!pgs_ppl_test::parseSignerForTest("42", signer));
 }
 #endif
 
@@ -720,7 +692,6 @@ int main()
     test_parse_and_labels();
 #ifdef PGS_ENABLE_TEST_HOOKS
     test_sched_module_parsers();
-    test_ppl_module_parsers();
 #endif
     test_split_base64();
     test_sha256();

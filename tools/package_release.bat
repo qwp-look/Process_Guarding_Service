@@ -6,13 +6,13 @@ pushd "%~dp0.."
 REM ===========================================================================
 REM  package_release.bat - One-shot, self-contained release packaging for PGS.
 REM
-REM  Builds the PGS core+CLI+PPL module, the Qt admin GUI, then assembles a
+REM  Builds the PGS core+CLI+modules, the Qt admin GUI, then assembles a
 REM  freshly deleted release/ folder that runs on a CLEAN machine (no MSYS2 in
 REM  PATH). Do not publish an existing release/ tree without rerunning this
 REM  script; it is rebuilt from current build outputs each time:
 REM    - pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe + examples
 REM    - pgs_admin_web.exe + pgs_cluster_web.exe (browser consoles)
-REM    - modules/{ppl,sched,health,profile,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy,remote_agent,update,script_runner}/ payloads
+REM    - modules/{sched,health,profile,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy}/ payloads
 REM    - Qt6 DLLs + plugins via windeployqt6
 REM    - MinGW third-party runtime DLLs that Qt6Core/Qt6Gui transitively depend
 REM      on (windeployqt does NOT deploy these MSYS2 libs; without them the Qt
@@ -37,7 +37,7 @@ if not exist "%CXX%" ( echo MinGW g++ not found: %CXX% & popd & exit /b 1 )
 if not exist "%CMAKE%" ( echo CMake not found: %CMAKE% & popd & exit /b 1 )
 if not exist "%MINGW%\windeployqt6.exe" ( echo windeployqt6 not found: %MINGW%\windeployqt6.exe & popd & exit /b 1 )
 
-echo [1/6] Build PGS core + CLI + PPL module (build_pgs.bat)...
+echo [1/6] Build PGS core + CLI + modules (build_pgs.bat)...
 call tools\build_pgs.bat
 if errorlevel 1 ( echo ERROR: build_pgs.bat failed & popd & exit /b 1 )
 
@@ -76,7 +76,7 @@ if exist "%RELEASE%" (
         exit /b 1
     )
 )
-mkdir "%RELEASE%" "%RELEASE%\modules\ppl" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\modules\notify" "%RELEASE%\modules\metrics" "%RELEASE%\modules\backup" "%RELEASE%\modules\eventlog" "%RELEASE%\modules\dump" "%RELEASE%\modules\service_guard" "%RELEASE%\modules\file_watch" "%RELEASE%\modules\policy" "%RELEASE%\modules\remote_agent" "%RELEASE%\modules\update" "%RELEASE%\modules\script_runner" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
+mkdir "%RELEASE%" "%RELEASE%\modules\sched" "%RELEASE%\modules\health" "%RELEASE%\modules\profile" "%RELEASE%\modules\report" "%RELEASE%\modules\notify" "%RELEASE%\modules\metrics" "%RELEASE%\modules\backup" "%RELEASE%\modules\eventlog" "%RELEASE%\modules\dump" "%RELEASE%\modules\service_guard" "%RELEASE%\modules\file_watch" "%RELEASE%\modules\policy" "%RELEASE%\module_managers\official" "%RELEASE%\modules_staging" "%RELEASE%\examples" "%RELEASE%\docs" >nul 2>&1
 copy /Y "%BUILD%\pgs_service.exe"     "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_bless.exe"       "%RELEASE%\" >nul
 copy /Y "%BUILD%\pgs_admin_qt\pgs_admin_qt.exe" "%RELEASE%\" >nul
@@ -89,11 +89,6 @@ REM MinGW runtime DLLs the example exes link (they live in examples\, not the re
 copy /Y "%MINGW%\libgcc_s_seh-1.dll" "%RELEASE%\examples\" >nul
 copy /Y "%MINGW%\libstdc++-6.dll"   "%RELEASE%\examples\" >nul
 copy /Y "%MINGW%\libwinpthread-1.dll" "%RELEASE%\examples\" >nul
-copy /Y "%BUILD%\modules\ppl\pgs_ppl_module.dll" "%RELEASE%\modules\ppl\" >nul
-copy /Y "%BUILD%\modules\ppl\Sirius.sys"         "%RELEASE%\modules\ppl\" >nul
-copy /Y "%BUILD%\modules\ppl\module.html"        "%RELEASE%\modules\ppl\" >nul
-copy /Y "%BUILD%\modules\ppl\module.manifest"     "%RELEASE%\modules\ppl\" >nul
-copy /Y "%BUILD%\modules\ppl\module.manifest.json" "%RELEASE%\modules\ppl\" >nul
 copy /Y "%BUILD%\modules\sched\pgs_sched_module.dll" "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.html"          "%RELEASE%\modules\sched\" >nul
 copy /Y "%BUILD%\modules\sched\module.manifest"      "%RELEASE%\modules\sched\" >nul
@@ -126,7 +121,7 @@ copy /Y "%BUILD%\modules\eventlog\pgs_eventlog_module.dll" "%RELEASE%\modules\ev
 copy /Y "%BUILD%\modules\eventlog\module.html"           "%RELEASE%\modules\eventlog\" >nul
 copy /Y "%BUILD%\modules\eventlog\module.manifest"       "%RELEASE%\modules\eventlog\" >nul
 copy /Y "%BUILD%\modules\eventlog\module.manifest.json" "%RELEASE%\modules\eventlog\" >nul
-for %%M in (dump service_guard file_watch policy remote_agent update script_runner) do (
+for %%M in (dump service_guard file_watch policy) do (
   copy /Y "%BUILD%\modules\%%M\pgs_%%M_module.dll" "%RELEASE%\modules\%%M\" >nul
   copy /Y "%BUILD%\modules\%%M\module.html" "%RELEASE%\modules\%%M\" >nul
   copy /Y "%BUILD%\modules\%%M\module.manifest" "%RELEASE%\modules\%%M\" >nul
@@ -155,7 +150,6 @@ xcopy /E /I /Y "docs\developer" "%RELEASE%\docs\developer" >nul
 if not exist "%RELEASE%\docs\schemas" mkdir "%RELEASE%\docs\schemas" >nul 2>&1
 copy /Y "docs\schemas\*.json"          "%RELEASE%\docs\schemas\" >nul
 copy /Y "LICENSE"                     "%RELEASE%\" >nul
-copy /Y "LICENSE.ThirdParty.StarlightGUI.txt" "%RELEASE%\" >nul
 copy /Y "NOTICE"                      "%RELEASE%\" >nul
 copy /Y "README.md"                   "%RELEASE%\" >nul
 
@@ -189,11 +183,6 @@ for %%F in (
   pgs_cluster_web.exe
   modules\modules.allow
   modules\modules.lock
-  modules\ppl\pgs_ppl_module.dll
-  modules\ppl\Sirius.sys
-  modules\ppl\module.html
-  modules\ppl\module.manifest
-  modules\ppl\module.manifest.json
   modules\sched\pgs_sched_module.dll
   modules\sched\module.html
   modules\sched\module.manifest
@@ -242,18 +231,6 @@ for %%F in (
   modules\policy\module.html
   modules\policy\module.manifest
   modules\policy\module.manifest.json
-  modules\remote_agent\pgs_remote_agent_module.dll
-  modules\remote_agent\module.html
-  modules\remote_agent\module.manifest
-  modules\remote_agent\module.manifest.json
-  modules\update\pgs_update_module.dll
-  modules\update\module.html
-  modules\update\module.manifest
-  modules\update\module.manifest.json
-  modules\script_runner\pgs_script_runner_module.dll
-  modules\script_runner\module.html
-  modules\script_runner\module.manifest
-  modules\script_runner\module.manifest.json
   module_managers\official\manager.manifest.json
   modules_staging\README.md
   examples\smoke_worker.exe
@@ -299,9 +276,8 @@ for %%F in (
 
 echo [7/7] Done. Release layout:
 echo   %RELEASE%\pgs_service.exe / pgs_bless.exe / pgs_admin_qt.exe / pgs_admin_web.exe / pgs_cluster_web.exe
-echo   %RELEASE%\modules\ppl\{pgs_ppl_module.dll, Sirius.sys, module.html, module.manifest}
 echo   %RELEASE%\modules\sched\{pgs_sched_module.dll, module.html, module.manifest}
-echo   %RELEASE%\modules\{health,profile,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy,remote_agent,update,script_runner}\{module dll, module.html, module.manifest}
+echo   %RELEASE%\modules\{health,profile,report,notify,metrics,backup,eventlog,dump,service_guard,file_watch,policy}\{module dll, module.html, module.manifest}
 echo   Qt6 + MinGW runtime DLLs (self-contained)
 
 popd

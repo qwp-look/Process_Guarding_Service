@@ -12,7 +12,7 @@ BUILD_DIR="${PGS_BUILD_DIR:-build}"
 # v3: NTDDI_VERSION >= Win8 enables MinGW's IApplicationActivationManager
 # (used by restartAppGuard for WindowsApps activation), no WinRT headers needed.
 CXXFLAGS="-std=c++17 -Wall -Wextra -O2 -Iinclude -DNTDDI_VERSION=0x06020000"
-TOTAL_STEPS=26
+TOTAL_STEPS=22
 mkdir -p "$BUILD_DIR" "$BUILD_DIR/tmp"
 export TMPDIR="${TMPDIR:-$PWD/$BUILD_DIR/tmp}"
 export TEMP="${TEMP:-$TMPDIR}"
@@ -53,7 +53,7 @@ write_modules_lock() {
   {
     echo '{"version":1,"generated_at":"build","modules":['
     local first=1
-    local names=(sched health profile report notify metrics backup eventlog dump service_guard file_watch policy remote_agent update script_runner ppl)
+    local names=(sched health profile report notify metrics backup eventlog dump service_guard file_watch policy)
     for name in "${names[@]}"; do
       local dll="$BUILD_DIR/modules/$name/pgs_${name}_module.dll"
       local hash
@@ -106,22 +106,6 @@ write_modules_lock() {
         policy)
           risk="medium"
           caps='["policy.template","guard.policy"]'
-          ;;
-        remote_agent)
-          risk="medium"
-          caps='["remote_agent.status","guard.list","health.stats"]'
-          ;;
-        update)
-          risk="medium"
-          caps='["update.verify"]'
-          ;;
-        script_runner)
-          risk="high"
-          caps='["script.run","event.emit"]'
-          ;;
-        ppl)
-          risk="critical"
-          caps='["driver.kernel","driver.sirius.load","process.ppl.set","process.ppl.clear","ppl.set","ppl.get","ppl.clear"]'
           ;;
       esac
       printf '{"name":"%s","version":"%s","sha256":"%s","publisher":"PGS bundled","source":"bundled","capabilities":%s,"risk":"%s","trustedAt":"build","signature_policy":"hash","require_signed":false}' "$name" "$version" "$hash" "$caps" "$risk"
@@ -180,20 +164,11 @@ build_module 19 dump pgs_dump_module "modules/dump/pgs_dump_module.cpp" "-ldbghe
 build_module 20 service_guard pgs_service_guard_module "modules/service_guard/pgs_service_guard_module.cpp" "-ladvapi32"
 build_module 21 file_watch pgs_file_watch_module "modules/file_watch/pgs_file_watch_module.cpp" "-lbcrypt"
 build_module 22 policy pgs_policy_module "modules/policy/pgs_policy_module.cpp"
-build_module 23 remote_agent pgs_remote_agent_module "modules/remote_agent/pgs_remote_agent_module.cpp"
-build_module 24 update pgs_update_module "modules/update/pgs_update_module.cpp" "-lbcrypt"
-build_module 25 script_runner pgs_script_runner_module "modules/script_runner/pgs_script_runner_module.cpp" "-lbcrypt"
 
-# PPL module: built as a separate shared DLL. Per-folder layout
-# build/modules/<name>/<name>.dll + module.html + assets. The folder name MUST
-# match the module PG_GetName() return value so the Qt UI and
-# `module call --name <folder>` resolve correctly.
-build_module 26 ppl pgs_ppl_module "modules/ppl/pgs_ppl_module.cpp" "-ladvapi32"
-cp -f modules/ppl/Sirius.sys "$BUILD_DIR/modules/ppl/Sirius.sys"
 copy_mingw_runtime "$BUILD_DIR"
 
 # Default module allowlist: approve the bundled modules.
-printf "ppl\nsched\nhealth\nprofile\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\nremote_agent\nupdate\nscript_runner\n" > "$BUILD_DIR/modules/modules.allow"
+printf "sched\nhealth\nprofile\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\n" > "$BUILD_DIR/modules/modules.allow"
 write_modules_lock
 
 echo
@@ -203,8 +178,6 @@ echo "- $BUILD_DIR/guard_example.exe"
 echo "- $BUILD_DIR/quick_start.exe"
 echo "- $BUILD_DIR/smoke_worker.exe"
 echo "- $BUILD_DIR/pgs_bless.exe"
-for name in sched health profile report notify metrics backup eventlog dump service_guard file_watch policy remote_agent update script_runner ppl; do
+for name in sched health profile report notify metrics backup eventlog dump service_guard file_watch policy; do
   echo "- $BUILD_DIR/modules/$name/pgs_${name}_module.dll"
 done
-echo "- $BUILD_DIR/modules/ppl/Sirius.sys"
-echo "- $BUILD_DIR/modules/ppl/module.html"

@@ -45,14 +45,10 @@ $capabilities = @{
     service_guard = @('service.query', 'service.start', 'service.stop')
     file_watch = @('file.watch', 'event.emit')
     policy = @('policy.template', 'guard.policy')
-    remote_agent = @('remote_agent.status', 'guard.list', 'health.stats')
-    update = @('update.verify')
-    script_runner = @('script.run')
-    ppl = @('driver.kernel', 'driver.sirius.load', 'process.ppl.set', 'process.ppl.clear', 'ppl.set', 'ppl.get', 'ppl.clear')
 }
 
 $items = @()
-foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics', 'backup', 'eventlog', 'dump', 'service_guard', 'file_watch', 'policy', 'remote_agent', 'update', 'script_runner', 'ppl')) {
+foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics', 'backup', 'eventlog', 'dump', 'service_guard', 'file_watch', 'policy')) {
     $dll = Join-Path $ModulesRoot (Join-Path $name ("pgs_{0}_module.dll" -f $name))
     if (-not [System.IO.File]::Exists($dll)) {
         throw "required module DLL missing: $dll"
@@ -60,16 +56,10 @@ foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics',
 
     $risk = 'low'
     $version = '1.0.0'
-    if ($name -eq 'ppl') {
-        $risk = 'critical'
-    }
-    elseif ($name -eq 'sched' -or $name -eq 'profile') {
+    if ($name -eq 'sched' -or $name -eq 'profile' -or $name -eq 'service_guard' -or $name -eq 'file_watch' -or $name -eq 'policy') {
         $risk = 'medium'
     }
-    elseif ($name -eq 'service_guard' -or $name -eq 'file_watch' -or $name -eq 'policy' -or $name -eq 'remote_agent' -or $name -eq 'update') {
-        $risk = 'medium'
-    }
-    elseif ($name -eq 'dump' -or $name -eq 'script_runner') {
+    elseif ($name -eq 'dump') {
         $risk = 'high'
     }
     if ($name -eq 'report') {
@@ -90,8 +80,8 @@ foreach ($name in @('sched', 'health', 'profile', 'report', 'notify', 'metrics',
     }
 }
 
-if ($items.Count -ne 16) {
-    throw "expected 16 bundled modules, got $($items.Count)"
+if ($items.Count -ne 12) {
+    throw "expected 12 bundled modules, got $($items.Count)"
 }
 
 $outDir = [System.IO.Path]::GetDirectoryName($Output)

@@ -1391,7 +1391,6 @@ int runDoctor(const std::string &host, unsigned short port, const std::string &t
     add("modules_staging", canWriteProbe(exeDir / L"modules_staging") ? "ok" : "warn", wideToUtf8((exeDir / L"modules_staging").wstring()));
     add("modules_allow", std::filesystem::exists(modules / L"modules.allow") ? "ok" : "warn", wideToUtf8((modules / L"modules.allow").wstring()));
     add("modules_lock", std::filesystem::exists(modules / L"modules.lock") ? "ok" : "warn", wideToUtf8((modules / L"modules.lock").wstring()));
-    add("ppl_driver", std::filesystem::exists(modules / L"ppl" / L"Sirius.sys") ? "info" : "warn", wideToUtf8((modules / L"ppl" / L"Sirius.sys").wstring()));
     add("qt_runtime", std::filesystem::exists(exeDir / L"Qt6Core.dll") || std::filesystem::exists(exeDir / L"Qt5Core.dll") ? "ok" : "info", "Qt runtime DLL check beside tool directory");
     add("openssl_runtime", std::filesystem::exists(exeDir / L"libssl-3-x64.dll") || std::filesystem::exists(exeDir / L"libssl-3.dll") ? "ok" : "info", "OpenSSL runtime DLL check beside tool directory");
 
@@ -1473,26 +1472,6 @@ int runDoctor(const std::string &host, unsigned short port, const std::string &t
     else
     {
         add("service_guard", "warn", response.empty() ? "service_guard status unavailable" : response);
-    }
-
-    response.clear();
-    if (sendToPGS(host, port, ProcessGuard::client::withAuthToken(token, "module call script_runner op=status"), response) && response.rfind("OK ", 0) == 0)
-    {
-        ParsedSummary summary = parseSummaryLine(response.substr(3));
-        auto field = [&](const std::string &key, const std::string &fallback = "") -> std::string {
-            const auto it = summary.kv.find(key);
-            return (it == summary.kv.end() || it->second.empty()) ? fallback : it->second;
-        };
-        add("script_runner", field("enabled", "0") == "1" ? "warn" : "ok",
-            "enabled=" + field("enabled", "0") +
-            ";scripts=" + field("scripts", "0") +
-            ";path_policy=" + field("path_policy", "unknown") +
-            ";hash_on_run=" + field("hash_on_run", "0") +
-            ";audit=" + field("audit", "0"));
-    }
-    else
-    {
-        add("script_runner", "warn", response.empty() ? "script_runner status unavailable" : response);
     }
 
     if (jsonOutput)
@@ -1641,7 +1620,7 @@ std::string moduleLockObjectForTool(const ProcessGuard::ModuleManager::ModuleIns
     caps << ']';
     const std::string name = ProcessGuard::util::toLowerAscii(info.name.empty() ? info.allowlistKey : info.name);
     std::string risk = jsonStringValueTool(info.manifest.raw, "risk");
-    if (risk.empty()) risk = name == "ppl" ? "critical" : "low";
+    if (risk.empty()) risk = "low";
     return "{\"name\":\"" + jsonEscape(name) +
            "\",\"version\":\"" + jsonEscape(info.version.empty() ? "1.0.0" : info.version) +
            "\",\"sha256\":\"" + jsonEscape(ProcessGuard::util::toLowerAscii(info.sha256)) +
@@ -1971,9 +1950,6 @@ void showUsage(const char *exe)
         << "  " << exe << " guard retry --id <guard-id>\n"
         << "  " << exe << " guard clear-quarantine --id <guard-id>\n"
         << "  " << exe << " group create|add|remove|restart|pause|resume|list --name <name> [--pid <pid>] [--order N] [--deps a,b]\n"
-        << "  " << exe << " ppl set --pid <pid> --signer <None|Authenticode|CodeGen|Antimalware|Lsa|Windows|WinTcb|WinSystem>\n"
-        << "  " << exe << " ppl get --pid <pid>\n"
-        << "  " << exe << " ppl clear --pid <pid>\n"
         << "  " << exe << " schedule|sched add --cron <m h dom mon dow> --action <wire-command>\n"
         << "  " << exe << " schedule|sched add --once <YYYY-MM-DDTHH:MM:SS> --action <wire-command>\n"
         << "  " << exe << " schedule|sched add --interval <seconds> [--count N] --action <wire-command>\n"
@@ -1995,9 +1971,6 @@ void showUsage(const char *exe)
         << "  " << exe << " service-guard policy-clear --confirm\n"
         << "  " << exe << " file-watch status|add|list|check|remove --path <file> [--id <id>] [--action event|none]\n"
         << "  " << exe << " policy-template status|set|list|remove|apply --name <template> [--pid <pid>] [advanced-policy]\n"
-        << "  " << exe << " remote-agent status|heartbeat|guards\n"
-        << "  " << exe << " update status|verify --path <release-manifest.json>\n"
-        << "  " << exe << " script-runner status|config|add|list|run [--id <id>] [--path <script>] [--start-args \"...\"] [--enable|--disable] [--confirm]\n"
         << "  " << exe << " events list [--limit N]\n"
         << "\nCommon options:\n"
         << "  --host <ip>          default 127.0.0.1\n"
@@ -2010,7 +1983,7 @@ void showUsage(const char *exe)
         << "  --start-args \"...\"   process launch arguments for bless-start\n"
         << "  --command \"...\"      custom full launch command for bless-start\n"
         << "  --json               print list/get output as JSON\n"
-        << "  --name <value>       module name (module unload/call, ppl module)\n"
+        << "  --name <value>       module name (module unload/call)\n"
         << "  --request \"kv\"      module call request, e.g. op=set;pid=N;signer=X\n"
         << "  --method <value>    module invoke JSON-RPC method, e.g. profile.apply\n"
         << "  --params-json <json> module invoke JSON params object\n"
@@ -2033,12 +2006,10 @@ void showUsage(const char *exe)
         << "  --no-allow-protected deny protected services even when allowlisted\n"
         << "  --action <value>    schedule action or file-watch action\n"
         << "  --confirm          confirm high-risk local operations and module permissive on\n"
-        << "  --enable/--disable script-runner config switch\n"
         << "  --type <value>     dump collection type\n"
         << "  --config-json <json> health-check/restart-hook JSON config\n"
         << "  --order <N>          guard group startup order metadata\n"
         << "  --deps <a,b>         guard group dependency names\n"
-        << "  --signer <value>     PPL signer for ppl set\n"
         << "  --modules-dir <dir>  modules root for module info/trust (default: derived from --path)\n"
         << "  --require-signed     module trust writes a signed requirement and verifies it now\n"
         << "  --eventlog           notify config enables Windows Event Log delivery\n"
@@ -2052,7 +2023,6 @@ void showUsage(const char *exe)
         << "  --no-restart-backoff clear backoff when used with policy\n"
         << "  --hang-timeout <ms>  GUI hang probe timeout, max 60000\n"
         << "  --kill-on-exit       close the whole process family when PGS exits\n"
-        << "  --no-kill-on-exit    clear kill-on-exit when used with policy\n"
         << "  --winapp --aumid <id> mark guard as WindowsApps; AUMID is required\n"
         << "  --win32              switch an existing policy back to Win32\n"
         << "\nCompatibility:\n"
@@ -2119,8 +2089,8 @@ int main()
     }
 
     std::string command;
-    // For "module"/"ppl" commands the first positional token after the command
-    // word is the subcommand (e.g. "module list", "ppl set"). It is consumed
+    // For "module" commands the first positional token after the command
+    // word is the subcommand (e.g. "module list"). It is consumed
     // here so the --flag parsing loop below does not reject it as unknown.
     std::string subCommand;
     int argIndex = 1;
@@ -2183,13 +2153,9 @@ int main()
     bool hasNotifyEventLog = false;
     bool notifyPopup = false;
     bool hasNotifyPopup = false;
-    std::string signerText;
-    bool hasSigner = false;
     bool confirmOperation = false;
     bool trustCommunity = false;
     bool trustCurated = false;
-    bool configEnabled = false;
-    bool hasConfigEnabled = false;
     std::string serviceState;
     bool hasServiceState = false;
     std::string serviceGuardAllow;
@@ -2312,8 +2278,8 @@ int main()
     else
     {
         command = argsUtf8[argIndex++];
-        // Peel off the subcommand token for module/ppl so argIndex skips it.
-        if (command == "module" || command == "ppl" || command == "schedule" ||
+        // Peel off the subcommand token for module so argIndex skips it.
+        if (command == "module" || command == "schedule" ||
             command == "sched" ||
             command == "events" || command == "health" || command == "profile" ||
             command == "report" || command == "notify" || command == "health-check" || command == "restart-hook" ||
@@ -2321,8 +2287,6 @@ int main()
             command == "dump" || command == "service-guard" || command == "service_guard" ||
             command == "file-watch" || command == "file_watch" ||
             command == "policy-template" || command == "policy_template" ||
-            command == "remote-agent" || command == "remote_agent" ||
-            command == "update" || command == "script-runner" || command == "script_runner" ||
             command == "guard" || command == "group")
         {
             subCommand = (argIndex < static_cast<int>(argsUtf8.size())) ? argsUtf8[argIndex] : std::string();
@@ -2608,27 +2572,9 @@ int main()
             hasGroupDeps = true;
             continue;
         }
-        if (arg == "--signer")
-        {
-            signerText = needValue("--signer");
-            hasSigner = true;
-            continue;
-        }
         if (arg == "--confirm")
         {
             confirmOperation = true;
-            continue;
-        }
-        if (arg == "--enable")
-        {
-            configEnabled = true;
-            hasConfigEnabled = true;
-            continue;
-        }
-        if (arg == "--disable")
-        {
-            configEnabled = false;
-            hasConfigEnabled = true;
             continue;
         }
         if (arg == "--state")
@@ -3897,119 +3843,6 @@ int main()
             return 1;
         }
     }
-    else if (command == "remote-agent" || command == "remote_agent")
-    {
-        const std::string sub = subCommand.empty() ? "status" : subCommand;
-        if (sub != "status" && sub != "heartbeat" && sub != "guards")
-        {
-            std::cerr << "Unknown remote-agent subcommand: " << sub << "\n";
-            WSACleanup();
-            return 1;
-        }
-        wireCommand = "module call remote_agent op=" + sub;
-    }
-    else if (command == "update")
-    {
-        const std::string sub = subCommand.empty() ? "status" : subCommand;
-        if (sub == "status")
-        {
-            wireCommand = "module call update op=status";
-        }
-        else if (sub == "verify")
-        {
-            if (!hasPath)
-            {
-                std::cerr << "update verify requires --path\n";
-                WSACleanup();
-                return 1;
-            }
-            wireCommand = "module call update op=verify;manifest_b64=" + base64Encode(pathOverride);
-        }
-        else
-        {
-            std::cerr << "Unknown update subcommand: " << sub << "\n";
-            WSACleanup();
-            return 1;
-        }
-    }
-    else if (command == "script-runner" || command == "script_runner")
-    {
-        const std::string sub = subCommand.empty() ? "status" : subCommand;
-        if (sub == "status" || sub == "list")
-        {
-            wireCommand = "module call script_runner op=" + sub;
-        }
-        else if (sub == "config")
-        {
-            if (!hasConfigEnabled)
-            {
-                std::cerr << "script-runner config requires --enable or --disable\n";
-                WSACleanup();
-                return 1;
-            }
-            wireCommand = std::string("module call script_runner op=config;enabled=") + (configEnabled ? "1" : "0");
-        }
-        else if (sub == "add")
-        {
-            if (!hasSchedId || !hasPath || !isSafeKvValue(schedId))
-            {
-                std::cerr << "script-runner add requires safe --id and --path\n";
-                WSACleanup();
-                return 1;
-            }
-            wireCommand = "module call script_runner op=add;id=" + schedId + ";path_b64=" + base64Encode(pathOverride);
-            if (!startArgs.empty()) wireCommand += ";args_b64=" + base64Encode(startArgs);
-        }
-        else if (sub == "run")
-        {
-            if (!hasSchedId || !isSafeKvValue(schedId))
-            {
-                std::cerr << "script-runner run requires safe --id\n";
-                WSACleanup();
-                return 1;
-            }
-            wireCommand = "module call script_runner op=run;id=" + schedId;
-            if (confirmOperation) wireCommand += ";confirm=1";
-        }
-        else
-        {
-            std::cerr << "Unknown script-runner subcommand: " << sub << "\n";
-            WSACleanup();
-            return 1;
-        }
-    }
-    // ppl <set|get|clear>. Convenience wrapper around the ppl module; PGS turns
-    // these into "op=..." module calls internally.
-    else if (command == "ppl")
-    {
-        const std::string sub = subCommand;
-        if (sub == "set")
-        {
-            if (!hasPid || !hasSigner)
-            {
-                std::cerr << "ppl set requires --pid and --signer\n";
-                WSACleanup();
-                return 1;
-            }
-            wireCommand = "module invoke ppl ppl.set " + base64Encode("{\"pid\":" + std::to_string(pid) + ",\"signer\":\"" + jsonEscape(signerText) + "\"}");
-        }
-        else if (sub == "get" || sub == "clear")
-        {
-            if (!hasPid)
-            {
-                std::cerr << "ppl " << sub << " requires --pid\n";
-                WSACleanup();
-                return 1;
-            }
-            wireCommand = "module invoke ppl ppl." + sub + " " + base64Encode("{\"pid\":" + std::to_string(pid) + "}");
-        }
-        else
-        {
-            std::cerr << "Unknown ppl subcommand: " << sub << "\n";
-            WSACleanup();
-            return 1;
-        }
-    }
     else if (command == "health-check" || command == "restart-hook")
     {
         const std::string sub = subCommand;
@@ -4216,17 +4049,6 @@ int main()
         const std::string decoded = base64Decode(parsed.kv[metricsSub == "prometheus" ? "prometheus_b64" : "json_b64"]);
         std::cout << (decoded.empty() ? response : decoded) << "\n";
     }
-    else if (command == "remote-agent" || command == "remote_agent")
-    {
-        ParsedSummary parsed = parseSummaryLine(response.rfind("OK ", 0) == 0 ? response.substr(3) : response);
-        const std::string node = base64Decode(parsed.kv["node_b64"]);
-        const std::string stats = base64Decode(parsed.kv["stats_b64"]);
-        const std::string list = base64Decode(parsed.kv["list_b64"]);
-        std::cout << response << "\n";
-        if (!node.empty()) std::cout << "node=" << node << "\n";
-        if (!stats.empty()) std::cout << stats << "\n";
-        if (!list.empty()) std::cout << list << "\n";
-    }
     else if (command == "file-watch" || command == "file_watch")
     {
         std::cout << response << "\n";
@@ -4235,20 +4057,6 @@ int main()
             if (line.rfind("RULE ", 0) != 0) continue;
             ParsedSummary parsed = parseSummaryLine(line.substr(5));
             const std::string path = base64Decode(parsed.kv["path_b64"]);
-            if (!path.empty()) std::cout << "path=" << path << "\n";
-        }
-    }
-    else if (command == "script-runner" || command == "script_runner")
-    {
-        ParsedSummary parsed = parseSummaryLine(response.rfind("OK ", 0) == 0 ? response.substr(3) : response);
-        const std::string root = base64Decode(parsed.kv["root_b64"]);
-        std::cout << response << "\n";
-        if (!root.empty()) std::cout << "root=" << root << "\n";
-        for (const std::string &line : splitBy(response, '\n'))
-        {
-            if (line.rfind("SCRIPT ", 0) != 0) continue;
-            ParsedSummary script = parseSummaryLine(line.substr(7));
-            const std::string path = base64Decode(script.kv["path_b64"]);
             if (!path.empty()) std::cout << "path=" << path << "\n";
         }
     }

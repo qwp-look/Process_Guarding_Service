@@ -7,8 +7,7 @@
  * PGS discovers modules in <service-dir>/modules/ at startup (and on demand
  * via the "module load" management command), loads them with LoadLibrary, and
  * invokes them through PG_Invoke or the optional JSON-RPC entry PG_InvokeJson.
- * This lets PGS gain new capabilities without baking them into the core; PPL
- * is treated as a high-risk module rather than a core service feature.
+ * This lets PGS gain new capabilities without baking them into the core.
  *
  * @section abi ABI design
  *  - Pure C linkage (extern "C") so modules built by any compiler/language
@@ -29,11 +28,6 @@
  *    "ERR ...". PGS treats the return code as the success/failure signal and
  *    forwards the response text to the client verbatim.
  *  - PG_Invoke MUST be thread-safe: PGS worker threads call it concurrently.
- *
- * @section derivation Derivation
- * The reference module pgs_ppl_module is derived from StarlightGUI's Sirius
- * driver client (Apache-2.0, author "Stars"). This header itself is original
- * PGS code. See ../../NOTICE for attribution details.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -121,7 +115,7 @@ struct PGS_ServicesV3
 extern "C" {
 #endif
 
-/* Short, stable module name (UTF-8, static storage). Example: "ppl".
+/* Short, stable module name (UTF-8, static storage). Example: "sched".
  * Used as the lookup key by PGS (case-insensitive) and as the human-facing
  * identifier in "module list". Required. */
 PG_MODULE_API const char *PG_GetName(void);
@@ -137,7 +131,7 @@ PG_MODULE_API unsigned int PG_GetAbiVersion(void);
 /* Optional ABI v2 manifest string (UTF-8, static storage). The format is the
  * same lightweight KV style used by module requests:
  *
- *   name=ppl;version=1.0.0;abi=2;summary=...;capabilities=ppl.set,ppl.get
+ *   name=sched;version=1.0.0;abi=2;summary=...;capabilities=sched.add,sched.list
  *
  * Recognized keys today are name, version, abi, summary and capabilities.
  * Capabilities are comma-separated advisory tags used for inspection and for

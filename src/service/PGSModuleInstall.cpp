@@ -67,7 +67,7 @@ namespace
         {
             manifest.name = name;
             manifest.version = info.version.empty() ? "1.0.0" : info.version;
-            manifest.risk = (name == "ppl") ? "critical" : "medium";
+            manifest.risk = "medium";
             manifest.publisher = "local";
             manifest.capabilities = info.manifest.capabilities;
         }
@@ -79,7 +79,7 @@ namespace
         obj["publisher"] = manifest.publisher.empty() ? (manifest.author.empty() ? "local" : manifest.author) : manifest.publisher;
         obj["source"] = source.empty() ? "local-install" : source;
         obj["capabilities"] = manifest.capabilities;
-        obj["risk"] = manifest.risk.empty() ? ((name == "ppl") ? "critical" : "medium") : manifest.risk;
+        obj["risk"] = manifest.risk.empty() ? std::string("medium") : manifest.risk;
         obj["trustedAt"] = std::to_string(epochMs());
         obj["signature_policy"] = "hash";
         obj["require_signed"] = false;
@@ -399,10 +399,6 @@ std::string PGS::handleModuleInstallCommand(const std::string &rest)
     if (sourceManifest.trust == "community" && !installArgs.confirm)
     {
         return "ERR community module install requires --confirm";
-    }
-    if (name == "ppl" && !(m_kernelModulesEnabled || m_pplEnabled))
-    {
-        return "ERR ppl install requires --enable-kernel-modules, --enable-risk critical, or legacy --enable-ppl";
     }
 
     const std::filesystem::path modulesRoot = std::filesystem::path(utf8ToWide(m_modulesDir));

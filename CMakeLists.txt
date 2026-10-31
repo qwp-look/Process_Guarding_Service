@@ -110,31 +110,23 @@ target_link_libraries(pgs_service_guard_module PRIVATE advapi32)
 pgs_module(pgs_file_watch_module file_watch pgs_file_watch_module modules/file_watch/pgs_file_watch_module.cpp)
 target_link_libraries(pgs_file_watch_module PRIVATE bcrypt)
 pgs_module(pgs_policy_module policy pgs_policy_module modules/policy/pgs_policy_module.cpp)
-pgs_module(pgs_remote_agent_module remote_agent pgs_remote_agent_module modules/remote_agent/pgs_remote_agent_module.cpp)
-pgs_module(pgs_update_module update pgs_update_module modules/update/pgs_update_module.cpp)
-target_link_libraries(pgs_update_module PRIVATE bcrypt)
-pgs_module(pgs_script_runner_module script_runner pgs_script_runner_module modules/script_runner/pgs_script_runner_module.cpp)
-target_link_libraries(pgs_script_runner_module PRIVATE bcrypt)
-pgs_module(pgs_ppl_module ppl pgs_ppl_module modules/ppl/pgs_ppl_module.cpp)
-target_link_libraries(pgs_ppl_module PRIVATE advapi32)
-pgs_copy_if_exists(pgs_ppl_module "${PGS_ROOT}/modules/ppl/Sirius.sys" "${PGS_BUILD_DIR}/modules/ppl")
 
 file(MAKE_DIRECTORY "${PGS_BUILD_DIR}/modules")
-file(WRITE "${PGS_BUILD_DIR}/modules/modules.allow" "ppl\nsched\nhealth\nprofile\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\nremote_agent\nupdate\nscript_runner\n")
+file(WRITE "${PGS_BUILD_DIR}/modules/modules.allow" "sched\nhealth\nprofile\nreport\nnotify\nmetrics\nbackup\neventlog\ndump\nservice_guard\nfile_watch\npolicy\n")
 add_custom_target(pgs_bundled_modules_lock ALL
     COMMAND ${CMAKE_COMMAND}
         -DPGS_MODULES_ROOT=${PGS_BUILD_DIR}/modules
         -DPGS_MODULES_LOCK_OUT=${PGS_BUILD_DIR}/modules/modules.lock
         -P ${PGS_ROOT}/cmake/WriteBundledModulesLock.cmake
-    DEPENDS pgs_sched_module pgs_health_module pgs_profile_module pgs_report_module pgs_notify_module pgs_metrics_module pgs_backup_module pgs_eventlog_module pgs_dump_module pgs_service_guard_module pgs_file_watch_module pgs_policy_module pgs_remote_agent_module pgs_update_module pgs_script_runner_module pgs_ppl_module
+    DEPENDS pgs_sched_module pgs_health_module pgs_profile_module pgs_report_module pgs_notify_module pgs_metrics_module pgs_backup_module pgs_eventlog_module pgs_dump_module pgs_service_guard_module pgs_file_watch_module pgs_policy_module
     COMMENT "Writing modules.lock for bundled modules")
 
 if(PGS_BUILD_TESTS)
     enable_testing()
 
-    add_executable(test_pgs_core tests/test_pgs_core.cpp modules/sched/pgs_sched_module.cpp modules/ppl/pgs_ppl_module.cpp)
+    add_executable(test_pgs_core tests/test_pgs_core.cpp modules/sched/pgs_sched_module.cpp)
     target_compile_definitions(test_pgs_core PRIVATE PGS_ENABLE_TEST_HOOKS)
-    target_include_directories(test_pgs_core PRIVATE include modules/sched modules/ppl)
+    target_include_directories(test_pgs_core PRIVATE include modules/sched)
     target_link_libraries(test_pgs_core PRIVATE bcrypt advapi32)
     add_test(NAME pgs_core COMMAND test_pgs_core)
 

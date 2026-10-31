@@ -51,40 +51,9 @@ void ModulePage::setupUi()
     m_html->setOpenExternalLinks(true);
     layout->addWidget(m_html, 1);
 
-    const bool isPpl = (m_folder.compare(QStringLiteral("ppl"), Qt::CaseInsensitive) == 0);
     const bool isMetrics = (m_folder.compare(QStringLiteral("metrics"), Qt::CaseInsensitive) == 0);
     const bool isBackup = (m_folder.compare(QStringLiteral("backup"), Qt::CaseInsensitive) == 0);
     const bool isEventlog = (m_folder.compare(QStringLiteral("eventlog"), Qt::CaseInsensitive) == 0);
-
-    if (isPpl)
-    {
-        m_riskLabel = new QLabel(this);
-        m_riskLabel->setWordWrap(true);
-        layout->addWidget(m_riskLabel);
-        m_pplBox = new QGroupBox(this);
-        auto *row = new QHBoxLayout(m_pplBox);
-        m_lblPid = new QLabel(m_pplBox);
-        row->addWidget(m_lblPid);
-        m_pidEdit = new QLineEdit(m_pplBox);
-        m_pidEdit->setPlaceholderText(QStringLiteral("1234"));
-        row->addWidget(m_pidEdit);
-        m_lblSigner = new QLabel(m_pplBox);
-        row->addWidget(m_lblSigner);
-        m_signerCombo = new QComboBox(m_pplBox);
-        m_signerCombo->addItems(QStringList{
-            "None", "Authenticode", "CodeGen", "Antimalware",
-            "Lsa", "Windows", "WinTcb", "WinSystem", "App"});
-        m_signerCombo->setCurrentText("Antimalware");
-        row->addWidget(m_signerCombo);
-        m_btnPplSet = new QPushButton(m_pplBox);
-        m_btnPplGet = new QPushButton(m_pplBox);
-        m_btnPplClear = new QPushButton(m_pplBox);
-        row->addWidget(m_btnPplSet);
-        row->addWidget(m_btnPplGet);
-        row->addWidget(m_btnPplClear);
-        row->addStretch();
-        layout->addWidget(m_pplBox);
-    }
 
     if (isMetrics)
     {
@@ -234,8 +203,7 @@ void ModulePage::setupUi()
 
     const bool hasShortcutModule = moduleKey == QStringLiteral("dump") ||
         moduleKey == QStringLiteral("service_guard") || moduleKey == QStringLiteral("file_watch") ||
-        moduleKey == QStringLiteral("policy") || moduleKey == QStringLiteral("remote_agent") ||
-        moduleKey == QStringLiteral("update") || moduleKey == QStringLiteral("script_runner");
+        moduleKey == QStringLiteral("policy");
     if (hasShortcutModule)
     {
         m_shortcutBox = new QGroupBox(this);
@@ -265,7 +233,6 @@ void ModulePage::setupUi()
         m_shortcutActionCombo = new QComboBox(m_shortcutBox);
         m_shortcutActionCombo->addItems(QStringList{QStringLiteral("event"), QStringLiteral("none")});
         m_shortcutConfirmCheck = new QCheckBox(m_shortcutBox);
-        m_shortcutEnableCheck = new QCheckBox(m_shortcutBox);
         m_shortcutBackoffCheck = new QCheckBox(m_shortcutBox);
         m_shortcutKillCheck = new QCheckBox(m_shortcutBox);
         m_btnShortcutStatus = new QPushButton(m_shortcutBox);
@@ -286,7 +253,6 @@ void ModulePage::setupUi()
         row->addWidget(m_shortcutStateCombo);
         row->addWidget(m_shortcutActionCombo);
         row->addWidget(m_shortcutConfirmCheck);
-        row->addWidget(m_shortcutEnableCheck);
         row->addWidget(m_shortcutBackoffCheck);
         row->addWidget(m_shortcutKillCheck);
         row->addWidget(m_btnShortcutStatus);
@@ -372,18 +338,6 @@ void ModulePage::setupUi()
     });
     if (isPpl)
     {
-        connect(m_btnPplSet, &QPushButton::clicked, this, [this]() {
-            if (pidArg().isEmpty()) { appendOutput(trUi("PID is required", "需要 PID")); return; }
-            runCommand({"ppl", "set", "--pid", pidArg(), "--signer", m_signerCombo->currentText()});
-        });
-        connect(m_btnPplGet, &QPushButton::clicked, this, [this]() {
-            if (pidArg().isEmpty()) { appendOutput(trUi("PID is required", "需要 PID")); return; }
-            runCommand({"ppl", "get", "--pid", pidArg()});
-        });
-        connect(m_btnPplClear, &QPushButton::clicked, this, [this]() {
-            if (pidArg().isEmpty()) { appendOutput(trUi("PID is required", "需要 PID")); return; }
-            runCommand({"ppl", "clear", "--pid", pidArg()});
-        });
     }
     if (m_metricsBox)
     {
@@ -499,8 +453,6 @@ void ModulePage::setupUi()
             if (key == QStringLiteral("service_guard")) runCommand({"service-guard", "status"});
             else if (key == QStringLiteral("file_watch")) runCommand({"file-watch", "status"});
             else if (key == QStringLiteral("policy")) runCommand({"policy-template", "status"});
-            else if (key == QStringLiteral("remote_agent")) runCommand({"remote-agent", "status"});
-            else if (key == QStringLiteral("script_runner")) runCommand({"script-runner", "status"});
             else { QString command = key; command.replace('_', '-'); runCommand({command, "status"}); }
         });
         connect(m_btnShortcutPrimary, &QPushButton::clicked, this, [this, key, requirePid, requireName, requireId, requirePath]() {
@@ -508,48 +460,31 @@ void ModulePage::setupUi()
             else if (key == QStringLiteral("service_guard")) { const QString name = requireName(); if (!name.isEmpty()) { QStringList args{"service-guard", "query", "--name", name}; runCommand(args); } }
             else if (key == QStringLiteral("file_watch")) { const QString path = requirePath(); if (!path.isEmpty()) { QStringList args{"file-watch", "add", "--path", path, "--action", m_shortcutActionCombo->currentText()}; const QString id = textOf(m_shortcutIdEdit); if (!id.isEmpty()) args << "--id" << id; runCommand(args); } }
             else if (key == QStringLiteral("policy")) { const QString name = requireName(); if (!name.isEmpty()) { QStringList args{"policy-template", "set", "--name", name}; const QString max = textOf(m_shortcutMaxEdit); if (!max.isEmpty()) args << "--max-restarts" << max; const QString a = textOf(m_shortcutArgsEdit); if (!a.isEmpty()) args << "--restart-args" << a; const QString w = textOf(m_shortcutWindowEdit); if (!w.isEmpty()) args << "--restart-window" << w; const QString d = textOf(m_shortcutDelayEdit); if (!d.isEmpty()) args << "--restart-delay" << d; const QString h = textOf(m_shortcutHangEdit); if (!h.isEmpty()) args << "--hang-timeout" << h; if (m_shortcutBackoffCheck->isChecked()) args << "--restart-backoff"; if (m_shortcutKillCheck->isChecked()) args << "--kill-on-exit"; runCommand(args); } }
-            else if (key == QStringLiteral("remote_agent")) runCommand({"remote-agent", "heartbeat"});
-            else if (key == QStringLiteral("update")) { const QString path = requirePath(); if (!path.isEmpty()) runCommand({"update", "verify", "--path", path}); }
-            else if (key == QStringLiteral("script_runner")) { const QString id = requireId(); const QString path = requirePath(); if (!id.isEmpty() && !path.isEmpty()) { QStringList args{"script-runner", "add", "--id", id, "--path", path}; const QString a = textOf(m_shortcutArgsEdit); if (!a.isEmpty()) args << "--start-args" << a; runCommand(args); } }
-        });
-        connect(m_btnShortcutSecondary, &QPushButton::clicked, this, [this, key, requireName, requireId]() {
             if (key == QStringLiteral("service_guard")) { const QString name = requireName(); if (!name.isEmpty()) { QStringList args{"service-guard", "ensure", "--name", name, "--state", m_shortcutStateCombo->currentText()}; if (m_shortcutConfirmCheck->isChecked()) args << "--confirm"; runCommand(args); } }
             else if (key == QStringLiteral("file_watch")) runCommand({"file-watch", "list"});
             else if (key == QStringLiteral("policy")) runCommand({"policy-template", "list"});
-            else if (key == QStringLiteral("remote_agent")) runCommand({"remote-agent", "guards"});
-            else if (key == QStringLiteral("script_runner")) runCommand({"script-runner", "list"});
-            else if (key == QStringLiteral("update")) runCommand({"update", "status"});
             else if (key == QStringLiteral("dump")) runCommand({"dump", "status"});
         });
         connect(m_btnShortcutTertiary, &QPushButton::clicked, this, [this, key, requireName, requireId]() {
             if (key == QStringLiteral("service_guard")) { const QString name = requireName(); if (!name.isEmpty()) { QStringList args{"service-guard", "start", "--name", name}; if (m_shortcutConfirmCheck->isChecked()) args << "--confirm"; runCommand(args); } }
             else if (key == QStringLiteral("file_watch")) runCommand({"file-watch", "check"});
             else if (key == QStringLiteral("policy")) { const QString name = requireName(); const QString pid = textOf(m_shortcutPidEdit); if (!name.isEmpty() && !pid.isEmpty()) runCommand({"policy-template", "apply", "--name", name, "--pid", pid}); else appendOutput(trUi("Name and PID are required", "需要名称和 PID")); }
-            else if (key == QStringLiteral("script_runner")) { const QString id = requireId(); if (!id.isEmpty()) { QStringList args{"script-runner", "run", "--id", id}; if (m_shortcutConfirmCheck->isChecked()) args << "--confirm"; runCommand(args); } }
         });
         connect(m_btnShortcutQuaternary, &QPushButton::clicked, this, [this, key, requireName, requireId]() {
             if (key == QStringLiteral("service_guard")) { const QString name = requireName(); if (!name.isEmpty()) { QStringList args{"service-guard", "stop", "--name", name}; if (m_shortcutConfirmCheck->isChecked()) args << "--confirm"; runCommand(args); } }
             else if (key == QStringLiteral("file_watch")) { const QString id = requireId(); if (!id.isEmpty()) runCommand({"file-watch", "remove", "--id", id}); }
             else if (key == QStringLiteral("policy")) { const QString name = requireName(); if (!name.isEmpty()) runCommand({"policy-template", "remove", "--name", name}); }
-            else if (key == QStringLiteral("script_runner")) runCommand({"script-runner", "config", m_shortcutEnableCheck->isChecked() ? "--enable" : "--disable"});
         });
     }
 }
 
 void ModulePage::retranslateUi()
 {
-    if (m_riskLabel) m_riskLabel->setText(trUi("High-risk module: loading and invoking driver/kernel features requires explicit service opt-in and trusted module files.", "高风险模块：加载和调用驱动/内核能力需要服务显式启用，并且模块文件必须已受信任。"));
-    if (m_lblPid) m_lblPid->setText(trUi("PID:", "PID："));
-    if (m_lblSigner) m_lblSigner->setText(trUi("Signer:", "签名："));
     if (m_lblMethod) m_lblMethod->setText(trUi("Method:", "方法："));
     if (m_lblRequest) m_lblRequest->setText(trUi("Request:", "请求："));
     if (m_btnCall) m_btnCall->setText(trUi("Invoke", "调用"));
     if (m_btnList) m_btnList->setText(trUi("List modules", "列出模块"));
     if (m_btnReload) m_btnReload->setText(trUi("Reload HTML", "重载 HTML"));
-    if (m_btnPplSet) m_btnPplSet->setText(trUi("PPL Set", "PPL 设置"));
-    if (m_btnPplGet) m_btnPplGet->setText(trUi("PPL Get", "PPL 查询"));
-    if (m_btnPplClear) m_btnPplClear->setText(trUi("PPL Clear", "PPL 清除"));
-    if (m_pplBox) m_pplBox->setTitle(trUi("PPL convenience (ppl set/get/clear)", "PPL 便捷操作 (ppl set/get/clear)"));
     if (m_metricsBox) m_metricsBox->setTitle(trUi("Metrics", "指标"));
     if (m_btnMetricsSummary) m_btnMetricsSummary->setText(trUi("Summary", "摘要"));
     if (m_btnMetricsJson) m_btnMetricsJson->setText(trUi("JSON", "JSON"));
@@ -585,7 +520,6 @@ void ModulePage::retranslateUi()
     if (m_btnArtifactDownload) m_btnArtifactDownload->setText(trUi("Download", "下载"));
     if (m_shortcutBox) m_shortcutBox->setTitle(trUi("Bundled module actions", "内置模块操作"));
     if (m_shortcutConfirmCheck) m_shortcutConfirmCheck->setText(trUi("Confirm", "确认"));
-    if (m_shortcutEnableCheck) m_shortcutEnableCheck->setText(trUi("Enable", "启用"));
     if (m_shortcutBackoffCheck) m_shortcutBackoffCheck->setText(trUi("Backoff", "退避"));
     if (m_shortcutKillCheck) m_shortcutKillCheck->setText(trUi("Kill", "级联"));
     if (m_btnShortcutStatus) m_btnShortcutStatus->setText(trUi("Status", "状态"));
@@ -663,15 +597,7 @@ QString ModulePage::defaultMethod() const
     if (key == QStringLiteral("service_guard")) return QStringLiteral("service_guard.status");
     if (key == QStringLiteral("file_watch")) return QStringLiteral("file_watch.status");
     if (key == QStringLiteral("policy")) return QStringLiteral("policy.status");
-    if (key == QStringLiteral("remote_agent")) return QStringLiteral("remote_agent.status");
-    if (key == QStringLiteral("update")) return QStringLiteral("update.status");
-    if (key == QStringLiteral("script_runner")) return QStringLiteral("script_runner.status");
     return key + QStringLiteral(".info");
-}
-
-QString ModulePage::pidArg() const
-{
-    return m_pidEdit ? m_pidEdit->text().trimmed() : QString();
 }
 
 QString ModulePage::textOf(QLineEdit *edit) const
