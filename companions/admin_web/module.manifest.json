@@ -1,0 +1,11 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "class": "companion",
+  "name": "admin_web",
+  "version": "0.1.0",
+  "summary": "Browser-based PGS admin console (Qt HTTP front end proxying the management protocol).",
+  "entry": "pgs_admin_web.exe",
+  "risk": "medium",
+  "capabilities": [],
+  "notes": "Out-of-process companion: ships in the release tree, never loads into the service. Remote exposure requires TLS + users file + audit log per docs/REMOTE_GATEWAY.md."
+}

@@ -141,6 +141,14 @@ copy /Y "LICENSE"                     "%RELEASE%\" >nul
 copy /Y "NOTICE"                      "%RELEASE%\" >nul
 copy /Y "README.md"                   "%RELEASE%\" >nul
 
+REM Companion distribution manifests (class=companion): the web/cluster consoles
+REM stay out-of-process executables; their manifests formalize identity, entry
+REM point and packaging for the module ecosystem without loading into the service.
+if not exist "%RELEASE%\companions\admin_web" mkdir "%RELEASE%\companions\admin_web" >nul 2>&1
+if not exist "%RELEASE%\companions\cluster_web" mkdir "%RELEASE%\companions\cluster_web" >nul 2>&1
+copy /Y "companions\admin_web\module.manifest.json"   "%RELEASE%\companions\admin_web\" >nul
+copy /Y "companions\cluster_web\module.manifest.json" "%RELEASE%\companions\cluster_web\" >nul
+
 echo [4/6] Deploy Qt6 DLLs + plugins (windeployqt6)...
 "%MINGW%\windeployqt6.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw "%RELEASE%\pgs_admin_qt.exe" >nul 2>&1
 if errorlevel 1 ( echo ERROR: windeployqt6 failed for pgs_admin_qt.exe & popd & exit /b 1 )
@@ -217,6 +225,8 @@ for %%F in (
   modules\winapp\pgs_winapp_module.dll
   modules\winapp\module.html
   modules\winapp\module.manifest.json
+  companions\admin_web\module.manifest.json
+  companions\cluster_web\module.manifest.json
   module_managers\official\manager.manifest.json
   modules_staging\README.md
   examples\smoke_worker.exe

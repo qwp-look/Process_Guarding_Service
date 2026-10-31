@@ -43,6 +43,8 @@ Name: "zh"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "installservice"; Description: "安装并启动 PGS Windows 服务（LocalSystem）"; GroupDescription: "服务："
+Name: "webconsole"; Description: "安装 Web 管理端快捷方式（companion 组件）"; GroupDescription: "Companion 组件："; Flags: unchecked
+Name: "clusterconsole"; Description: "安装 Cluster 面板快捷方式（companion 组件）"; GroupDescription: "Companion 组件："; Flags: unchecked
 Name: "firewallremote"; Description: "添加远程网关端口的入站防火墙规则"; GroupDescription: "网络："; Flags: unchecked
 
 [Files]
@@ -51,7 +53,8 @@ Source: "..\release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\PGS 管理端（Qt）"; Filename: "{app}\pgs_admin_qt.exe"
-Name: "{group}\PGS Web 控制台"; Filename: "{app}\pgs_admin_web.exe"
+Name: "{group}\PGS Web 控制台"; Filename: "{app}\pgs_admin_web.exe"; Tasks: webconsole
+Name: "{group}\PGS Cluster 面板"; Filename: "{app}\pgs_cluster_web.exe"; Tasks: clusterconsole
 Name: "{group}\卸载 PGS"; Filename: "{uninstallexe}"
 
 [Run]

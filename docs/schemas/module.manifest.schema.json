@@ -3,7 +3,7 @@
   "$id": "https://pgs.local/schemas/module.manifest.schema.json",
   "title": "PGS module manifest",
   "type": "object",
-  "required": ["name", "version", "abi", "capabilities", "methods"],
+  "required": ["name", "version", "class", "capabilities"],
   "additionalProperties": true,
   "properties": {
     "schema": {"type": "string"},
@@ -13,6 +13,7 @@
     "abi": {"type": "integer", "minimum": 2, "maximum": 3},
     "summary": {"type": "string"},
     "publisher": {"type": "string"},
+    "entry": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+\\.(exe|dll)$"},
     "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
     "capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
     "methods": {
@@ -30,5 +31,15 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"class": {"const": "companion"}}},
+      "then": {"required": ["entry"]}
+    },
+    {
+      "if": {"properties": {"class": {"enum": ["command", "provider"]}}},
+      "then": {"required": ["abi", "methods"]}
+    }
+  ]
 }

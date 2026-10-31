@@ -1,0 +1,11 @@
+{
+  "schema": "https://pgs.local/schemas/module.manifest.schema.json",
+  "class": "companion",
+  "name": "cluster_web",
+  "version": "0.1.0",
+  "summary": "Multi-node cluster dashboard (out-of-process Qt web application).",
+  "entry": "pgs_cluster_web.exe",
+  "risk": "medium",
+  "capabilities": [],
+  "notes": "Out-of-process companion: ships in the release tree, never loads into the service. Non-loopback listeners require TLS + dashboard API token per docs/CLUSTER_DASHBOARD.md."
+}
