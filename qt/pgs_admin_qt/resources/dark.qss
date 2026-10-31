@@ -134,3 +134,30 @@ QScrollBar::handle:horizontal {
 QScrollBar::handle:horizontal:hover {
     background: #5b8def;
 }
+
+/* Guard tree page (task-manager style) */
+QTreeView {
+    background-color: #17181c;
+    alternate-background-color: #1c1e23;
+    border: 1px solid #3a3f47;
+    border-radius: 6px;
+    outline: none;
+}
+QTreeView::item {
+    padding: 3px 6px;
+    border: none;
+}
+QTreeView::item:hover {
+    background-color: #2a2f36;
+}
+QTreeView::item:selected {
+    background-color: #2f4a68;
+    color: #e8edf3;
+}
+QTreeView::item:selected:!active {
+    background-color: #2a3b52;
+}
+#guardStatsLabel {
+    color: #8b949e;
+    font-size: 8pt;
+}

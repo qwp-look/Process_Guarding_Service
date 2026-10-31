@@ -431,6 +431,11 @@ std::string PGS::dispatchCommandLine(const std::string &commandLine)
         return handleList();
     }
 
+    if (command == "families")
+    {
+        return handleFamiliesCommand();
+    }
+
     if (command == "get")
     {
         DWORD pid = 0;

@@ -130,3 +130,27 @@ QScrollBar::handle:horizontal {
 QScrollBar::handle:horizontal:hover {
     background: #3370ff;
 }
+
+/* Guard tree page (task-manager style) */
+QTreeView {
+    background-color: #ffffff;
+    alternate-background-color: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    outline: none;
+}
+QTreeView::item {
+    padding: 3px 6px;
+    border: none;
+}
+QTreeView::item:hover {
+    background-color: #eaeef2;
+}
+QTreeView::item:selected {
+    background-color: #cfe2f7;
+    color: #1f2328;
+}
+#guardStatsLabel {
+    color: #656d76;
+    font-size: 8pt;
+}

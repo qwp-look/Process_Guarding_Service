@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "ModulePage.h"
+#include "GuardTreePage.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -496,6 +497,14 @@ void MainWindow::setupUi()
     serviceLayout->addLayout(serviceRow2);
     serviceLayout->addWidget(m_serviceOutput, 1);
 
+    m_guardTreePage = new GuardTreePage(this);
+    m_guardTreePage->setToolPath(blessToolPath());
+    m_guardTreePage->setToken(m_tokenEdit ? m_tokenEdit->text() : QString());
+    if (m_tokenEdit)
+    {
+        connect(m_tokenEdit, &QLineEdit::textChanged, m_guardTreePage, &GuardTreePage::setToken);
+    }
+    m_tabs->addTab(m_guardTreePage, "");
     m_tabs->addTab(blessPage, "");
     m_tabs->addTab(servicePage, "");
 
@@ -1148,11 +1157,16 @@ void MainWindow::loadSavedPrefs()
 void MainWindow::applyLanguage()
 {
     setWindowTitle(trUi("PGS Admin (Qt)", "PGS 管理端（Qt）"));
-    m_tabs->setTabText(0, trUi("Bless Console", "守护管理"));
-    m_tabs->setTabText(1, trUi("Service Console", "服务管理"));
-    m_tabs->setTabText(2, trUi("Guard Table", "守护表格"));
-    m_tabs->setTabText(3, trUi("Module Management", "模块管理"));
-    m_tabs->setTabText(4, trUi("Doctor", "诊断修复"));
+    m_tabs->setTabText(0, trUi("Guards", "守护总览"));
+    m_tabs->setTabText(1, trUi("Bless Console", "守护管理"));
+    m_tabs->setTabText(2, trUi("Service Console", "服务管理"));
+    m_tabs->setTabText(3, trUi("Guard Table", "守护表格"));
+    m_tabs->setTabText(4, trUi("Module Management", "模块管理"));
+    m_tabs->setTabText(5, trUi("Doctor", "诊断修复"));
+    if (m_guardTreePage)
+    {
+        m_guardTreePage->setChinese(isChineseUi());
+    }
     m_titleModule->setText(trUi("Module Management", "模块管理"));
     m_labelModuleToolPath->setText(trUi("pgs_bless path", "pgs_bless 路径"));
     m_labelModuleToken->setText(trUi("token", "token"));

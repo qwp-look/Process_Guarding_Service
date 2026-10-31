@@ -56,6 +56,15 @@ CLI 用户通常通过 `pgs_bless.exe` 间接调用协议：
 
 `bless` / `unbless` 是协议层别名，兼容旧 `register` / `unregister` 语义。
 
+`families` 返回每个活跃 guard 的 Job Object 进程族成员（任务管理器式进程树的数据源）：
+
+```text
+OK count=<n>
+FAMILY guard_id=<id>;pid=<pid>;group=<group|->;count=<n>;members_b64=<json-b64>
+```
+
+`members_b64` 解码后是 `[{"pid":123,"name":"app.exe"},...]`。枚举基于一次系统进程快照 + 每成员 `IsProcessInJob`，不需要额外驱动或内核接口。
+
 核心 wire 形态：
 
 ```text

@@ -336,9 +336,6 @@ void ModulePage::setupUi()
     connect(m_btnReload, &QPushButton::clicked, this, [this]() {
         reloadHtml();
     });
-    if (isPpl)
-    {
-    }
     if (m_metricsBox)
     {
         connect(m_btnMetricsSummary, &QPushButton::clicked, this, [this]() { runCommand({"metrics", "summary"}); });

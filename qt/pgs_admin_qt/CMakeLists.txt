@@ -17,6 +17,9 @@ set(PGS_ADMIN_QT_SOURCES
     src/MainWindow.cpp
     src/ModulePage.h
     src/ModulePage.cpp
+    src/GuardTreePage.h
+    src/GuardTreePage.cpp
+    ../../src/common/PGSClient.cpp
     resources/pgs_theme.qrc
 )
 
@@ -26,4 +29,5 @@ else()
     add_executable(pgs_admin_qt ${PGS_ADMIN_QT_SOURCES})
 endif()
 
-target_link_libraries(pgs_admin_qt PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+target_include_directories(pgs_admin_qt PRIVATE ../../include)
+target_link_libraries(pgs_admin_qt PRIVATE Qt${QT_VERSION_MAJOR}::Widgets ws2_32)

@@ -476,6 +476,8 @@ namespace ProcessGuard
         std::string handleSetToken(const std::string &encodedOldToken, const std::string &encodedNewToken);
         std::string handleList();
         std::string handleGet(DWORD pid);
+        // "families": per-guard Job Object membership for the task-manager UI.
+        std::string handleFamiliesCommand();
         bool isGuardAlive(const GuardInfo &info) const;
         bool restartGuard(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage);
         bool restartGuardInSession(const GuardInfo &info, int restartIndex, GuardInfo &newGuard, std::string &failureCode, std::string &failureMessage);

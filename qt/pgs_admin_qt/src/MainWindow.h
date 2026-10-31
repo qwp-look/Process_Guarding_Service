@@ -11,6 +11,7 @@ class QGroupBox;
 class QLineEdit;
 class QProcess;
 class QPushButton;
+class GuardTreePage;
 class QTabWidget;
 class QSettings;
 class QTextEdit;
@@ -60,6 +61,7 @@ private:
     QString defaultModuleDir() const;
 
     QTabWidget *m_tabs = nullptr;
+    GuardTreePage *m_guardTreePage = nullptr;
 
     // bless tab
     QLineEdit *m_toolPathEdit = nullptr;

@@ -1,4 +1,5 @@
 #include "Process_Guard/PGS.h"
+#include "PGSServiceHelpers.h"
 
 #include <ws2tcpip.h>
 #include <winhttp.h>
@@ -8,6 +9,7 @@
 #include <objbase.h>
 #include <initguid.h>
 #include <shobjidl.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <chrono>
@@ -1125,6 +1127,96 @@ bool PGS::restartAppGuard(const GuardInfo &info, int restartIndex, GuardInfo &ne
     Logger::warning("PGS: winapp restart activated pid=" + std::to_string(activatedPid) +
                     ", aumid=" + info.aumid);
     return true;
+}
+
+
+std::string PGS::handleFamiliesCommand()
+{
+    // Task-manager UI support: enumerate the live process family of each guard
+    // through its Job Object handle. One system-wide process snapshot is shared
+    // across all guards; membership is decided with IsProcessInJob, so no
+    // handle enumeration APIs beyond the snapshot are needed. The guards mutex
+    // is held for the whole scan (one 1 Hz client makes this contention
+    // negligible) so job handles cannot be closed underneath us.
+    std::lock_guard<std::mutex> lock(m_guardsMutex);
+
+    struct ProcEntry
+    {
+        DWORD pid;
+        std::wstring name;
+    };
+    std::vector<ProcEntry> procs;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE)
+    {
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        if (Process32FirstW(snapshot, &pe))
+        {
+            do
+            {
+                procs.push_back({pe.th32ProcessID, pe.szExeFile});
+            } while (Process32NextW(snapshot, &pe));
+        }
+        CloseHandle(snapshot);
+    }
+
+    std::size_t familyCount = 0;
+    std::ostringstream rows;
+    for (const auto &entry : m_guards)
+    {
+        const GuardInfo &guard = entry.second;
+        if (!guard.handle || WaitForSingleObject(guard.handle, 0) != WAIT_TIMEOUT)
+        {
+            continue;
+        }
+
+        std::vector<std::pair<DWORD, std::string>> members;
+        for (const ProcEntry &proc : procs)
+        {
+            HANDLE procHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, proc.pid);
+            if (!procHandle)
+            {
+                continue;
+            }
+            BOOL inJob = FALSE;
+            const bool membershipKnown = guard.jobHandle
+                                             ? (IsProcessInJob(procHandle, guard.jobHandle, &inJob) == TRUE)
+                                             : (proc.pid == guard.pid);
+            CloseHandle(procHandle);
+            if (membershipKnown && inJob)
+            {
+                members.emplace_back(proc.pid, util::wideToUtf8(proc.name));
+            }
+        }
+        if (members.empty())
+        {
+            // Job enumeration failed or the family already exited: still report
+            // the root pid so the UI can render the guard row.
+            members.emplace_back(guard.pid, std::string());
+        }
+
+        std::ostringstream json;
+        json << "[";
+        for (std::size_t i = 0; i < members.size(); ++i)
+        {
+            if (i != 0) json << ",";
+            json << "{\"pid\":" << members[i].first
+                 << ",\"name\":\"" << service_util::jsonEscape(members[i].second) << "\"}";
+        }
+        json << "]";
+
+        rows << "\nFAMILY guard_id=" << guard.guardId
+             << ";pid=" << guard.pid
+             << ";group=" << (guard.groupName.empty() ? "-" : guard.groupName)
+             << ";count=" << members.size()
+             << ";members_b64=" << base64Encode(json.str());
+        ++familyCount;
+    }
+
+    std::ostringstream oss;
+    oss << "OK count=" << familyCount << rows.str();
+    return oss.str();
 }
 
 
